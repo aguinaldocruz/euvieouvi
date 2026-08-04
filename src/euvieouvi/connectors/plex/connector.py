@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from euvieouvi.connectors.dtos import (
     ConnectionInfo,
     ExternalLibrary,
@@ -23,6 +25,8 @@ from euvieouvi.connectors.plex.mapper import (
     map_watch_event,
     parse_container,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class PlexConnector:
@@ -76,16 +80,37 @@ class PlexConnector:
         page: PageRequest,
     ) -> Page[ExternalWatchEvent]:
         del checkpoint  # A full defensive scan remains correct until a reliable filter is adopted.
-        params = self._page_params(page)
-        params["librarySectionID"] = library.external_id
-        params["sort"] = "viewedAt:asc"
-        payload = self._client.get("/status/sessions/history/all", params=params)
-        container, items = parse_container(payload)
-        mapped = tuple(map_watch_event(item, library.external_id) for item in items)
-        result = self._page(container, mapped, page)
+        current_start = page.start
+        while True:
+            current_page = PageRequest(start=current_start, size=page.size)
+            params = self._page_params(current_page)
+            params["librarySectionID"] = library.external_id
+            params["sort"] = "viewedAt:asc"
+            payload = self._client.get("/status/sessions/history/all", params=params)
+            container, items = parse_container(payload)
+            identified = tuple(item for item in items if _has_text(item.get("ratingKey")))
+            skipped = len(items) - len(identified)
+            if skipped:
+                _LOGGER.warning(
+                    "Plex history omitted media identity; skipped orphaned events "
+                    "library=%s start=%d count=%d",
+                    library.external_id,
+                    current_start,
+                    skipped,
+                )
+            mapped = tuple(map_watch_event(item, library.external_id) for item in identified)
+            result = self._page(
+                container,
+                mapped,
+                current_page,
+                consumed_size=len(items),
+            )
+            if result.items or result.next_start is None:
+                break
+            current_start = result.next_start
         self._remember_page(
             f"history:{library.external_id}",
-            page.start,
+            result.start,
             tuple(
                 item.source_event_id or f"{item.media_external_id}:{item.watched_at.isoformat()}"
                 for item in mapped
@@ -113,14 +138,21 @@ class PlexConnector:
 
     @staticmethod
     def _page[ItemT](
-        container: dict[str, object], items: tuple[ItemT, ...], request: PageRequest
+        container: dict[str, object],
+        items: tuple[ItemT, ...],
+        request: PageRequest,
+        *,
+        consumed_size: int | None = None,
     ) -> Page[ItemT]:
         reported_start = _optional_int(container.get("offset"))
         if reported_start is not None and reported_start != request.start:
             raise ConnectorPaginationError("Plex returned a page without the requested offset.")
         total_size = _optional_int(container.get("totalSize"))
         effective_size = len(items)
-        next_start = request.start + effective_size if effective_size == request.size else None
+        advance_size = effective_size if consumed_size is None else consumed_size
+        if advance_size < effective_size or advance_size > request.size:
+            raise ConnectorPaginationError("Plex returned an invalid page size.")
+        next_start = request.start + advance_size if advance_size == request.size else None
         return Page(
             items=items,
             start=request.start,
@@ -142,3 +174,9 @@ def _optional_int(value: object) -> int | None:
     if result < 0:
         raise ConnectorPaginationError("Plex returned negative pagination metadata.")
     return result
+
+
+def _has_text(value: object) -> bool:
+    return (
+        isinstance(value, (str, int)) and not isinstance(value, bool) and bool(str(value).strip())
+    )

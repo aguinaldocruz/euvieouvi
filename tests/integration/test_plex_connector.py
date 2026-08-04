@@ -119,6 +119,70 @@ def test_history_maps_only_actual_occurrence() -> None:
     assert event.view_number is None
 
 
+def test_history_skips_orphans_without_losing_raw_pagination() -> None:
+    valid = "".join(
+        f'<Video ratingKey="{index}" historyKey="/history/{index}" '
+        f'viewedAt="{1_700_000_000 + index}" type="movie" title="Movie {index}" />'
+        for index in range(178)
+    )
+    orphaned = "".join(
+        f'<Video historyKey="/history/orphan-{index}" '
+        f'viewedAt="{1_700_001_000 + index}" type="movie" title="Orphan {index}" />'
+        for index in range(22)
+    )
+    content = (
+        f'<MediaContainer offset="0" totalSize="400">{valid}{orphaned}</MediaContainer>'
+    ).encode()
+
+    def route(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=content, request=request)
+
+    page = make_connector(httpx.MockTransport(route)).get_history_page(
+        ExternalLibraryRef("1", ExternalLibraryType.MOVIE),
+        None,
+        PageRequest(size=200),
+    )
+
+    assert len(page.items) == 178
+    assert page.size == 178
+    assert page.next_start == 200
+    assert page.has_more is True
+
+
+def test_history_advances_across_a_fully_orphaned_page() -> None:
+    requested_starts: list[str] = []
+
+    def route(request: httpx.Request) -> httpx.Response:
+        start = request.url.params["X-Plex-Container-Start"]
+        requested_starts.append(start)
+        if start == "0":
+            content = (
+                b'<MediaContainer offset="0" totalSize="3">'
+                b'<Video historyKey="/history/1" viewedAt="1700000001" type="movie" />'
+                b'<Video historyKey="/history/2" viewedAt="1700000002" type="movie" />'
+                b"</MediaContainer>"
+            )
+        else:
+            content = (
+                b'<MediaContainer offset="2" totalSize="3">'
+                b'<Video ratingKey="9" historyKey="/history/3" '
+                b'viewedAt="1700000003" type="movie" title="Valid" />'
+                b"</MediaContainer>"
+            )
+        return httpx.Response(200, content=content, request=request)
+
+    page = make_connector(httpx.MockTransport(route)).get_history_page(
+        ExternalLibraryRef("1", ExternalLibraryType.MOVIE),
+        None,
+        PageRequest(size=2),
+    )
+
+    assert requested_starts == ["0", "2"]
+    assert [item.media_external_id for item in page.items] == ["9"]
+    assert page.start == 2
+    assert page.next_start is None
+
+
 def test_empty_page_and_incorrect_total_do_not_control_termination_alone() -> None:
     responses = [
         (

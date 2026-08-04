@@ -147,9 +147,14 @@ class PlexHttpClient:
                         "Plex response exceeded the configured size limit."
                     )
                 chunks.append(chunk)
+
+            decoded_headers = httpx.Headers(response.headers)
+            decoded_headers.pop("content-encoding", None)
+            decoded_headers.pop("content-length", None)
+
             return httpx.Response(
                 response.status_code,
-                headers=response.headers,
+                headers=decoded_headers,
                 content=b"".join(chunks),
                 request=response.request,
             )

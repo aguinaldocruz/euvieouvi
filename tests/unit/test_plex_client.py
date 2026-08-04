@@ -1,5 +1,6 @@
 """Plex HTTP boundary tests with no network access."""
 
+import gzip
 from collections.abc import Callable
 
 import httpx
@@ -40,6 +41,27 @@ def test_authentication_uses_header_and_never_query() -> None:
 
     payload = make_client(handler).get("/library/sections", params={"size": 10})
     assert payload.content == b"<MediaContainer />"
+
+
+def test_compressed_response_is_not_decoded_twice() -> None:
+    document = b'<MediaContainer friendlyName="Plex" machineIdentifier="server-1" />'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={
+                "Content-Encoding": "gzip",
+                "Content-Length": str(len(gzip.compress(document))),
+                "Content-Type": "application/xml",
+            },
+            content=gzip.compress(document),
+            request=request,
+        )
+
+    payload = make_client(handler).get("/")
+
+    assert payload.content == document
+    assert payload.content_type == "application/xml"
 
 
 @pytest.mark.parametrize(
