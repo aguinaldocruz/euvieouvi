@@ -28,6 +28,8 @@ class Settings:
     instance_path: Path
     gunicorn_threads: int
     timezone: str
+    database_uri: str
+    sqlite_busy_timeout_ms: int
 
     def as_flask_mapping(self) -> dict[str, Any]:
         """Return Flask configuration without leaking environment-specific names."""
@@ -40,6 +42,9 @@ class Settings:
             "SERVER_PORT": self.port,
             "GUNICORN_THREADS": self.gunicorn_threads,
             "TIMEZONE": self.timezone,
+            "SQLALCHEMY_DATABASE_URI": self.database_uri,
+            "SQLALCHEMY_TRACK_MODIFICATIONS": False,
+            "SQLITE_BUSY_TIMEOUT_MS": self.sqlite_busy_timeout_ms,
         }
 
 
@@ -89,6 +94,24 @@ def load_settings(overrides: Mapping[str, Any] | None = None) -> Settings:
         raise ConfigurationError("EUVIEOUVI_INSTANCE_PATH must not be empty.")
     instance_path = Path(raw_instance_path).expanduser().resolve()
 
+    database_uri = str(
+        values.get(
+            "DATABASE_URI",
+            os.getenv("EUVIEOUVI_DATABASE_URI", f"sqlite:///{instance_path / 'euvieouvi.db'}"),
+        )
+    ).strip()
+    if not database_uri.startswith("sqlite:///"):
+        raise ConfigurationError("EUVIEOUVI_DATABASE_URI must use SQLite in this version.")
+    sqlite_busy_timeout_ms = _as_int(
+        values.get(
+            "SQLITE_BUSY_TIMEOUT_MS",
+            os.getenv("EUVIEOUVI_SQLITE_BUSY_TIMEOUT_MS", "5000"),
+        ),
+        name="EUVIEOUVI_SQLITE_BUSY_TIMEOUT_MS",
+        minimum=1,
+        maximum=60000,
+    )
+
     timezone = str(
         values.get("TIMEZONE", os.getenv("EUVIEOUVI_TIMEZONE", "America/Sao_Paulo"))
     ).strip()
@@ -107,6 +130,8 @@ def load_settings(overrides: Mapping[str, Any] | None = None) -> Settings:
         instance_path=instance_path,
         gunicorn_threads=gunicorn_threads,
         timezone=timezone,
+        database_uri=database_uri,
+        sqlite_busy_timeout_ms=sqlite_busy_timeout_ms,
     )
 
 

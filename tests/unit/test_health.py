@@ -13,15 +13,15 @@ def test_liveness_has_no_dependency_details(app: Flask) -> None:
     assert response.get_json() == {"status": "alive"}
 
 
-def test_readiness_reports_persistence_and_pending_database(app: Flask) -> None:
+def test_readiness_reports_current_database(app: Flask) -> None:
     response = app.test_client().get("/health/ready")
 
     assert response.status_code == 200
     assert response.get_json() == {
         "status": "ready",
         "persistence": "ready",
-        "database": "pending",
-        "schema": "pending",
+        "database": "ready",
+        "schema": "current",
     }
 
 
@@ -35,3 +35,15 @@ def test_readiness_fails_when_persistence_is_unavailable(
     assert response.status_code == 503
     assert response.get_json()["status"] == "not_ready"
     assert response.get_json()["persistence"] == "unavailable"
+
+
+def test_readiness_fails_when_schema_is_outdated(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(health, "database_status", lambda: (True, False))
+
+    response = app.test_client().get("/health/ready")
+
+    assert response.status_code == 503
+    assert response.get_json()["database"] == "ready"
+    assert response.get_json()["schema"] == "outdated"

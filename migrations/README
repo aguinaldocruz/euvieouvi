@@ -1,0 +1,3 @@
+Single-database migration configuration for euvieouvi.
+
+Production schema changes are applied with `flask --app euvieouvi.wsgi db upgrade`.

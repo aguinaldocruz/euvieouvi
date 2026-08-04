@@ -20,6 +20,8 @@ def test_bootstrap_validates_instance_path(tmp_path: Path, monkeypatch: pytest.M
         instance_path=tmp_path / "instance",
         gunicorn_threads=4,
         timezone="America/Sao_Paulo",
+        database_uri=f"sqlite:///{tmp_path / 'instance' / 'euvieouvi.db'}",
+        sqlite_busy_timeout_ms=5000,
     )
     prepare = MagicMock()
     monkeypatch.setattr(bootstrap, "load_settings", MagicMock(return_value=settings))

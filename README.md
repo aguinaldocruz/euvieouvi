@@ -5,7 +5,7 @@ séries assistidos. O Plex será o primeiro conector.
 
 ## Estado atual
 
-Fase 2 — Infraestrutura executável.
+Fase 3 — Banco e repositories.
 
 Esta fase contém somente:
 
@@ -27,7 +27,17 @@ Também estão disponíveis:
 - liveness e readiness iniciais;
 - validação de configuração pelo entrypoint.
 
-Banco, Plex, sincronização, API funcional e interface continuam reservados às fases
+A camada persistente agora inclui:
+
+- esquema SQLite aprovado e migração Alembic inicial;
+- SQLAlchemy 2.x com repositories e unidade de trabalho explícita;
+- foreign keys, WAL, timeout de concorrência e índices essenciais;
+- distinção entre itens, eventos assistidos e estado agregado;
+- deduplicação persistente de eventos;
+- verificação da revisão do esquema no readiness;
+- backup e restauração consistentes pela API oficial do SQLite.
+
+Plex, motor de sincronização, API funcional e interface continuam reservados às fases
 aprovadas correspondentes.
 
 ## Requisitos
@@ -93,6 +103,27 @@ somente os endpoints operacionais estão disponíveis:
 - `GET /health/ready`
 
 O volume nomeado `euvieouvi_data` é mantido quando o contêiner é recriado.
+
+## Migrações e backup
+
+O entrypoint aplica automaticamente as migrações antes de iniciar o Gunicorn. Para
+aplicá-las manualmente no ambiente de desenvolvimento:
+
+```bash
+flask --app euvieouvi.wsgi db upgrade
+```
+
+Crie um backup consistente com o serviço em execução:
+
+```bash
+python -m euvieouvi.database.backup backup instance/euvieouvi.db backups/euvieouvi.db
+```
+
+Restaure somente com o serviço parado:
+
+```bash
+python -m euvieouvi.database.backup restore backups/euvieouvi.db instance/euvieouvi.db
+```
 
 Para encerrar sem remover o volume:
 

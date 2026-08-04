@@ -19,6 +19,7 @@ WORKDIR /app
 
 COPY pyproject.toml README.md requirements.lock ./
 COPY src ./src
+COPY migrations ./migrations
 RUN python -m pip install --requirement requirements.lock \
     && python -m pip install --no-deps .
 

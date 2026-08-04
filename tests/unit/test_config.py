@@ -27,6 +27,7 @@ def test_environment_and_log_level_are_normalized(tmp_path: Path) -> None:
             "GUNICORN_THREADS": "6",
             "INSTANCE_PATH": tmp_path / "data",
             "TIMEZONE": "America/Sao_Paulo",
+            "SQLITE_BUSY_TIMEOUT_MS": "9000",
         }
     )
 
@@ -38,6 +39,8 @@ def test_environment_and_log_level_are_normalized(tmp_path: Path) -> None:
     assert settings.gunicorn_threads == 6
     assert settings.instance_path == (tmp_path / "data").resolve()
     assert settings.timezone == "America/Sao_Paulo"
+    assert settings.database_uri == f"sqlite:///{tmp_path / 'data' / 'euvieouvi.db'}"
+    assert settings.sqlite_busy_timeout_ms == 9000
 
 
 @pytest.mark.parametrize("value", ["invalid", 1, None])
@@ -60,6 +63,7 @@ def test_invalid_testing_value_is_rejected(value: object) -> None:
         ("PORT", "not-a-number", "EUVIEOUVI_PORT"),
         ("GUNICORN_THREADS", 0, "EUVIEOUVI_GUNICORN_THREADS"),
         ("GUNICORN_THREADS", True, "EUVIEOUVI_GUNICORN_THREADS"),
+        ("SQLITE_BUSY_TIMEOUT_MS", 0, "EUVIEOUVI_SQLITE_BUSY_TIMEOUT_MS"),
     ],
 )
 def test_invalid_integer_settings_are_rejected(field: str, value: object, message: str) -> None:
@@ -92,5 +96,16 @@ def test_invalid_timezone_is_rejected() -> None:
                 "ENVIRONMENT": "testing",
                 "SECRET_KEY": "test-secret",
                 "TIMEZONE": "Not/A-Timezone",
+            }
+        )
+
+
+def test_non_sqlite_database_is_rejected() -> None:
+    with pytest.raises(ConfigurationError, match="must use SQLite"):
+        load_settings(
+            {
+                "ENVIRONMENT": "testing",
+                "SECRET_KEY": "test-secret",
+                "DATABASE_URI": "postgresql://example/test",
             }
         )
