@@ -202,3 +202,6 @@ A documentação aprovada está em [`docs/architecture`](docs/architecture). O �
 
 O guia prático de instalação, atualização, backup, restauração e validação está em
 [`docs/operations.md`](docs/operations.md).
+
+### Commit Inicial para Github
+
