@@ -5,7 +5,7 @@ séries assistidos. O Plex será o primeiro conector.
 
 ## Estado atual
 
-Fase 5 — Motor de sincronização.
+Fase 6 — API REST.
 
 Esta fase contém somente:
 
@@ -65,8 +65,20 @@ O motor de sincronização agora inclui:
 - descoberta transacional que preserva a seleção das bibliotecas;
 - regressão da biblioteca Futurama coberta por teste: 161 episódios e 144 assistidos.
 
-A API funcional, a interface e o agendamento continuam reservados às próximas fases
-aprovadas. A Fase 5 não executa sincronizações automaticamente.
+A API REST agora inclui:
+
+- contrato OpenAPI 3.1 versionado em `openapi.yaml`;
+- endpoints `/api/v1` para fontes Plex e bibliotecas;
+- teste de conexão e descoberta segura de bibliotecas;
+- início assíncrono, acompanhamento e cancelamento de sincronizações;
+- consultas paginadas de catálogo, eventos e estado agregado;
+- resumo operacional para o dashboard;
+- cursores opacos, validação estrita e erros JSON uniformes;
+- segredo Plex somente em escrita, nunca devolvido nas respostas;
+- CORS desabilitado e limite conservador de corpo por padrão.
+
+A interface e o agendamento continuam reservados às próximas fases aprovadas. A API não
+possui autenticação interna e deve permanecer em rede confiável ou atrás de proxy reverso.
 
 ## Requisitos
 

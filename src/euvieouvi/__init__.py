@@ -5,6 +5,7 @@ from typing import Any
 
 from flask import Flask
 
+from euvieouvi.api import register_api
 from euvieouvi.config import load_settings
 from euvieouvi.errors import register_error_handlers
 from euvieouvi.extensions import init_extensions
@@ -28,12 +29,15 @@ def create_app(config_overrides: Mapping[str, Any] | None = None) -> Flask:
         instance_relative_config=True,
     )
     app.config.from_mapping(settings.as_flask_mapping())
+    if app.config.get("MAX_CONTENT_LENGTH") is None:
+        app.config["MAX_CONTENT_LENGTH"] = 64 * 1024
 
     configure_logging(settings.log_level)
     register_request_id(app)
     init_extensions(app)
     register_error_handlers(app)
     register_health_routes(app)
+    register_api(app)
 
     app.logger.info(
         "application initialized",

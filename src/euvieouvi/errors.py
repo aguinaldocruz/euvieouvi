@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from flask import Flask, Response, g, jsonify
+from werkzeug.exceptions import HTTPException
 
 
 @dataclass(slots=True)
@@ -26,7 +27,7 @@ def register_error_handlers(app: Flask) -> None:
 
     @app.errorhandler(AppError)
     def handle_app_error(error: AppError) -> tuple[Response, int]:
-        payload = {
+        payload: dict[str, Any] = {
             "error": {
                 "code": error.code,
                 "message": error.message,
@@ -36,3 +37,23 @@ def register_error_handlers(app: Flask) -> None:
             }
         }
         return jsonify(payload), error.status
+
+    @app.errorhandler(HTTPException)
+    def handle_http_error(error: HTTPException) -> tuple[Response, int]:
+        status = error.code or 500
+        codes = {404: "not_found", 405: "method_not_allowed", 413: "request_too_large"}
+        messages = {
+            404: "The requested resource was not found.",
+            405: "The method is not allowed for this resource.",
+            413: "The request body is too large.",
+        }
+        payload: dict[str, Any] = {
+            "error": {
+                "code": codes.get(status, "http_error"),
+                "message": messages.get(status, "The HTTP request could not be processed."),
+                "status": status,
+                "request_id": getattr(g, "request_id", None),
+                "details": [],
+            }
+        }
+        return jsonify(payload), status

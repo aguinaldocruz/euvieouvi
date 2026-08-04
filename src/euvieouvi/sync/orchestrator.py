@@ -54,6 +54,7 @@ class SyncOrchestrator:
         *,
         page_size: int = 200,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        on_acquired: Callable[[int], None] | None = None,
     ) -> None:
         if not 1 <= page_size <= 1000:
             raise ValueError("page_size must be from 1 to 1000")
@@ -61,6 +62,7 @@ class SyncOrchestrator:
         self._connector = connector
         self._page_size = page_size
         self._clock = clock
+        self._on_acquired = on_acquired
 
     def run(
         self,
@@ -70,7 +72,46 @@ class SyncOrchestrator:
         cancellation: CancellationToken | None = None,
     ) -> SyncRunResult:
         token = cancellation or CancellationToken()
-        run_id, library_ids = self._acquire(source_id, trigger)
+        run_id, library_ids = self._acquire(source_id, trigger, queued=False)
+        if self._on_acquired is not None:
+            self._on_acquired(run_id)
+        return self._execute(run_id, source_id, library_ids, token)
+
+    def enqueue(self, source_id: int, *, trigger: SyncTrigger = SyncTrigger.API) -> int:
+        """Persist a queued run and its immutable library snapshot."""
+        run_id, _ = self._acquire(source_id, trigger, queued=True)
+        return run_id
+
+    def run_queued(
+        self, run_id: int, *, cancellation: CancellationToken | None = None
+    ) -> SyncRunResult:
+        """Claim and execute a previously queued run."""
+        session = self._session_factory()
+        try:
+            work = UnitOfWork(session)
+            run = work.sync_runs.get(run_id)
+            if run is None or run.status is not SyncStatus.QUEUED:
+                raise SyncSourceUnavailableError("Queued synchronization is missing or invalid.")
+            now = self._clock()
+            run.status = SyncStatus.RUNNING
+            run.started_at = now
+            run.heartbeat_at = now
+            libraries = tuple(item.library_id for item in work.sync_run_libraries.for_run(run_id))
+            source_id = run.source_id
+            session.commit()
+        finally:
+            session.close()
+        if self._on_acquired is not None:
+            self._on_acquired(run_id)
+        return self._execute(run_id, source_id, libraries, cancellation or CancellationToken())
+
+    def _execute(
+        self,
+        run_id: int,
+        source_id: int,
+        library_ids: tuple[int, ...],
+        token: CancellationToken,
+    ) -> SyncRunResult:
         try:
             for library_id in library_ids:
                 token.raise_if_cancelled()
@@ -89,7 +130,9 @@ class SyncOrchestrator:
         self._finish_run(run_id, SyncStatus.SUCCEEDED, "Synchronization completed.")
         return SyncRunResult(run_id, SyncStatus.SUCCEEDED)
 
-    def _acquire(self, source_id: int, trigger: SyncTrigger) -> tuple[int, tuple[int, ...]]:
+    def _acquire(
+        self, source_id: int, trigger: SyncTrigger, *, queued: bool
+    ) -> tuple[int, tuple[int, ...]]:
         session = self._session_factory()
         try:
             session.connection().exec_driver_sql("BEGIN IMMEDIATE")
@@ -105,9 +148,9 @@ class SyncOrchestrator:
             run = SyncRun(
                 source_id=source_id,
                 trigger=trigger,
-                status=SyncStatus.RUNNING,
-                started_at=now,
-                heartbeat_at=now,
+                status=SyncStatus.QUEUED if queued else SyncStatus.RUNNING,
+                started_at=None if queued else now,
+                heartbeat_at=None if queued else now,
             )
             work.sync_runs.add(run)
             session.flush()

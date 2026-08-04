@@ -155,7 +155,7 @@ class SyncRunRepository(Repository[SyncRun]):
 
     def running(self) -> Sequence[SyncRun]:
         return self.session.scalars(
-            select(SyncRun).where(SyncRun.status == "running").order_by(SyncRun.id)
+            select(SyncRun).where(SyncRun.status.in_(["queued", "running"])).order_by(SyncRun.id)
         ).all()
 
 

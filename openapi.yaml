@@ -1,0 +1,95 @@
+openapi: 3.1.0
+info:
+  title: euvieouvi API
+  version: 1.0.0
+  description: API local do euvieouvi v2. Não exponha diretamente à internet.
+  license: {name: Proprietary}
+security: []
+servers:
+  - url: /api/v1
+paths:
+  /sources:
+    get: {summary: Listar fontes, operationId: listSources, responses: {'200': {$ref: '#/components/responses/Ok'}}}
+    post:
+      summary: Criar fonte
+      operationId: createSource
+      requestBody: {$ref: '#/components/requestBodies/JsonBody'}
+      responses: {'201': {$ref: '#/components/responses/Ok'}, '422': {$ref: '#/components/responses/Error'}}
+  /sources/{source_id}:
+    parameters: [{$ref: '#/components/parameters/SourceId'}]
+    get: {summary: Consultar fonte, operationId: getSource, responses: {'200': {$ref: '#/components/responses/Ok'}, '404': {$ref: '#/components/responses/Error'}}}
+    patch: {summary: Alterar fonte, operationId: updateSource, requestBody: {$ref: '#/components/requestBodies/JsonBody'}, responses: {'200': {$ref: '#/components/responses/Ok'}}}
+  /sources/{source_id}/connection-test:
+    parameters: [{$ref: '#/components/parameters/SourceId'}]
+    post: {summary: Testar conexão, operationId: testSourceConnection, responses: {'200': {$ref: '#/components/responses/Ok'}, '502': {$ref: '#/components/responses/Error'}}}
+  /sources/{source_id}/library-discoveries:
+    parameters: [{$ref: '#/components/parameters/SourceId'}]
+    post: {summary: Descobrir bibliotecas, operationId: discoverLibraries, responses: {'200': {$ref: '#/components/responses/Ok'}}}
+  /libraries:
+    get: {summary: Listar bibliotecas, operationId: listLibraries, responses: {'200': {$ref: '#/components/responses/Ok'}}}
+  /libraries/{library_id}:
+    parameters: [{$ref: '#/components/parameters/LibraryId'}]
+    get: {summary: Consultar biblioteca, operationId: getLibrary, responses: {'200': {$ref: '#/components/responses/Ok'}}}
+    patch: {summary: Alterar biblioteca, operationId: updateLibrary, requestBody: {$ref: '#/components/requestBodies/JsonBody'}, responses: {'200': {$ref: '#/components/responses/Ok'}}}
+  /sync-runs:
+    get: {summary: Listar sincronizações, operationId: listSyncRuns, responses: {'200': {$ref: '#/components/responses/Paged'}}}
+    post: {summary: Iniciar sincronização, operationId: createSyncRun, requestBody: {$ref: '#/components/requestBodies/JsonBody'}, responses: {'202': {$ref: '#/components/responses/Ok'}, '409': {$ref: '#/components/responses/Error'}}}
+  /sync-runs/active:
+    get: {summary: Consultar sincronização ativa, operationId: getActiveSyncRun, responses: {'200': {$ref: '#/components/responses/Ok'}, '204': {description: No active run}}}
+  /sync-runs/{sync_run_id}:
+    parameters: [{$ref: '#/components/parameters/SyncRunId'}]
+    get: {summary: Consultar sincronização, operationId: getSyncRun, responses: {'200': {$ref: '#/components/responses/Ok'}}}
+  /sync-runs/{sync_run_id}/cancellation:
+    parameters: [{$ref: '#/components/parameters/SyncRunId'}]
+    post: {summary: Cancelar sincronização, operationId: cancelSyncRun, responses: {'202': {$ref: '#/components/responses/Ok'}, '409': {$ref: '#/components/responses/Error'}}}
+  /media:
+    get: {summary: Listar mídia, operationId: listMedia, responses: {'200': {$ref: '#/components/responses/Paged'}}}
+  /media/{media_id}:
+    parameters: [{$ref: '#/components/parameters/MediaId'}]
+    get: {summary: Consultar mídia, operationId: getMedia, responses: {'200': {$ref: '#/components/responses/Ok'}}}
+  /watch-events:
+    get: {summary: Listar eventos assistidos, operationId: listWatchEvents, responses: {'200': {$ref: '#/components/responses/Paged'}}}
+  /watch-states:
+    get: {summary: Listar estados assistidos, operationId: listWatchStates, responses: {'200': {$ref: '#/components/responses/Paged'}}}
+  /dashboard/summary:
+    get: {summary: Consultar resumo, operationId: getDashboardSummary, responses: {'200': {$ref: '#/components/responses/Ok'}}}
+components:
+  parameters:
+    SourceId: {name: source_id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    LibraryId: {name: library_id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    SyncRunId: {name: sync_run_id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    MediaId: {name: media_id, in: path, required: true, schema: {type: integer, minimum: 1}}
+  requestBodies:
+    JsonBody:
+      required: true
+      content: {application/json: {schema: {type: object}}}
+  responses:
+    Ok: {description: Success, content: {application/json: {schema: {type: object}}}}
+    Paged: {description: Paginated success, content: {application/json: {schema: {$ref: '#/components/schemas/Paged'}}}}
+    Error: {description: Safe error, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    Paged:
+      type: object
+      required: [items, pagination]
+      properties:
+        items: {type: array, items: {type: object}}
+        pagination:
+          type: object
+          required: [limit, next_cursor, has_more]
+          properties:
+            limit: {type: integer, minimum: 1, maximum: 200}
+            next_cursor: {type: [string, 'null']}
+            has_more: {type: boolean}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, status, request_id, details]
+          properties:
+            code: {type: string}
+            message: {type: string}
+            status: {type: integer}
+            request_id: {type: string}
+            details: {type: array, items: {type: object}}
