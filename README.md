@@ -5,7 +5,7 @@ séries assistidos. O Plex será o primeiro conector.
 
 ## Estado atual
 
-Fase 7 — Interface Web.
+Fase 8 — Integração e endurecimento.
 
 Esta fase contém somente:
 
@@ -92,6 +92,17 @@ A interface web agora inclui:
 
 O agendamento continua reservado às próximas fases aprovadas. A aplicação não possui
 autenticação interna e deve permanecer em rede confiável ou atrás de proxy reverso.
+
+O endurecimento da primeira versão agora inclui:
+
+- redaction defensiva de token, segredo e Authorization nos logs;
+- testes integrados de interrupção, reconciliação, backup e restauração;
+- recriação da aplicação preservando o banco persistente;
+- teste representativo com 3.000 filmes e paginação;
+- teste opt-in com biblioteca Plex real, sem credencial versionada;
+- auditoria reproduzível de dependências;
+- script de smoke test para contêiner, usuário não root, volume e healthchecks;
+- guia operacional e relatório explícito dos portões externos.
 
 ## Requisitos
 
@@ -188,3 +199,6 @@ docker compose down
 
 A documentação aprovada está em [`docs/architecture`](docs/architecture). O índice é
 [`euvieouvi-v2-indice-documentacao.md`](docs/architecture/euvieouvi-v2-indice-documentacao.md).
+
+O guia prático de instalação, atualização, backup, restauração e validação está em
+[`docs/operations.md`](docs/operations.md).
