@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from euvieouvi.domain.errors import ConfigurationError
 
@@ -21,6 +23,11 @@ class Settings:
     secret_key: str
     log_level: str
     testing: bool
+    host: str
+    port: int
+    instance_path: Path
+    gunicorn_threads: int
+    timezone: str
 
     def as_flask_mapping(self) -> dict[str, Any]:
         """Return Flask configuration without leaking environment-specific names."""
@@ -29,6 +36,10 @@ class Settings:
             "SECRET_KEY": self.secret_key,
             "LOG_LEVEL": self.log_level,
             "TESTING": self.testing,
+            "SERVER_HOST": self.host,
+            "SERVER_PORT": self.port,
+            "GUNICORN_THREADS": self.gunicorn_threads,
+            "TIMEZONE": self.timezone,
         }
 
 
@@ -51,11 +62,51 @@ def load_settings(overrides: Mapping[str, Any] | None = None) -> Settings:
         allowed = ", ".join(sorted(_VALID_LOG_LEVELS))
         raise ConfigurationError(f"EUVIEOUVI_LOG_LEVEL must be one of: {allowed}.")
 
+    host = str(values.get("HOST", os.getenv("EUVIEOUVI_HOST", "0.0.0.0"))).strip()
+    if not host:
+        raise ConfigurationError("EUVIEOUVI_HOST must not be empty.")
+
+    port = _as_int(
+        values.get("PORT", os.getenv("EUVIEOUVI_PORT", "8000")),
+        name="EUVIEOUVI_PORT",
+        minimum=1,
+        maximum=65535,
+    )
+    gunicorn_threads = _as_int(
+        values.get("GUNICORN_THREADS", os.getenv("EUVIEOUVI_GUNICORN_THREADS", "4")),
+        name="EUVIEOUVI_GUNICORN_THREADS",
+        minimum=1,
+        maximum=32,
+    )
+
+    raw_instance_path = str(
+        values.get(
+            "INSTANCE_PATH",
+            os.getenv("EUVIEOUVI_INSTANCE_PATH", str(Path.cwd() / "instance")),
+        )
+    ).strip()
+    if not raw_instance_path:
+        raise ConfigurationError("EUVIEOUVI_INSTANCE_PATH must not be empty.")
+    instance_path = Path(raw_instance_path).expanduser().resolve()
+
+    timezone = str(
+        values.get("TIMEZONE", os.getenv("EUVIEOUVI_TIMEZONE", "America/Sao_Paulo"))
+    ).strip()
+    try:
+        ZoneInfo(timezone)
+    except (ValueError, ZoneInfoNotFoundError) as error:
+        raise ConfigurationError("EUVIEOUVI_TIMEZONE must be a valid IANA timezone.") from error
+
     return Settings(
         environment=environment,
         secret_key=secret_key,
         log_level=log_level,
         testing=testing,
+        host=host,
+        port=port,
+        instance_path=instance_path,
+        gunicorn_threads=gunicorn_threads,
+        timezone=timezone,
     )
 
 
@@ -69,3 +120,17 @@ def _as_bool(value: Any, *, name: str) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     raise ConfigurationError(f"{name} must be a boolean value.")
+
+
+def _as_int(value: Any, *, name: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise ConfigurationError(f"{name} must be an integer from {minimum} to {maximum}.")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigurationError(
+            f"{name} must be an integer from {minimum} to {maximum}."
+        ) from error
+    if not minimum <= parsed <= maximum:
+        raise ConfigurationError(f"{name} must be an integer from {minimum} to {maximum}.")
+    return parsed

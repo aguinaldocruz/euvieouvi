@@ -5,7 +5,7 @@ séries assistidos. O Plex será o primeiro conector.
 
 ## Estado atual
 
-Fase 1 — Fundação do projeto.
+Fase 2 — Infraestrutura executável.
 
 Esta fase contém somente:
 
@@ -17,13 +17,24 @@ Esta fase contém somente:
 - logging e request ID;
 - testes e ferramentas de qualidade.
 
-Banco, Plex, sincronização, API funcional e interface serão implementados somente nas
-fases aprovadas correspondentes.
+Também estão disponíveis:
+
+- imagem baseada em Python 3.12 slim;
+- execução sem root;
+- Gunicorn com um worker `gthread`;
+- Compose com volume nomeado;
+- filesystem do contêiner somente leitura, exceto volume e `/tmp`;
+- liveness e readiness iniciais;
+- validação de configuração pelo entrypoint.
+
+Banco, Plex, sincronização, API funcional e interface continuam reservados às fases
+aprovadas correspondentes.
 
 ## Requisitos
 
 - Python 3.12 ou superior compatível;
-- Git.
+- Git;
+- Docker Engine com Docker Compose v2 para a execução em contêiner.
 
 ## Ambiente de desenvolvimento
 
@@ -59,8 +70,37 @@ mypy src tests
 pytest
 ```
 
+## Docker Compose
+
+Crie a configuração local:
+
+```bash
+cp .env.example .env
+```
+
+Substitua `EUVIEOUVI_SECRET_KEY` por um valor longo e aleatório e execute:
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f euvieouvi
+```
+
+A interface HTTP será publicada por padrão em `http://localhost:8000`. Nesta fase,
+somente os endpoints operacionais estão disponíveis:
+
+- `GET /health/live`
+- `GET /health/ready`
+
+O volume nomeado `euvieouvi_data` é mantido quando o contêiner é recriado.
+
+Para encerrar sem remover o volume:
+
+```bash
+docker compose down
+```
+
 ## Documentação
 
 A documentação aprovada está em [`docs/architecture`](docs/architecture). O índice é
 [`euvieouvi-v2-indice-documentacao.md`](docs/architecture/euvieouvi-v2-indice-documentacao.md).
-
