@@ -1,0 +1,25 @@
+{
+  "MediaContainer": {
+    "size": 1,
+    "totalSize": 1,
+    "offset": 0,
+    "Metadata": [
+      {
+        "ratingKey": "9001",
+        "key": "/library/metadata/9001",
+        "librarySectionID": "2",
+        "type": "episode",
+        "title": "Space Pilot 3000",
+        "grandparentRatingKey": "7000",
+        "grandparentTitle": "Futurama",
+        "parentRatingKey": "8000",
+        "parentIndex": 1,
+        "index": 1,
+        "duration": 1320000,
+        "viewCount": 1,
+        "lastViewedAt": 1785800200,
+        "Guid": [{"id": "tvdb://131081"}]
+      }
+    ]
+  }
+}

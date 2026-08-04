@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="3">
+  <Directory key="1" type="movie" title="Filmes" updatedAt="1785859200" />
+  <Directory key="2" type="show" title="Seriados" updatedAt="1785859300" />
+  <Directory key="3" type="artist" title="Música" updatedAt="1785859400" />
+</MediaContainer>

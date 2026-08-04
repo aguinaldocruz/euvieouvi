@@ -5,7 +5,7 @@ séries assistidos. O Plex será o primeiro conector.
 
 ## Estado atual
 
-Fase 3 — Banco e repositories.
+Fase 4 — Contratos e connector Plex.
 
 Esta fase contém somente:
 
@@ -37,8 +37,21 @@ A camada persistente agora inclui:
 - verificação da revisão do esquema no readiness;
 - backup e restauração consistentes pela API oficial do SQLite.
 
-Plex, motor de sincronização, API funcional e interface continuam reservados às fases
-aprovadas correspondentes.
+O connector Plex agora inclui:
+
+- DTOs neutros e imutáveis, sem dependência do banco;
+- interface `MediaConnector` tipada;
+- autenticação por cabeçalho, sem token em URL ou log;
+- timeouts, retries limitados e erros classificados;
+- redirecionamentos limitados à mesma origem configurada;
+- descoberta explícita de bibliotecas suportadas e rejeitadas;
+- paginação defensiva de filmes, episódios e histórico real;
+- leitura encapsulada de respostas XML e JSON;
+- mapeamento de filmes, hierarquia de episódios, identificadores e estado agregado;
+- fixtures sanitizadas e testes de contrato sem acesso à rede.
+
+O motor de sincronização, persistência dos dados coletados, API funcional e interface
+continuam reservados às fases aprovadas correspondentes.
 
 ## Requisitos
 
