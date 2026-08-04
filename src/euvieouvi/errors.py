@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from flask import Flask, Response, g, jsonify
+from flask import Flask, Response, g, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
 
@@ -41,6 +41,9 @@ def register_error_handlers(app: Flask) -> None:
     @app.errorhandler(HTTPException)
     def handle_http_error(error: HTTPException) -> tuple[Response, int]:
         status = error.code or 500
+        if not request.path.startswith(("/api/", "/health/")):
+            template = "errors/404.html" if status == 404 else "errors/error.html"
+            return render_template(template, status=status), status  # type: ignore[return-value]
         codes = {404: "not_found", 405: "method_not_allowed", 413: "request_too_large"}
         messages = {
             404: "The requested resource was not found.",

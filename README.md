@@ -5,7 +5,7 @@ séries assistidos. O Plex será o primeiro conector.
 
 ## Estado atual
 
-Fase 6 — API REST.
+Fase 7 — Interface Web.
 
 Esta fase contém somente:
 
@@ -77,8 +77,21 @@ A API REST agora inclui:
 - segredo Plex somente em escrita, nunca devolvido nas respostas;
 - CORS desabilitado e limite conservador de corpo por padrão.
 
-A interface e o agendamento continuam reservados às próximas fases aprovadas. A API não
-possui autenticação interna e deve permanecer em rede confiável ou atrás de proxy reverso.
+A interface web agora inclui:
+
+- páginas Jinja responsivas em português do Brasil;
+- Bootstrap e HTMX locais, com nomes de assets baseados em hash;
+- fluxo de primeiro acesso e configuração segura do Plex;
+- descoberta e seleção de bibliotecas com fallback tradicional;
+- dashboard, atividade recente e sincronização em segundo plano;
+- polling HTMX somente enquanto houver execução ativa;
+- histórico filtrável, paginação e detalhes de filmes, séries, temporadas e episódios;
+- distinção visual entre eventos reais e estado assistido agregado;
+- proteção CSRF em todos os formulários de escrita;
+- cabeçalhos de segurança, navegação por teclado e layout móvel.
+
+O agendamento continua reservado às próximas fases aprovadas. A aplicação não possui
+autenticação interna e deve permanecer em rede confiável ou atrás de proxy reverso.
 
 ## Requisitos
 
@@ -136,8 +149,8 @@ docker compose ps
 docker compose logs -f euvieouvi
 ```
 
-A interface HTTP será publicada por padrão em `http://localhost:8000`. Nesta fase,
-somente os endpoints operacionais estão disponíveis:
+A interface HTTP será publicada por padrão em `http://localhost:8000`. A interface web
+estará disponível em `/` e os endpoints operacionais permanecem disponíveis:
 
 - `GET /health/live`
 - `GET /health/ready`

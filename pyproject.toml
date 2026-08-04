@@ -32,6 +32,9 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+euvieouvi = ["templates/**/*.html", "static/**/*"]
+
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers --cov=euvieouvi --cov-report=term-missing"
 testpaths = ["tests"]

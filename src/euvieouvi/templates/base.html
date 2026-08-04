@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>{% block title %}euvieouvi{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap.d85327d9.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.1b2baac5.css') }}">
+</head>
+<body>
+<a class="skip-link btn btn-light" href="#conteudo">Pular para o conteúdo</a>
+<nav class="navbar navbar-expand-lg bg-white border-bottom" aria-label="Navegação principal">
+  <div class="container page-shell">
+    <a class="navbar-brand text-primary" href="{{ url_for('web.dashboard') }}">euvieouvi</a>
+    {% if active_sync %}<a class="small text-decoration-none me-3" href="{{ url_for('web.sync_detail', run_id=active_sync.id) }}"><span class="status-dot status-{{ active_sync.status.value }}"></span>Sincronizando</a>{% endif %}
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMain" aria-controls="navMain" aria-expanded="false" aria-label="Abrir navegação"><span class="navbar-toggler-icon"></span></button>
+    <div class="collapse navbar-collapse" id="navMain"><ul class="navbar-nav ms-auto">
+      <li class="nav-item"><a class="nav-link" href="{{ url_for('web.dashboard') }}">Início</a></li>
+      <li class="nav-item"><a class="nav-link" href="{{ url_for('web.history') }}">Histórico</a></li>
+      <li class="nav-item"><a class="nav-link" href="{{ url_for('web.sync_list') }}">Sincronizações</a></li>
+      <li class="nav-item"><a class="nav-link" href="{{ url_for('web.libraries') }}">Bibliotecas</a></li>
+      <li class="nav-item"><a class="nav-link" href="{{ url_for('web.settings_plex') }}">Configurações</a></li>
+    </ul></div>
+  </div>
+</nav>
+<main id="conteudo" class="container page-shell py-4" tabindex="-1">
+  <div aria-live="polite">{% for category,message in get_flashed_messages(with_categories=true) %}<div class="alert alert-{{ category }}" role="status">{{ message }}</div>{% endfor %}</div>
+  {% block content %}{% endblock %}
+</main>
+<footer class="container page-shell border-top py-3 mt-4 d-flex justify-content-between small"><span>euvieouvi {{ app_version }}</span><a href="{{ url_for('web.about') }}">Sobre esta instalação</a></footer>
+<script src="{{ url_for('static', filename='vendor/bootstrap.bundle.e4fd4918.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/htmx.22283ef6.min.js') }}"></script>
+<script src="{{ url_for('static', filename='app.5b97f9ed.js') }}"></script>
+</body></html>
