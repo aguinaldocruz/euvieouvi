@@ -5,7 +5,7 @@ séries assistidos. O Plex será o primeiro conector.
 
 ## Estado atual
 
-Fase 4 — Contratos e connector Plex.
+Fase 5 — Motor de sincronização.
 
 Esta fase contém somente:
 
@@ -50,8 +50,23 @@ O connector Plex agora inclui:
 - mapeamento de filmes, hierarquia de episódios, identificadores e estado agregado;
 - fixtures sanitizadas e testes de contrato sem acesso à rede.
 
-O motor de sincronização, persistência dos dados coletados, API funcional e interface
-continuam reservados às fases aprovadas correspondentes.
+O motor de sincronização agora inclui:
+
+- execução local exclusiva, com bloqueio transacional global;
+- fotografia imutável das bibliotecas selecionadas em cada execução;
+- sincronização paginada de filmes, episódios e eventos reais do histórico;
+- persistência idempotente de mídia, hierarquia, identificadores e estado assistido;
+- savepoints por item e confirmação por página;
+- checkpoints opacos para retomada a partir da última página confirmada;
+- contadores, erros persistidos e estados de execução auditáveis;
+- cancelamento cooperativo nos limites de página;
+- reconciliação de execuções órfãs durante a inicialização;
+- indisponibilidade de itens ausentes somente após varredura completa bem-sucedida;
+- descoberta transacional que preserva a seleção das bibliotecas;
+- regressão da biblioteca Futurama coberta por teste: 161 episódios e 144 assistidos.
+
+A API funcional, a interface e o agendamento continuam reservados às próximas fases
+aprovadas. A Fase 5 não executa sincronizações automaticamente.
 
 ## Requisitos
 

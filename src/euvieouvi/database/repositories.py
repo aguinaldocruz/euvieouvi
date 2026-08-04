@@ -65,6 +65,22 @@ class LibraryRepository(Repository[Library]):
             )
         )
 
+    def enabled_available_for_source(self, source_id: int) -> Sequence[Library]:
+        return self.session.scalars(
+            select(Library)
+            .where(
+                Library.source_id == source_id,
+                Library.enabled.is_(True),
+                Library.available.is_(True),
+            )
+            .order_by(Library.id)
+        ).all()
+
+    def for_source(self, source_id: int) -> Sequence[Library]:
+        return self.session.scalars(
+            select(Library).where(Library.source_id == source_id).order_by(Library.id)
+        ).all()
+
 
 class MediaItemRepository(Repository[MediaItem]):
     model = MediaItem
@@ -81,9 +97,25 @@ class SourceMediaRefRepository(Repository[SourceMediaRef]):
             )
         )
 
+    def for_library(self, library_id: int) -> Sequence[SourceMediaRef]:
+        return self.session.scalars(
+            select(SourceMediaRef).where(SourceMediaRef.library_id == library_id)
+        ).all()
+
 
 class MediaIdentifierRepository(Repository[MediaIdentifier]):
     model = MediaIdentifier
+
+    def by_identity(
+        self, media_item_id: int, provider: str, external_id: str
+    ) -> MediaIdentifier | None:
+        return self.one_or_none(
+            select(MediaIdentifier).where(
+                MediaIdentifier.media_item_id == media_item_id,
+                MediaIdentifier.provider == provider,
+                MediaIdentifier.external_id == external_id,
+            )
+        )
 
 
 class WatchEventRepository(Repository[WatchEvent]):
@@ -94,6 +126,14 @@ class WatchEventRepository(Repository[WatchEvent]):
             select(WatchEvent).where(
                 WatchEvent.source_id == source_id,
                 WatchEvent.dedup_key == dedup_key,
+            )
+        )
+
+    def by_source_event_id(self, source_id: int, source_event_id: str) -> WatchEvent | None:
+        return self.one_or_none(
+            select(WatchEvent).where(
+                WatchEvent.source_id == source_id,
+                WatchEvent.source_event_id == source_event_id,
             )
         )
 
@@ -113,9 +153,29 @@ class WatchStateRepository(Repository[WatchState]):
 class SyncRunRepository(Repository[SyncRun]):
     model = SyncRun
 
+    def running(self) -> Sequence[SyncRun]:
+        return self.session.scalars(
+            select(SyncRun).where(SyncRun.status == "running").order_by(SyncRun.id)
+        ).all()
+
 
 class SyncRunLibraryRepository(Repository[SyncRunLibrary]):
     model = SyncRunLibrary
+
+    def by_run_and_library(self, sync_run_id: int, library_id: int) -> SyncRunLibrary | None:
+        return self.one_or_none(
+            select(SyncRunLibrary).where(
+                SyncRunLibrary.sync_run_id == sync_run_id,
+                SyncRunLibrary.library_id == library_id,
+            )
+        )
+
+    def for_run(self, sync_run_id: int) -> Sequence[SyncRunLibrary]:
+        return self.session.scalars(
+            select(SyncRunLibrary)
+            .where(SyncRunLibrary.sync_run_id == sync_run_id)
+            .order_by(SyncRunLibrary.id)
+        ).all()
 
 
 class SyncCheckpointRepository(Repository[SyncCheckpoint]):
@@ -129,6 +189,11 @@ class SyncCheckpointRepository(Repository[SyncCheckpoint]):
 
 class SyncErrorRepository(Repository[SyncError]):
     model = SyncError
+
+    def for_run(self, sync_run_id: int) -> Sequence[SyncError]:
+        return self.session.scalars(
+            select(SyncError).where(SyncError.sync_run_id == sync_run_id).order_by(SyncError.id)
+        ).all()
 
 
 class SettingRepository(Repository[Setting]):
