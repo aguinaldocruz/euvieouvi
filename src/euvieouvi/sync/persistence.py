@@ -8,9 +8,13 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from sqlalchemy import select
+
 from euvieouvi.connectors.dtos import ExternalMediaItem, ExternalMediaKind, ExternalWatchEvent
 from euvieouvi.database.enums import MediaKind
 from euvieouvi.database.models import (
+    Genre,
+    MediaGenre,
     MediaIdentifier,
     MediaImage,
     MediaItem,
@@ -81,9 +85,11 @@ class MediaPersistenceService:
             reference.external_updated_at = item.updated_at
             reference.last_seen_at = observed_at
             reference.available = True
+            reference.unavailable_since = None
             reference.raw_hash = signature
 
         self._sync_identifiers(media.id, item)
+        self._sync_genres(media.id, item.genres)
         self._sync_image(media.id, "poster", item.thumb_path)
         self._sync_image(media.id, "backdrop", item.art_path)
         regression = self._sync_watch_state(media.id, item, observed_at)
@@ -130,6 +136,7 @@ class MediaPersistenceService:
                 parent_id=None,
                 season_number=None,
                 image_source_path=item.artist_thumb_path,
+                genres=item.genres,
                 observed_at=observed_at,
             )
             album = self._ensure_container(
@@ -139,6 +146,7 @@ class MediaPersistenceService:
                 parent_id=artist.id,
                 season_number=None,
                 image_source_path=item.album_thumb_path,
+                genres=item.genres,
                 observed_at=observed_at,
             )
             return album.id
@@ -154,6 +162,7 @@ class MediaPersistenceService:
             parent_id=None,
             season_number=None,
             image_source_path=item.artist_thumb_path,
+            genres=item.genres,
             observed_at=observed_at,
         )
         season_external_id = item.season_external_id or (
@@ -166,6 +175,7 @@ class MediaPersistenceService:
             parent_id=show.id,
             season_number=item.season_number,
             image_source_path=item.album_thumb_path,
+            genres=item.genres,
             observed_at=observed_at,
         )
         return season.id
@@ -179,16 +189,20 @@ class MediaPersistenceService:
         parent_id: int | None,
         season_number: int | None,
         image_source_path: str | None,
+        genres: tuple[str, ...],
         observed_at: datetime,
     ) -> MediaItem:
         reference = self.work.source_media_refs.by_external_identity(self.source_id, external_id)
         if reference is not None:
             reference.last_seen_at = observed_at
             reference.available = True
+            reference.unavailable_since = None
             media = self._required_media(reference.media_item_id)
             if media.kind is not kind or media.parent_id != parent_id:
                 raise ValueError("External hierarchy identity conflicts with existing media.")
             self._sync_image(media.id, "poster", image_source_path)
+            if genres:
+                self._merge_genres(media.id, genres)
             return media
         media = MediaItem(
             kind=kind,
@@ -209,6 +223,7 @@ class MediaPersistenceService:
             )
         )
         self._sync_image(media.id, "poster", image_source_path)
+        self._merge_genres(media.id, genres)
         return media
 
     def _required_media(self, media_item_id: int) -> MediaItem:
@@ -231,6 +246,11 @@ class MediaPersistenceService:
         media.duration_ms = item.duration_ms
         media.originally_available_on = item.originally_available_on
         media.summary = item.summary
+        media.tagline = item.tagline
+        media.studio = item.studio
+        media.content_rating = item.content_rating
+        media.audience_rating = item.audience_rating
+        media.source_added_at = item.added_at
 
     def _sync_identifiers(self, media_item_id: int, item: ExternalMediaItem) -> None:
         for identifier in item.identifiers:
@@ -270,6 +290,47 @@ class MediaPersistenceService:
             image.mime_type = None
             image.cache_status = "pending"
             image.cached_at = None
+
+    def _sync_genres(self, media_item_id: int, names: tuple[str, ...]) -> None:
+        normalized = {" ".join(name.split()).casefold(): " ".join(name.split()) for name in names}
+        existing_links = self.work.session.scalars(
+            select(MediaGenre).where(MediaGenre.media_item_id == media_item_id)
+        ).all()
+        existing_genres = {
+            genre.id: genre
+            for genre in self.work.session.scalars(
+                select(Genre).where(Genre.id.in_([link.genre_id for link in existing_links]))
+            ).all()
+        }
+        existing_by_name = {
+            existing_genres[link.genre_id].normalized_name: link
+            for link in existing_links
+            if link.genre_id in existing_genres
+        }
+        for normalized_name, display_name in normalized.items():
+            if normalized_name in existing_by_name:
+                continue
+            genre = self.work.session.scalar(
+                select(Genre).where(Genre.normalized_name == normalized_name)
+            )
+            if genre is None:
+                genre = Genre(name=display_name, normalized_name=normalized_name)
+                self.work.session.add(genre)
+                self.work.session.flush()
+            self.work.session.add(MediaGenre(media_item_id=media_item_id, genre_id=genre.id))
+        for normalized_name, link in existing_by_name.items():
+            if normalized_name not in normalized:
+                self.work.session.delete(link)
+
+    def _merge_genres(self, media_item_id: int, names: tuple[str, ...]) -> None:
+        existing_names = tuple(
+            self.work.session.scalars(
+                select(Genre.name)
+                .join(MediaGenre, MediaGenre.genre_id == Genre.id)
+                .where(MediaGenre.media_item_id == media_item_id)
+            ).all()
+        )
+        self._sync_genres(media_item_id, tuple({*existing_names, *names}))
 
     def _sync_watch_state(
         self, media_item_id: int, item: ExternalMediaItem, observed_at: datetime

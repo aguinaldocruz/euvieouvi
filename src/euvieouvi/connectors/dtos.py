@@ -104,6 +104,12 @@ class ExternalMediaItem:
     duration_ms: int | None = None
     originally_available_on: date | None = None
     summary: str | None = None
+    tagline: str | None = None
+    studio: str | None = None
+    content_rating: str | None = None
+    audience_rating: float | None = None
+    genres: tuple[str, ...] = ()
+    added_at: datetime | None = None
     thumb_path: str | None = None
     art_path: str | None = None
     artist_thumb_path: str | None = None
@@ -131,6 +137,7 @@ class ExternalMediaItem:
             _require_nonnegative(getattr(self, name), name)
         _require_utc(self.updated_at, "updated_at")
         _require_utc(self.last_viewed_at, "last_viewed_at")
+        _require_utc(self.added_at, "added_at")
         if self.kind is ExternalMediaKind.EPISODE:
             _require_text(self.show_external_id, "show_external_id")
             _require_text(self.show_title, "show_title")

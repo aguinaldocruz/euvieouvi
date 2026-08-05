@@ -31,7 +31,9 @@ from euvieouvi.database.enums import (
     SyncTrigger,
 )
 from euvieouvi.database.models import (
+    Genre,
     Library,
+    MediaGenre,
     MediaImage,
     MediaItem,
     Source,
@@ -181,7 +183,11 @@ def seed_music_source() -> tuple[int, int]:
 
 
 def movie(
-    external_id: str, *, view_count: int | None = None, title: str | None = None
+    external_id: str,
+    *,
+    view_count: int | None = None,
+    title: str | None = None,
+    genres: tuple[str, ...] = (),
 ) -> ExternalMediaItem:
     return ExternalMediaItem(
         external_id=external_id,
@@ -190,6 +196,7 @@ def movie(
         title=title or f"Movie {external_id}",
         view_count=view_count,
         last_viewed_at=NOW if view_count else None,
+        genres=genres,
     )
 
 
@@ -225,6 +232,7 @@ def track(external_id: str = "track-1") -> ExternalMediaItem:
         thumb_path="/library/metadata/track-1/thumb",
         artist_thumb_path="/library/metadata/artist-1/thumb",
         album_thumb_path="/library/metadata/album-1/thumb",
+        genres=("Rock",),
         view_count=3,
         last_viewed_at=NOW,
     )
@@ -246,7 +254,13 @@ def test_initial_sync_and_repetition_are_idempotent(app: Flask) -> None:
             completed=True,
         )
         connector = FixtureConnector(
-            {"movies": (movie("m1", view_count=4), movie("m2"), movie("m3"))},
+            {
+                "movies": (
+                    movie("m1", view_count=4, genres=("Drama", "Science Fiction")),
+                    movie("m2"),
+                    movie("m3"),
+                )
+            },
             {"movies": (event,)},
         )
         engine = orchestrator(connector)
@@ -264,6 +278,8 @@ def test_initial_sync_and_repetition_are_idempotent(app: Flask) -> None:
         second_run = db.session.get(SyncRun, second.run_id)
         assert first_run is not None and first_run.items_inserted == 3
         assert second_run is not None and second_run.items_unchanged == 3
+        assert db.session.scalar(select(func.count()).select_from(Genre)) == 2
+        assert db.session.scalar(select(func.count()).select_from(MediaGenre)) == 2
 
 
 def test_music_sync_persists_artist_album_track_and_history(app: Flask) -> None:
@@ -298,6 +314,9 @@ def test_music_sync_persists_artist_album_track_and_history(app: Flask) -> None:
             "/library/metadata/album-1/thumb",
             "/library/metadata/track-1/thumb",
         ]
+        refs = db.session.scalars(select(SourceMediaRef)).all()
+        assert all(reference.available for reference in refs)
+        assert db.session.scalar(select(func.count()).select_from(MediaGenre)) == 3
 
 
 def test_partial_series_enumerates_all_episodes_and_preserves_144_watched(app: Flask) -> None:
@@ -416,6 +435,15 @@ def test_full_success_marks_missing_refs_unavailable_but_failure_does_not(app: F
         db.session.expire_all()
         stored_ref = db.session.get(SourceMediaRef, old_ref.id)
         assert stored_ref is not None and stored_ref.available is False
+        assert stored_ref.unavailable_since is not None
+        assert stored_ref.unavailable_since.replace(tzinfo=UTC) == NOW
+
+        restored = orchestrator(FixtureConnector({"movies": (movie("old"),)})).run(source_id)
+        assert restored.status is SyncStatus.SUCCEEDED
+        db.session.expire_all()
+        stored_ref = db.session.get(SourceMediaRef, old_ref.id)
+        assert stored_ref is not None and stored_ref.available is True
+        assert stored_ref.unavailable_since is None
 
 
 def test_item_savepoint_preserves_valid_item_and_blocks_checkpoint(app: Flask) -> None:

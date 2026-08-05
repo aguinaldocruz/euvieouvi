@@ -30,7 +30,9 @@ from euvieouvi.database.enums import (
     SyncTrigger,
 )
 from euvieouvi.database.models import (
+    Genre,
     Library,
+    MediaGenre,
     MediaImage,
     MediaItem,
     Source,
@@ -134,9 +136,16 @@ def seed_web() -> tuple[int, int, int, int]:
         year=2016,
         duration_ms=6960000,
         summary="Contato com visitantes.",
+        studio="Paramount",
+        content_rating="14",
+        audience_rating=8.1,
     )
     db.session.add(movie)
     db.session.flush()
+    genre = Genre(name="Ficção científica", normalized_name="ficção científica")
+    db.session.add(genre)
+    db.session.flush()
+    db.session.add(MediaGenre(media_item_id=movie.id, genre_id=genre.id))
     db.session.add_all(
         [
             SourceMediaRef(
@@ -419,7 +428,7 @@ def test_formatters(app: Flask) -> None:
 
 def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     with app.app_context():
-        seed_web()
+        _, library_id, _, _ = seed_web()
     client = app.test_client()
     response = client.get(
         "/catalog?kind=movie&availability=available&played=played&sort=last_played&direction=desc"
@@ -429,8 +438,17 @@ def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     assert "Arrival" in text
     assert "Disponível no Plex" in text
     assert "Reproduzido" in text
+    advanced = client.get(
+        f"/catalog?kind=movie&library={library_id}&genre=ficção+científica&decade=2010&sort=rating&direction=desc"
+    )
+    assert advanced.status_code == 200 and "Arrival" in advanced.get_data(as_text=True)
     assert client.get("/catalog?kind=track&played=unplayed&sort=year").status_code == 200
     assert client.get("/catalog?availability=unavailable&sort=play_count").status_code == 200
+    assert client.get("/catalog?played=progress&sort=first_played").status_code == 200
+    assert client.get("/catalog?sort=duration&direction=desc").status_code == 200
+    assert client.get("/catalog?sort=original_title").status_code == 200
+    assert client.get("/catalog?sort=updated&direction=desc").status_code == 200
+    assert client.get("/catalog?sort=removed&direction=desc").status_code == 200
 
 
 def test_media_image_placeholder_and_local_cache(

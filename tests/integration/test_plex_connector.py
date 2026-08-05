@@ -79,6 +79,10 @@ def test_movie_page_maps_ids_state_and_defensive_pagination() -> None:
     assert page.total_size == 4
     assert page.items[0].view_count == 2
     assert page.items[0].thumb_path == "/library/metadata/101/thumb/1785800000"
+    assert page.items[0].genres == ("Drama", "Science Fiction")
+    assert page.items[0].studio == "Paramount"
+    assert page.items[0].audience_rating == 8.1
+    assert page.items[0].added_at is not None
     assert [(item.provider, item.external_id) for item in page.items[0].identifiers] == [
         ("imdb", "tt2543164"),
         ("tmdb", "329865"),

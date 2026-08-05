@@ -359,6 +359,8 @@ class SyncOrchestrator:
             work = UnitOfWork(session)
             for reference in work.source_media_refs.for_library(library_id):
                 if reference.external_id not in seen_external_ids:
+                    if reference.available:
+                        reference.unavailable_since = self._clock()
                     reference.available = False
             session.commit()
         finally:
@@ -512,4 +514,9 @@ def _external_ids_for_item(item: ExternalMediaItem) -> set[str]:
         result.add(
             item.season_external_id or f"{item.show_external_id}:season:{item.season_number}"
         )
+    if item.kind is ExternalMediaKind.TRACK:
+        if item.artist_external_id is not None:
+            result.add(item.artist_external_id)
+        if item.album_external_id is not None:
+            result.add(item.album_external_id)
     return result

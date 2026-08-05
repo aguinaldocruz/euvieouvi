@@ -46,7 +46,8 @@ def parse_container(payload: PlexPayload) -> tuple[dict[str, Any], list[dict[str
     for element in root:
         item: dict[str, Any] = dict(element.attrib)
         item["_tag"] = element.tag
-        item["Guid"] = [dict(child.attrib) for child in element if child.tag == "Guid"]
+        for child in element:
+            item.setdefault(child.tag, []).append(dict(child.attrib))
         mapped_items.append(item)
     return dict(root.attrib), mapped_items
 
@@ -121,6 +122,12 @@ def map_media_item(item: Mapping[str, Any], library_external_id: str) -> Externa
         duration_ms=_integer(item.get("duration")),
         originally_available_on=_date(item.get("originallyAvailableAt")),
         summary=_optional_text(item.get("summary")),
+        tagline=_optional_text(item.get("tagline")),
+        studio=_optional_text(item.get("studio")),
+        content_rating=_optional_text(item.get("contentRating")),
+        audience_rating=_number(item.get("audienceRating", item.get("rating"))),
+        genres=_tag_values(item.get("Genre")),
+        added_at=_timestamp(item.get("addedAt")),
         thumb_path=_optional_text(item.get("thumb")),
         art_path=_optional_text(item.get("art")),
         artist_thumb_path=_optional_text(item.get("grandparentThumb")),
@@ -195,6 +202,27 @@ def _integer(value: Any) -> int | None:
     if result < 0:
         raise ConnectorResponseError("Plex response contained a negative integer.")
     return result
+
+
+def _number(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as error:
+        raise ConnectorResponseError("Plex response contained an invalid number.") from error
+
+
+def _tag_values(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    values = {
+        normalized
+        for item in value
+        if isinstance(item, Mapping)
+        and (normalized := _optional_text(item.get("tag"))) is not None
+    }
+    return tuple(sorted(values, key=str.casefold))
 
 
 def _timestamp(value: Any) -> datetime | None:

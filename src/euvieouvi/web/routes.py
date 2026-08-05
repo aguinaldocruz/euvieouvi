@@ -27,7 +27,9 @@ from euvieouvi.connectors.errors import ConnectorError
 from euvieouvi.connectors.plex.connector import PlexConnector
 from euvieouvi.database.enums import ConnectorType, MediaKind, SyncStatus
 from euvieouvi.database.models import (
+    Genre,
     Library,
+    MediaGenre,
     MediaImage,
     MediaItem,
     Setting,
@@ -91,6 +93,10 @@ def dashboard() -> Any:
         "episodes": _count(MediaItem, MediaItem.kind == MediaKind.EPISODE),
         "watched_movies": _watched_count(MediaKind.MOVIE),
         "watched_episodes": _watched_count(MediaKind.EPISODE),
+        "artists": _count(MediaItem, MediaItem.kind == MediaKind.ARTIST),
+        "albums": _count(MediaItem, MediaItem.kind == MediaKind.ALBUM),
+        "tracks": _count(MediaItem, MediaItem.kind == MediaKind.TRACK),
+        "listened_tracks": _watched_count(MediaKind.TRACK),
     }
     next_step = None
     if source is None:
@@ -373,6 +379,9 @@ def catalog() -> Any:
     kind = request.args.get("kind", "")
     availability = request.args.get("availability", "all")
     played = request.args.get("played", "all")
+    library = request.args.get("library", "")
+    genre = request.args.get("genre", "").strip().casefold()
+    decade = request.args.get("decade", "")
     sort = request.args.get("sort", "title")
     direction = request.args.get("direction", "asc")
     raw_page = request.args.get("page", "1")
@@ -399,20 +408,56 @@ def catalog() -> Any:
         )
     if query:
         statement = statement.where(MediaItem.title.ilike(f"%{query}%"))
+    if library.isdigit():
+        statement = statement.where(
+            exists().where(
+                SourceMediaRef.media_item_id == MediaItem.id,
+                SourceMediaRef.library_id == int(library),
+            )
+        )
+    if genre:
+        statement = statement.where(
+            exists().where(
+                MediaGenre.media_item_id == MediaItem.id,
+                MediaGenre.genre_id == Genre.id,
+                Genre.normalized_name == genre,
+            )
+        )
+    if decade.isdigit():
+        decade_start = int(decade)
+        if 1800 <= decade_start <= 2200 and decade_start % 10 == 0:
+            statement = statement.where(
+                MediaItem.year >= decade_start,
+                MediaItem.year < decade_start + 10,
+            )
     if availability == "available":
         statement = statement.where(available_ref)
     elif availability == "unavailable":
         statement = statement.where(~available_ref)
     if played == "played":
         statement = statement.where(WatchState.view_count > 0)
+    elif played == "progress":
+        statement = statement.where(
+            WatchState.completed.is_(False), WatchState.progress_ms.is_not(None)
+        )
     elif played == "unplayed":
         statement = statement.where((WatchState.id.is_(None)) | (WatchState.view_count == 0))
     sort_columns = {
         "title": func.coalesce(MediaItem.sort_title, MediaItem.title),
+        "original_title": func.coalesce(MediaItem.original_title, MediaItem.title),
         "year": MediaItem.year,
         "last_played": WatchState.last_watched_at,
+        "first_played": select(func.min(WatchEvent.watched_at))
+        .where(WatchEvent.media_item_id == MediaItem.id)
+        .scalar_subquery(),
         "play_count": WatchState.view_count,
-        "added": MediaItem.created_at,
+        "added": func.coalesce(MediaItem.source_added_at, MediaItem.created_at),
+        "updated": MediaItem.updated_at,
+        "removed": select(func.max(SourceMediaRef.unavailable_since))
+        .where(SourceMediaRef.media_item_id == MediaItem.id)
+        .scalar_subquery(),
+        "duration": MediaItem.duration_ms,
+        "rating": MediaItem.audience_rating,
     }
     sort_column = sort_columns.get(sort, sort_columns["title"])
     ordering = (
@@ -436,6 +481,11 @@ def catalog() -> Any:
         played=played,
         sort=sort,
         direction=direction,
+        library=library,
+        genre=genre,
+        decade=decade,
+        libraries=db.session.scalars(select(Library).order_by(Library.name)).all(),
+        genres=db.session.scalars(select(Genre).order_by(Genre.name)).all(),
     )
 
 
@@ -525,6 +575,30 @@ def media_detail(media_id: int) -> Any:
             )
         ).all()
     }
+    aggregate = None
+    if item.kind in {MediaKind.SHOW, MediaKind.ARTIST} and children_for_states:
+        playable = [
+            child
+            for child in children_for_states
+            if child.kind in {MediaKind.EPISODE, MediaKind.TRACK}
+        ]
+        played_states = [child_states[child.id] for child in playable if child.id in child_states]
+        last_played = max(
+            (value.last_watched_at for value in played_states if value.last_watched_at is not None),
+            default=None,
+        )
+        aggregate = {
+            "total": len(playable),
+            "played": sum(1 for value in played_states if value.view_count > 0),
+            "play_count": sum(value.view_count for value in played_states),
+            "last_played": last_played,
+        }
+    item_genres = db.session.scalars(
+        select(Genre)
+        .join(MediaGenre, MediaGenre.genre_id == Genre.id)
+        .where(MediaGenre.media_item_id == media_id)
+        .order_by(Genre.name)
+    ).all()
     refs = db.session.scalars(
         select(SourceMediaRef).where(SourceMediaRef.media_item_id == media_id)
     ).all()
@@ -535,6 +609,8 @@ def media_detail(media_id: int) -> Any:
         events=events,
         children=children,
         grouped_children=grouped_children,
+        aggregate=aggregate,
+        item_genres=item_genres,
         child_states=child_states,
         refs=refs,
     )

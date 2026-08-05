@@ -10,6 +10,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -100,6 +101,8 @@ class MediaItem(TimestampMixin, Base):
             "duration_ms IS NULL OR duration_ms >= 0", name="ck_media_items_duration_nonnegative"
         ),
         Index("ix_media_items_kind_title", "kind", "title"),
+        Index("ix_media_items_year", "year"),
+        Index("ix_media_items_source_added", "source_added_at"),
         Index("ix_media_items_hierarchy", "parent_id", "season_number", "episode_number"),
         Index("ix_media_items_music_hierarchy", "parent_id", "disc_number", "track_number"),
     )
@@ -126,6 +129,36 @@ class MediaItem(TimestampMixin, Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     originally_available_on: Mapped[date | None] = mapped_column(Date)
     summary: Mapped[str | None] = mapped_column(Text)
+    tagline: Mapped[str | None] = mapped_column(Text)
+    studio: Mapped[str | None] = mapped_column(String(255))
+    content_rating: Mapped[str | None] = mapped_column(String(64))
+    audience_rating: Mapped[float | None] = mapped_column(Float)
+    source_added_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Genre(Base):
+    __tablename__ = "genres"
+    __table_args__ = (UniqueConstraint("normalized_name", name="uq_genres_normalized_name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class MediaGenre(Base):
+    __tablename__ = "media_genres"
+    __table_args__ = (
+        UniqueConstraint("media_item_id", "genre_id", name="uq_media_genres_identity"),
+        Index("ix_media_genres_genre_media", "genre_id", "media_item_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    media_item_id: Mapped[int] = mapped_column(
+        ForeignKey("media_items.id", ondelete="CASCADE"), nullable=False
+    )
+    genre_id: Mapped[int] = mapped_column(
+        ForeignKey("genres.id", ondelete="CASCADE"), nullable=False
+    )
 
 
 class SourceMediaRef(TimestampMixin, Base):
@@ -134,6 +167,7 @@ class SourceMediaRef(TimestampMixin, Base):
         UniqueConstraint("source_id", "external_id", name="uq_source_media_refs_identity"),
         Index("ix_source_media_refs_library_available", "library_id", "available"),
         Index("ix_source_media_refs_media_item", "media_item_id"),
+        Index("ix_source_media_refs_unavailable_since", "unavailable_since"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -151,6 +185,7 @@ class SourceMediaRef(TimestampMixin, Base):
     external_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    unavailable_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     raw_hash: Mapped[str | None] = mapped_column(String(128))
 
 

@@ -3,10 +3,13 @@
   <Video ratingKey="101" key="/library/metadata/101" librarySectionID="1"
    type="movie" title="Arrival" originalTitle="Arrival" year="2016"
    duration="6960000" originallyAvailableAt="2016-11-11" updatedAt="1785800000"
+   addedAt="1478900000" studio="Paramount" contentRating="14" audienceRating="8.1"
    lastViewedAt="1785800100" viewCount="2" viewOffset="6960000" summary="Fixture movie."
    thumb="/library/metadata/101/thumb/1785800000" art="/library/metadata/101/art/1785800000">
     <Guid id="imdb://tt2543164" />
     <Guid id="tmdb://329865" />
+    <Genre tag="Science Fiction" />
+    <Genre tag="Drama" />
   </Video>
   <Video ratingKey="102" key="/library/metadata/102" librarySectionID="1"
    type="movie" title="Unwatched Movie" />
