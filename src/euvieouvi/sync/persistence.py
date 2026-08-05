@@ -102,10 +102,20 @@ class MediaPersistenceService:
         if reference is None:
             raise ValueError("History event references unknown media.")
         dedup_key = event_dedup_key(self.source_id, event)
-        if event.source_event_id is not None and self.work.watch_events.by_source_event_id(
-            self.source_id, event.source_event_id
-        ):
-            return False
+        if event.source_event_id is not None:
+            existing = self.work.watch_events.by_source_event_id(
+                self.source_id, event.source_event_id
+            )
+            if existing is not None:
+                if existing.media_item_id != reference.media_item_id:
+                    raise ValueError("History event identity changed its referenced media.")
+                existing.dedup_key = dedup_key
+                existing.watched_at = event.watched_at
+                existing.completed = event.completed
+                existing.progress_ms = event.progress_ms
+                existing.duration_ms = event.duration_ms
+                existing.view_number = event.view_number
+                return False
         if self.work.watch_events.by_dedup_key(self.source_id, dedup_key) is not None:
             return False
         self.work.watch_events.add(

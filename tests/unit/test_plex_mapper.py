@@ -76,3 +76,37 @@ def test_track_without_album_identity_uses_library_scoped_synthetic_identity() -
 def test_history_requires_real_timestamp() -> None:
     with pytest.raises(ConnectorResponseError, match="viewedAt"):
         map_watch_event({"ratingKey": "1"}, "1")
+
+
+def test_history_view_count_takes_precedence_over_partial_offset() -> None:
+    completed = map_watch_event(
+        {
+            "ratingKey": "1",
+            "viewedAt": "1785800100",
+            "viewCount": "1",
+            "duration": "1000",
+            "viewOffset": "100",
+        },
+        "1",
+    )
+    partial = map_watch_event(
+        {
+            "ratingKey": "2",
+            "viewedAt": "1785800100",
+            "duration": "1000",
+            "viewOffset": "500",
+        },
+        "1",
+    )
+    threshold = map_watch_event(
+        {
+            "ratingKey": "3",
+            "viewedAt": "1785800100",
+            "duration": "1000",
+            "viewOffset": "900",
+        },
+        "1",
+    )
+    assert completed.completed is True
+    assert partial.completed is False
+    assert threshold.completed is True

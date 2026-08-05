@@ -38,6 +38,7 @@ euvieouvi = ["templates/**/*.html", "static/**/*"]
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers --cov=euvieouvi --cov-report=term-missing"
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
   "real_plex: opt-in validation against an explicitly configured small Plex library",
   "volume: integration test with thousands of local records",

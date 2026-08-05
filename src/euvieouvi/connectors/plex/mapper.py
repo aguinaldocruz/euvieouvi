@@ -158,9 +158,12 @@ def map_watch_event(item: Mapping[str, Any], library_external_id: str) -> Extern
     progress = _integer(item.get("viewOffset"))
     view_count = _integer(item.get("viewCount"))
     view_number = _integer(item.get("viewIndex", item.get("viewNumber")))
-    completed = bool(view_count and view_count > 0)
-    if duration and progress is not None:
+    if view_count is not None and view_count > 0:
+        completed = True
+    elif duration and progress is not None:
         completed = progress / duration >= 0.9
+    else:
+        completed = False
     return ExternalWatchEvent(
         source_event_id=_optional_text(item.get("historyKey")),
         media_external_id=_required(item, "ratingKey"),

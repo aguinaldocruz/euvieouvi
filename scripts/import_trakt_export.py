@@ -28,6 +28,7 @@ REQUIRED_TABLES = {
     "watch_events",
     "watch_states",
 }
+SUPPORTED_DATABASE_REVISIONS = {"20260805_0006"}
 Progress = Callable[[str], None]
 
 
@@ -704,8 +705,12 @@ def _validate_database(connection: sqlite3.Connection) -> None:
     if missing:
         raise ImportFailure(f"Banco incompatível; tabelas ausentes: {', '.join(missing)}")
     revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    if revision is None or revision[0] != "20260804_0001":
-        raise ImportFailure("Revisão do banco incompatível com este importador.")
+    if revision is None or str(revision[0]) not in SUPPORTED_DATABASE_REVISIONS:
+        supported = ", ".join(sorted(SUPPORTED_DATABASE_REVISIONS))
+        current = str(revision[0]) if revision is not None else "ausente"
+        raise ImportFailure(
+            f"Revisão do banco incompatível: {current}; esperada: {supported}."
+        )
 
 
 def _select_source(connection: sqlite3.Connection, requested: int | None) -> int:

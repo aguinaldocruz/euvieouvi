@@ -12,6 +12,10 @@ biblioteca padrão do Python e não altera a interface web.
 - o caminho real do `euvieouvi.db` conhecido;
 - o serviço Docker completamente parado.
 
+O importador acompanha o esquema atual do projeto e exige a revisão Alembic
+`20260805_0006`. Execute a atualização da aplicação e confirme `flask db current` antes da
+importação; revisões anteriores são recusadas sem modificar o banco.
+
 O importador associa mídias por Plex GUID, IMDb, TMDB, TVDB e Trakt. Título não é usado
 como identidade. Filmes e episódios históricos que não existem no catálogo atual são
 criados com os dados do Trakt, sem uma referência falsa de disponibilidade no Plex.

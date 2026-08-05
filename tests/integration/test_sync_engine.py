@@ -284,6 +284,42 @@ def test_initial_sync_and_repetition_are_idempotent(app: Flask) -> None:
         assert db.session.scalar(select(func.count()).select_from(MediaGenre)) == 2
 
 
+def test_repeated_history_repairs_existing_event_completion(app: Flask) -> None:
+    with app.app_context():
+        source_id, _ = seed_source()
+        partial = ExternalWatchEvent(
+            source_event_id="event-repair",
+            media_external_id="m1",
+            library_external_id="movies",
+            watched_at=NOW,
+            completed=False,
+            progress_ms=100,
+            duration_ms=1000,
+        )
+        connector = FixtureConnector({"movies": (movie("m1"),)}, {"movies": (partial,)})
+        engine = orchestrator(connector)
+        assert engine.run(source_id).status is SyncStatus.SUCCEEDED
+
+        connector.history["movies"] = (
+            ExternalWatchEvent(
+                source_event_id="event-repair",
+                media_external_id="m1",
+                library_external_id="movies",
+                watched_at=NOW,
+                completed=True,
+                progress_ms=100,
+                duration_ms=1000,
+                view_number=1,
+            ),
+        )
+        assert engine.run(source_id).status is SyncStatus.SUCCEEDED
+
+        events = db.session.scalars(select(WatchEvent)).all()
+        assert len(events) == 1
+        assert events[0].completed is True
+        assert events[0].view_number == 1
+
+
 def test_music_sync_persists_artist_album_track_and_history(app: Flask) -> None:
     with app.app_context():
         source_id, _ = seed_music_source()
