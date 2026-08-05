@@ -1,0 +1,38 @@
+services:
+  euvieouvi:
+    build:
+      context: .
+    image: euvieouvi:2.0.0-dev
+    init: true
+    restart: unless-stopped
+    environment:
+      EUVIEOUVI_ENV: production
+      EUVIEOUVI_SECRET_KEY: ${EUVIEOUVI_SECRET_KEY:?Set EUVIEOUVI_SECRET_KEY}
+      EUVIEOUVI_HOST: 0.0.0.0
+      EUVIEOUVI_PORT: 8000
+      EUVIEOUVI_INSTANCE_PATH: /app/instance
+      EUVIEOUVI_LOG_LEVEL: ${EUVIEOUVI_LOG_LEVEL:-INFO}
+      EUVIEOUVI_TIMEZONE: ${EUVIEOUVI_TIMEZONE:-America/Sao_Paulo}
+      EUVIEOUVI_GUNICORN_THREADS: ${EUVIEOUVI_GUNICORN_THREADS:-4}
+      EUVIEOUVI_SQLITE_BUSY_TIMEOUT_MS: ${EUVIEOUVI_SQLITE_BUSY_TIMEOUT_MS:-5000}
+    ports:
+      - "${EUVIEOUVI_PORT:-8000}:8000"
+    volumes:
+      - euvieouvi_data:/app/instance
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-m", "euvieouvi.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    stop_grace_period: 30s
+
+volumes:
+  euvieouvi_data:

@@ -10,6 +10,7 @@ class ConnectorType(StrEnum):
 class LibraryMediaType(StrEnum):
     MOVIE = "movie"
     SHOW = "show"
+    ARTIST = "artist"
 
 
 class MediaKind(StrEnum):
@@ -17,11 +18,15 @@ class MediaKind(StrEnum):
     SHOW = "show"
     SEASON = "season"
     EPISODE = "episode"
+    ARTIST = "artist"
+    ALBUM = "album"
+    TRACK = "track"
 
 
 class SyncTrigger(StrEnum):
     MANUAL = "manual"
     API = "api"
+    SCHEDULED = "scheduled"
 
 
 class SyncStatus(StrEnum):

@@ -71,7 +71,7 @@ def map_library_discovery(
     rejected: list[ExternalLibraryRejection] = []
     for item in items:
         raw_type = _optional_text(item.get("type"))
-        if raw_type not in {"movie", "show"}:
+        if raw_type not in {"movie", "show", "artist"}:
             rejected.append(
                 ExternalLibraryRejection(
                     external_id=_required(item, "key"),
@@ -112,6 +112,12 @@ def map_media_item(item: Mapping[str, Any], library_external_id: str) -> Externa
         season_external_id=_optional_text(item.get("parentRatingKey")),
         season_number=_integer(item.get("parentIndex")),
         episode_number=_integer(item.get("index")),
+        artist_external_id=_optional_text(item.get("grandparentRatingKey")),
+        artist_title=_optional_text(item.get("grandparentTitle")),
+        album_external_id=_optional_text(item.get("parentRatingKey")),
+        album_title=_optional_text(item.get("parentTitle")),
+        disc_number=_integer(item.get("parentIndex")) if raw_kind == "track" else None,
+        track_number=_integer(item.get("index")) if raw_kind == "track" else None,
         duration_ms=_integer(item.get("duration")),
         originally_available_on=_date(item.get("originallyAvailableAt")),
         summary=_optional_text(item.get("summary")),

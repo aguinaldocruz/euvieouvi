@@ -72,6 +72,36 @@ def csrf(client: object, path: str = "/") -> str:
     return match.group(1)
 
 
+def test_daily_schedule_settings_are_persisted(app: Flask) -> None:
+    client = app.test_client()
+    token = csrf(client, "/settings/sync")
+    response = client.post(
+        "/settings/sync",
+        data={"csrf_token": token, "enabled": "on", "scheduled_time": "04:30"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert "Agendamento diário atualizado" in response.get_data(as_text=True)
+    with app.app_context():
+        from euvieouvi.database.models import Setting
+
+        enabled = db.session.get(Setting, "sync.schedule.enabled")
+        scheduled_time = db.session.get(Setting, "sync.schedule.time")
+        assert enabled is not None and enabled.value == "true"
+        assert scheduled_time is not None and scheduled_time.value == "04:30"
+
+
+def test_daily_schedule_rejects_invalid_time(app: Flask) -> None:
+    client = app.test_client()
+    token = csrf(client, "/settings/sync")
+    response = client.post(
+        "/settings/sync",
+        data={"csrf_token": token, "scheduled_time": "99:00"},
+    )
+    assert response.status_code == 200
+    assert "horário válido" in response.get_data(as_text=True)
+
+
 def seed_web() -> tuple[int, int, int, int]:
     source = Source(
         connector_type=ConnectorType.PLEX,

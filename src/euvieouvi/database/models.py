@@ -101,6 +101,7 @@ class MediaItem(TimestampMixin, Base):
         ),
         Index("ix_media_items_kind_title", "kind", "title"),
         Index("ix_media_items_hierarchy", "parent_id", "season_number", "episode_number"),
+        Index("ix_media_items_music_hierarchy", "parent_id", "disc_number", "track_number"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -120,6 +121,8 @@ class MediaItem(TimestampMixin, Base):
     year: Mapped[int | None] = mapped_column(Integer)
     season_number: Mapped[int | None] = mapped_column(Integer)
     episode_number: Mapped[int | None] = mapped_column(Integer)
+    disc_number: Mapped[int | None] = mapped_column(Integer)
+    track_number: Mapped[int | None] = mapped_column(Integer)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     originally_available_on: Mapped[date | None] = mapped_column(Date)
     summary: Mapped[str | None] = mapped_column(Text)

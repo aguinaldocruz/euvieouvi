@@ -10,6 +10,7 @@ from enum import StrEnum
 class ExternalLibraryType(StrEnum):
     MOVIE = "movie"
     SHOW = "show"
+    ARTIST = "artist"
 
 
 class ExternalMediaKind(StrEnum):
@@ -17,6 +18,9 @@ class ExternalMediaKind(StrEnum):
     SHOW = "show"
     SEASON = "season"
     EPISODE = "episode"
+    ARTIST = "artist"
+    ALBUM = "album"
+    TRACK = "track"
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +95,12 @@ class ExternalMediaItem:
     season_external_id: str | None = None
     season_number: int | None = None
     episode_number: int | None = None
+    artist_external_id: str | None = None
+    artist_title: str | None = None
+    album_external_id: str | None = None
+    album_title: str | None = None
+    disc_number: int | None = None
+    track_number: int | None = None
     duration_ms: int | None = None
     originally_available_on: date | None = None
     summary: str | None = None
@@ -108,6 +118,8 @@ class ExternalMediaItem:
             "year",
             "season_number",
             "episode_number",
+            "disc_number",
+            "track_number",
             "duration_ms",
             "view_count",
             "view_offset_ms",
@@ -120,6 +132,11 @@ class ExternalMediaItem:
             _require_text(self.show_title, "show_title")
             if self.season_number is None or self.episode_number is None:
                 raise ValueError("episode requires season_number and episode_number")
+        if self.kind is ExternalMediaKind.TRACK:
+            _require_text(self.artist_external_id, "artist_external_id")
+            _require_text(self.artist_title, "artist_title")
+            _require_text(self.album_external_id, "album_external_id")
+            _require_text(self.album_title, "album_title")
 
 
 @dataclass(frozen=True, slots=True)

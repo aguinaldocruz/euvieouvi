@@ -13,7 +13,7 @@ from werkzeug.local import LocalProxy
 from euvieouvi.connectors.base import MediaConnector
 from euvieouvi.connectors.plex.client import PlexHttpClient
 from euvieouvi.connectors.plex.connector import PlexConnector
-from euvieouvi.database.enums import SyncStatus
+from euvieouvi.database.enums import SyncStatus, SyncTrigger
 from euvieouvi.database.models import Source, SyncRun
 from euvieouvi.extensions import db
 from euvieouvi.sync.cancellation import CancellationToken
@@ -41,11 +41,13 @@ class LocalSyncExecutor:
         self._tokens: dict[int, CancellationToken] = {}
         self._lock = threading.Lock()
 
-    def submit(self, source_id: int) -> int:
+    def submit(self, source_id: int, *, trigger: SyncTrigger = SyncTrigger.MANUAL) -> int:
         source = db.session.get(Source, source_id)
         if source is None:
             raise LookupError("Source not found")
-        run_id = SyncOrchestrator(lambda: db.session(), self._factory(source)).enqueue(source_id)
+        run_id = SyncOrchestrator(lambda: db.session(), self._factory(source)).enqueue(
+            source_id, trigger=trigger
+        )
         token = CancellationToken()
         with self._lock:
             self._tokens[run_id] = token

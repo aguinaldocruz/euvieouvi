@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="1" offset="0" totalSize="1">
+  <Track ratingKey="9001" key="/library/metadata/9001" type="track"
+    title="Come Together" grandparentRatingKey="7001" grandparentTitle="The Beatles"
+    parentRatingKey="8001" parentTitle="Abbey Road" parentIndex="1" index="1"
+    duration="259000" year="1969" updatedAt="1785859500" viewCount="3"
+    lastViewedAt="1785859600">
+    <Guid id="mbid://recording-9001" />
+  </Track>
+</MediaContainer>

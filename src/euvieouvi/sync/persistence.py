@@ -115,6 +115,28 @@ class MediaPersistenceService:
         return True
 
     def _ensure_hierarchy(self, item: ExternalMediaItem, observed_at: datetime) -> int | None:
+        if item.kind is ExternalMediaKind.TRACK:
+            assert item.artist_external_id is not None
+            assert item.artist_title is not None
+            assert item.album_external_id is not None
+            assert item.album_title is not None
+            artist = self._ensure_container(
+                external_id=item.artist_external_id,
+                kind=MediaKind.ARTIST,
+                title=item.artist_title,
+                parent_id=None,
+                season_number=None,
+                observed_at=observed_at,
+            )
+            album = self._ensure_container(
+                external_id=item.album_external_id,
+                kind=MediaKind.ALBUM,
+                title=item.album_title,
+                parent_id=artist.id,
+                season_number=None,
+                observed_at=observed_at,
+            )
+            return album.id
         if item.kind is not ExternalMediaKind.EPISODE:
             return None
         assert item.show_external_id is not None
@@ -194,6 +216,8 @@ class MediaPersistenceService:
         media.year = item.year
         media.season_number = item.season_number
         media.episode_number = item.episode_number
+        media.disc_number = item.disc_number
+        media.track_number = item.track_number
         media.duration_ms = item.duration_ms
         media.originally_available_on = item.originally_available_on
         media.summary = item.summary

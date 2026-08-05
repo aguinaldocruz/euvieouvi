@@ -26,6 +26,7 @@ from euvieouvi.database.enums import ConnectorType, MediaKind, SyncStatus
 from euvieouvi.database.models import (
     Library,
     MediaItem,
+    Setting,
     Source,
     SourceMediaRef,
     SyncError,
@@ -155,6 +156,41 @@ def settings_plex() -> Any:
                 flash("Configuração do Plex salva com segurança.", "success")
                 return redirect(url_for("web.settings_plex"))
     return render_template("settings_plex.html", source=source, errors=errors)
+
+
+@blueprint.route("/settings/sync", methods=["GET", "POST"])
+def settings_sync() -> Any:
+    values = _settings(
+        "sync.schedule.enabled",
+        "sync.schedule.time",
+    )
+    errors: dict[str, str] = {}
+    if request.method == "POST":
+        enabled = request.form.get("enabled") == "on"
+        scheduled_time = request.form.get("scheduled_time", "").strip()
+        try:
+            parsed = datetime.strptime(scheduled_time, "%H:%M")
+        except ValueError:
+            errors["scheduled_time"] = "Informe um horário válido entre 00:00 e 23:59."
+        if not errors:
+            _save_setting("sync.schedule.enabled", "true" if enabled else "false")
+            _save_setting("sync.schedule.time", parsed.strftime("%H:%M"))
+            db.session.commit()
+            flash("Agendamento diário atualizado.", "success")
+            return redirect(url_for("web.settings_sync"))
+    return render_template(
+        "settings_sync.html",
+        enabled=(
+            request.form.get("enabled") == "on"
+            if request.method == "POST"
+            else values.get("sync.schedule.enabled", "false") == "true"
+        ),
+        scheduled_time=request.form.get(
+            "scheduled_time", values.get("sync.schedule.time", "03:00")
+        ),
+        timezone=current_app.config["TIMEZONE"],
+        errors=errors,
+    )
 
 
 @blueprint.post("/settings/plex/test")
@@ -385,3 +421,18 @@ def _watched_count(kind: MediaKind) -> int:
         )
         or 0
     )
+
+
+def _settings(*keys: str) -> dict[str, str]:
+    return {
+        item.key: item.value
+        for item in db.session.scalars(select(Setting).where(Setting.key.in_(keys)))
+    }
+
+
+def _save_setting(key: str, value: str) -> None:
+    setting = db.session.get(Setting, key)
+    if setting is None:
+        db.session.add(Setting(key=key, value=value))
+    else:
+        setting.value = value

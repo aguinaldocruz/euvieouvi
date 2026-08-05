@@ -55,11 +55,15 @@ class PlexConnector:
     ) -> Page[ExternalMediaItem]:
         if (media_kind is ExternalMediaKind.MOVIE and library.media_type.value != "movie") or (
             media_kind is ExternalMediaKind.EPISODE and library.media_type.value != "show"
+        ) or (
+            media_kind is ExternalMediaKind.TRACK and library.media_type.value != "artist"
         ):
             raise ConnectorConfigurationError("Plex media kind does not match the library type.")
         params = self._page_params(page)
         if media_kind is ExternalMediaKind.EPISODE:
             params["type"] = 4
+        elif media_kind is ExternalMediaKind.TRACK:
+            params["type"] = 10
         elif media_kind is not ExternalMediaKind.MOVIE:
             raise ConnectorConfigurationError("Plex media paging supports movies or episodes.")
         payload = self._client.get(f"/library/sections/{library.external_id}/all", params=params)

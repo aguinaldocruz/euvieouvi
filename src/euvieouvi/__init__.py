@@ -13,6 +13,7 @@ from euvieouvi.health import register_health_routes
 from euvieouvi.instance import prepare_instance_path
 from euvieouvi.logging import configure_logging
 from euvieouvi.request_id import register_request_id
+from euvieouvi.sync.scheduler import start_scheduler
 from euvieouvi.web import register_web
 
 __version__ = "2.0.0.dev0"
@@ -40,6 +41,7 @@ def create_app(config_overrides: Mapping[str, Any] | None = None) -> Flask:
     register_health_routes(app)
     register_api(app)
     register_web(app)
+    start_scheduler(app)
 
     @app.after_request
     def browser_security_headers(response: Any) -> Any:

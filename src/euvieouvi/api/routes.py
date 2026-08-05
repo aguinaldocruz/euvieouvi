@@ -40,7 +40,13 @@ from euvieouvi.connectors.errors import (
     ConnectorResponseError,
     ConnectorTimeoutError,
 )
-from euvieouvi.database.enums import ConnectorType, LibraryMediaType, MediaKind, SyncStatus
+from euvieouvi.database.enums import (
+    ConnectorType,
+    LibraryMediaType,
+    MediaKind,
+    SyncStatus,
+    SyncTrigger,
+)
 from euvieouvi.database.models import (
     Library,
     MediaIdentifier,
@@ -269,7 +275,7 @@ def sync_runs_create() -> tuple[Response, int]:
     ):
         raise AppError("no_enabled_libraries", "The source has no enabled available library.", 409)
     try:
-        run_id = get_executor(current_app).submit(source_id)
+        run_id = get_executor(current_app).submit(source_id, trigger=SyncTrigger.API)
     except SyncAlreadyRunningError as error:
         active = db.session.scalar(
             select(SyncRun).where(SyncRun.status == SyncStatus.RUNNING).order_by(SyncRun.id.desc())

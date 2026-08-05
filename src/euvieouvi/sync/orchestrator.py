@@ -188,6 +188,8 @@ class SyncOrchestrator:
             ExternalMediaKind.MOVIE
             if library.media_type is LibraryMediaType.MOVIE
             else ExternalMediaKind.EPISODE
+            if library.media_type is LibraryMediaType.SHOW
+            else ExternalMediaKind.TRACK
         )
         if stage == "media":
             while True:

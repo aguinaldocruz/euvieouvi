@@ -154,6 +154,31 @@ def seed_source(*, second_library: bool = False) -> tuple[int, list[int]]:
     return source.id, [library.id for library in libraries]
 
 
+def seed_music_source() -> tuple[int, int]:
+    source = Source(
+        connector_type=ConnectorType.PLEX,
+        name="Music Plex",
+        base_url="http://plex.local:32400",
+        secret="sanitized",
+        enabled=True,
+    )
+    db.session.add(source)
+    db.session.flush()
+    library = Library(
+        source_id=source.id,
+        external_id="music",
+        name="Music",
+        media_type=LibraryMediaType.ARTIST,
+        enabled=True,
+        available=True,
+        discovered_at=NOW,
+        last_seen_at=NOW,
+    )
+    db.session.add(library)
+    db.session.commit()
+    return source.id, library.id
+
+
 def movie(
     external_id: str, *, view_count: int | None = None, title: str | None = None
 ) -> ExternalMediaItem:
@@ -180,6 +205,24 @@ def episode(number: int, *, watched: bool) -> ExternalMediaItem:
         episode_number=number,
         view_count=1 if watched else 0,
         last_viewed_at=NOW if watched else None,
+    )
+
+
+def track(external_id: str = "track-1") -> ExternalMediaItem:
+    return ExternalMediaItem(
+        external_id=external_id,
+        library_external_id="music",
+        kind=ExternalMediaKind.TRACK,
+        title="Come Together",
+        artist_external_id="artist-1",
+        artist_title="The Beatles",
+        album_external_id="album-1",
+        album_title="Abbey Road",
+        disc_number=1,
+        track_number=1,
+        duration_ms=259000,
+        view_count=3,
+        last_viewed_at=NOW,
     )
 
 
@@ -217,6 +260,34 @@ def test_initial_sync_and_repetition_are_idempotent(app: Flask) -> None:
         second_run = db.session.get(SyncRun, second.run_id)
         assert first_run is not None and first_run.items_inserted == 3
         assert second_run is not None and second_run.items_unchanged == 3
+
+
+def test_music_sync_persists_artist_album_track_and_history(app: Flask) -> None:
+    with app.app_context():
+        source_id, _ = seed_music_source()
+        event = ExternalWatchEvent(
+            source_event_id="listen-1",
+            media_external_id="track-1",
+            library_external_id="music",
+            watched_at=NOW,
+            completed=True,
+            duration_ms=259000,
+        )
+        result = orchestrator(
+            FixtureConnector({"music": (track(),)}, {"music": (event,)})
+        ).run(source_id)
+
+        assert result.status is SyncStatus.SUCCEEDED
+        items = db.session.scalars(select(MediaItem).order_by(MediaItem.id)).all()
+        assert [item.kind for item in items] == [
+            MediaKind.ARTIST,
+            MediaKind.ALBUM,
+            MediaKind.TRACK,
+        ]
+        assert items[1].parent_id == items[0].id
+        assert items[2].parent_id == items[1].id
+        assert (items[2].disc_number, items[2].track_number) == (1, 1)
+        assert db.session.scalar(select(func.count()).select_from(WatchEvent)) == 1
 
 
 def test_partial_series_enumerates_all_episodes_and_preserves_144_watched(app: Flask) -> None:

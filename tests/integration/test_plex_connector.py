@@ -12,7 +12,11 @@ from euvieouvi.connectors.dtos import (
     ExternalMediaKind,
     PageRequest,
 )
-from euvieouvi.connectors.errors import ConnectorPaginationError, ConnectorResponseError
+from euvieouvi.connectors.errors import (
+    ConnectorConfigurationError,
+    ConnectorPaginationError,
+    ConnectorResponseError,
+)
 from euvieouvi.connectors.plex.client import PlexHttpClient
 from euvieouvi.connectors.plex.connector import PlexConnector
 
@@ -52,9 +56,9 @@ def test_connection_and_library_discovery_map_neutral_values() -> None:
     assert [(item.external_id, item.media_type.value) for item in libraries] == [
         ("1", "movie"),
         ("2", "show"),
+        ("3", "artist"),
     ]
-    assert connector.last_unsupported_libraries[0].source_type == "artist"
-    assert connector.last_unsupported_libraries[0].reason == "unsupported_library_type"
+    assert connector.last_unsupported_libraries == ()
 
 
 def test_movie_page_maps_ids_state_and_defensive_pagination() -> None:
@@ -101,6 +105,34 @@ def test_episode_json_maps_hierarchy_and_optional_fields() -> None:
     assert episode.show_title == "Futurama"
     assert (episode.season_number, episode.episode_number) == (1, 1)
     assert page.has_more is False
+
+
+def test_track_page_maps_artist_album_and_track_hierarchy() -> None:
+    def route(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["type"] == "10"
+        return httpx.Response(200, content=fixture("tracks.xml"), request=request)
+
+    page = make_connector(httpx.MockTransport(route)).get_media_page(
+        ExternalLibraryRef("3", ExternalLibraryType.ARTIST),
+        ExternalMediaKind.TRACK,
+        PageRequest(size=200),
+    )
+    track = page.items[0]
+    assert track.kind is ExternalMediaKind.TRACK
+    assert (track.artist_title, track.album_title) == ("The Beatles", "Abbey Road")
+    assert (track.disc_number, track.track_number) == (1, 1)
+
+
+def test_media_kind_must_match_music_library() -> None:
+    connector = make_connector(
+        httpx.MockTransport(lambda request: httpx.Response(500, request=request))
+    )
+    with pytest.raises(ConnectorConfigurationError, match="does not match"):
+        connector.get_media_page(
+            ExternalLibraryRef("3", ExternalLibraryType.ARTIST),
+            ExternalMediaKind.MOVIE,
+            PageRequest(),
+        )
 
 
 def test_history_maps_only_actual_occurrence() -> None:
