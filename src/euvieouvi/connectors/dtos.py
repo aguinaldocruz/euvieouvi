@@ -104,6 +104,10 @@ class ExternalMediaItem:
     duration_ms: int | None = None
     originally_available_on: date | None = None
     summary: str | None = None
+    thumb_path: str | None = None
+    art_path: str | None = None
+    artist_thumb_path: str | None = None
+    album_thumb_path: str | None = None
     identifiers: tuple[ExternalIdentifier, ...] = ()
     updated_at: datetime | None = None
     last_viewed_at: datetime | None = None

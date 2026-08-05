@@ -32,6 +32,7 @@ from euvieouvi.database.enums import (
 )
 from euvieouvi.database.models import (
     Library,
+    MediaImage,
     MediaItem,
     Source,
     SourceMediaRef,
@@ -221,6 +222,9 @@ def track(external_id: str = "track-1") -> ExternalMediaItem:
         disc_number=1,
         track_number=1,
         duration_ms=259000,
+        thumb_path="/library/metadata/track-1/thumb",
+        artist_thumb_path="/library/metadata/artist-1/thumb",
+        album_thumb_path="/library/metadata/album-1/thumb",
         view_count=3,
         last_viewed_at=NOW,
     )
@@ -288,6 +292,12 @@ def test_music_sync_persists_artist_album_track_and_history(app: Flask) -> None:
         assert items[2].parent_id == items[1].id
         assert (items[2].disc_number, items[2].track_number) == (1, 1)
         assert db.session.scalar(select(func.count()).select_from(WatchEvent)) == 1
+        images = db.session.scalars(select(MediaImage).order_by(MediaImage.media_item_id)).all()
+        assert [image.source_path for image in images] == [
+            "/library/metadata/artist-1/thumb",
+            "/library/metadata/album-1/thumb",
+            "/library/metadata/track-1/thumb",
+        ]
 
 
 def test_partial_series_enumerates_all_episodes_and_preserves_144_watched(app: Flask) -> None:

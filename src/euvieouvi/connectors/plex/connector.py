@@ -16,7 +16,11 @@ from euvieouvi.connectors.dtos import (
     Page,
     PageRequest,
 )
-from euvieouvi.connectors.errors import ConnectorConfigurationError, ConnectorPaginationError
+from euvieouvi.connectors.errors import (
+    ConnectorConfigurationError,
+    ConnectorPaginationError,
+    ConnectorResponseError,
+)
 from euvieouvi.connectors.plex.client import PlexHttpClient
 from euvieouvi.connectors.plex.mapper import (
     map_connection,
@@ -37,6 +41,9 @@ class PlexConnector:
         self._last_pages: dict[str, tuple[int, tuple[str, ...]]] = {}
         self.last_unsupported_libraries: tuple[ExternalLibraryRejection, ...] = ()
 
+    def close(self) -> None:
+        self._client.close()
+
     def test_connection(self) -> ConnectionInfo:
         container, _ = parse_container(self._client.get("/"))
         return map_connection(container)
@@ -46,6 +53,25 @@ class PlexConnector:
         libraries, rejected = map_library_discovery(items)
         self.last_unsupported_libraries = rejected
         return libraries
+
+    def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]:
+        """Fetch a bounded, Plex-resized image without exposing the server token."""
+        if not source_path.startswith("/") or source_path.startswith("//"):
+            raise ConnectorConfigurationError("Plex image path must be local to the server.")
+        payload = self._client.get(
+            "/photo/:/transcode",
+            params={
+                "url": source_path,
+                "width": width,
+                "height": height,
+                "minSize": 1,
+                "upscale": 1,
+            },
+        )
+        mime_type = payload.content_type.split(";", 1)[0].strip().lower()
+        if mime_type not in {"image/jpeg", "image/png", "image/webp"} or not payload.content:
+            raise ConnectorResponseError("Plex returned an unsupported image response.")
+        return payload.content, mime_type
 
     def get_media_page(
         self,

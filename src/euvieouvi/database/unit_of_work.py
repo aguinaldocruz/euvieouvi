@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from euvieouvi.database.repositories import (
     LibraryRepository,
     MediaIdentifierRepository,
+    MediaImageRepository,
     MediaItemRepository,
     SettingRepository,
     SourceMediaRefRepository,
@@ -30,6 +31,7 @@ class UnitOfWork:
         self.media_items = MediaItemRepository(session)
         self.source_media_refs = SourceMediaRefRepository(session)
         self.media_identifiers = MediaIdentifierRepository(session)
+        self.media_images = MediaImageRepository(session)
         self.watch_events = WatchEventRepository(session)
         self.watch_states = WatchStateRepository(session)
         self.sync_runs = SyncRunRepository(session)

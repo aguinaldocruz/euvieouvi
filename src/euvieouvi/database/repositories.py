@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from euvieouvi.database.models import (
     Library,
     MediaIdentifier,
+    MediaImage,
     MediaItem,
     Setting,
     Source,
@@ -84,6 +85,18 @@ class LibraryRepository(Repository[Library]):
 
 class MediaItemRepository(Repository[MediaItem]):
     model = MediaItem
+
+
+class MediaImageRepository(Repository[MediaImage]):
+    model = MediaImage
+
+    def by_item_and_type(self, media_item_id: int, image_type: str) -> MediaImage | None:
+        return self.one_or_none(
+            select(MediaImage).where(
+                MediaImage.media_item_id == media_item_id,
+                MediaImage.image_type == image_type,
+            )
+        )
 
 
 class SourceMediaRefRepository(Repository[SourceMediaRef]):

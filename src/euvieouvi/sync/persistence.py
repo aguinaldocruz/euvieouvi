@@ -12,6 +12,7 @@ from euvieouvi.connectors.dtos import ExternalMediaItem, ExternalMediaKind, Exte
 from euvieouvi.database.enums import MediaKind
 from euvieouvi.database.models import (
     MediaIdentifier,
+    MediaImage,
     MediaItem,
     SourceMediaRef,
     WatchEvent,
@@ -83,6 +84,8 @@ class MediaPersistenceService:
             reference.raw_hash = signature
 
         self._sync_identifiers(media.id, item)
+        self._sync_image(media.id, "poster", item.thumb_path)
+        self._sync_image(media.id, "backdrop", item.art_path)
         regression = self._sync_watch_state(media.id, item, observed_at)
         return PersistResult(classification, media.id, regression)
 
@@ -126,6 +129,7 @@ class MediaPersistenceService:
                 title=item.artist_title,
                 parent_id=None,
                 season_number=None,
+                image_source_path=item.artist_thumb_path,
                 observed_at=observed_at,
             )
             album = self._ensure_container(
@@ -134,6 +138,7 @@ class MediaPersistenceService:
                 title=item.album_title,
                 parent_id=artist.id,
                 season_number=None,
+                image_source_path=item.album_thumb_path,
                 observed_at=observed_at,
             )
             return album.id
@@ -148,6 +153,7 @@ class MediaPersistenceService:
             title=item.show_title,
             parent_id=None,
             season_number=None,
+            image_source_path=item.artist_thumb_path,
             observed_at=observed_at,
         )
         season_external_id = item.season_external_id or (
@@ -159,6 +165,7 @@ class MediaPersistenceService:
             title=f"Season {item.season_number}",
             parent_id=show.id,
             season_number=item.season_number,
+            image_source_path=item.album_thumb_path,
             observed_at=observed_at,
         )
         return season.id
@@ -171,6 +178,7 @@ class MediaPersistenceService:
         title: str,
         parent_id: int | None,
         season_number: int | None,
+        image_source_path: str | None,
         observed_at: datetime,
     ) -> MediaItem:
         reference = self.work.source_media_refs.by_external_identity(self.source_id, external_id)
@@ -180,6 +188,7 @@ class MediaPersistenceService:
             media = self._required_media(reference.media_item_id)
             if media.kind is not kind or media.parent_id != parent_id:
                 raise ValueError("External hierarchy identity conflicts with existing media.")
+            self._sync_image(media.id, "poster", image_source_path)
             return media
         media = MediaItem(
             kind=kind,
@@ -199,6 +208,7 @@ class MediaPersistenceService:
                 available=True,
             )
         )
+        self._sync_image(media.id, "poster", image_source_path)
         return media
 
     def _required_media(self, media_item_id: int) -> MediaItem:
@@ -237,6 +247,29 @@ class MediaPersistenceService:
                         external_id=identifier.external_id,
                     )
                 )
+
+    def _sync_image(
+        self, media_item_id: int, image_type: str, source_path: str | None
+    ) -> None:
+        if source_path is None:
+            return
+        image = self.work.media_images.by_item_and_type(media_item_id, image_type)
+        if image is None:
+            self.work.media_images.add(
+                MediaImage(
+                    media_item_id=media_item_id,
+                    source_id=self.source_id,
+                    image_type=image_type,
+                    source_path=source_path,
+                    cache_status="pending",
+                )
+            )
+        elif image.source_path != source_path:
+            image.source_path = source_path
+            image.local_filename = None
+            image.mime_type = None
+            image.cache_status = "pending"
+            image.cached_at = None
 
     def _sync_watch_state(
         self, media_item_id: int, item: ExternalMediaItem, observed_at: datetime

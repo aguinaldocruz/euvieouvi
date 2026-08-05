@@ -4,7 +4,8 @@
     title="Come Together" grandparentRatingKey="7001" grandparentTitle="The Beatles"
     parentRatingKey="8001" parentTitle="Abbey Road" parentIndex="1" index="1"
     duration="259000" year="1969" updatedAt="1785859500" viewCount="3"
-    lastViewedAt="1785859600">
+    lastViewedAt="1785859600" thumb="/library/metadata/9001/thumb"
+    parentThumb="/library/metadata/8001/thumb" grandparentThumb="/library/metadata/7001/thumb">
     <Guid id="mbid://recording-9001" />
   </Track>
 </MediaContainer>

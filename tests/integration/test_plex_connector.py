@@ -78,6 +78,7 @@ def test_movie_page_maps_ids_state_and_defensive_pagination() -> None:
     assert page.next_start == 2
     assert page.total_size == 4
     assert page.items[0].view_count == 2
+    assert page.items[0].thumb_path == "/library/metadata/101/thumb/1785800000"
     assert [(item.provider, item.external_id) for item in page.items[0].identifiers] == [
         ("imdb", "tt2543164"),
         ("tmdb", "329865"),
@@ -121,6 +122,44 @@ def test_track_page_maps_artist_album_and_track_hierarchy() -> None:
     assert track.kind is ExternalMediaKind.TRACK
     assert (track.artist_title, track.album_title) == ("The Beatles", "Abbey Road")
     assert (track.disc_number, track.track_number) == (1, 1)
+    assert track.artist_thumb_path == "/library/metadata/7001/thumb"
+
+
+def test_image_fetch_requests_bounded_plex_transcode() -> None:
+    def route(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/photo/:/transcode"
+        assert request.url.params["url"] == "/library/metadata/101/thumb"
+        assert request.url.params["width"] == "300"
+        assert request.url.params["height"] == "450"
+        return httpx.Response(
+            200,
+            content=b"jpeg-fixture",
+            headers={"Content-Type": "image/jpeg"},
+            request=request,
+        )
+
+    content, mime_type = make_connector(httpx.MockTransport(route)).fetch_image(
+        "/library/metadata/101/thumb", width=300, height=450
+    )
+    assert content == b"jpeg-fixture"
+    assert mime_type == "image/jpeg"
+
+
+def test_image_fetch_rejects_unsafe_path_and_response() -> None:
+    connector = make_connector(
+        httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=b"not-image",
+                headers={"Content-Type": "text/plain"},
+                request=request,
+            )
+        )
+    )
+    with pytest.raises(ConnectorConfigurationError, match="local"):
+        connector.fetch_image("https://other/image.jpg", width=300, height=450)
+    with pytest.raises(ConnectorResponseError, match="unsupported image"):
+        connector.fetch_image("/safe", width=300, height=450)
 
 
 def test_media_kind_must_match_music_library() -> None:

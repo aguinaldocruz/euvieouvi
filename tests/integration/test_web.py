@@ -21,6 +21,7 @@ from euvieouvi.connectors.dtos import (
     PageRequest,
 )
 from euvieouvi.connectors.errors import ConnectorConnectionError
+from euvieouvi.connectors.plex.connector import PlexConnector
 from euvieouvi.database.enums import (
     ConnectorType,
     LibraryMediaType,
@@ -30,6 +31,7 @@ from euvieouvi.database.enums import (
 )
 from euvieouvi.database.models import (
     Library,
+    MediaImage,
     MediaItem,
     Source,
     SourceMediaRef,
@@ -217,6 +219,7 @@ def test_first_access_navigation_and_local_assets(app: Flask) -> None:
         ("/libraries", "Bibliotecas"),
         ("/sync", "Sincronizações"),
         ("/history", "Histórico"),
+        ("/catalog", "Catálogo"),
         ("/about", "Sobre esta instalação"),
     ):
         response = client.get(path)
@@ -412,3 +415,110 @@ def test_formatters(app: Flask) -> None:
         assert duration_ms(6_960_000) == "1h 56min"
         assert duration_ms(120_000) == "2 min"
         assert duration_ms(None) == "—"
+
+
+def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
+    with app.app_context():
+        seed_web()
+    client = app.test_client()
+    response = client.get(
+        "/catalog?kind=movie&availability=available&played=played&sort=last_played&direction=desc"
+    )
+    text = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "Arrival" in text
+    assert "Disponível no Plex" in text
+    assert "Reproduzido" in text
+    assert client.get("/catalog?kind=track&played=unplayed&sort=year").status_code == 200
+    assert client.get("/catalog?availability=unavailable&sort=play_count").status_code == 200
+
+
+def test_media_image_placeholder_and_local_cache(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with app.app_context():
+        source_id, _, movie_id, _ = seed_web()
+    client = app.test_client()
+    placeholder = client.get(f"/media/{movie_id}/image")
+    assert placeholder.status_code == 200
+    assert placeholder.mimetype == "image/svg+xml"
+
+    with app.app_context():
+        db.session.add(
+            MediaImage(
+                media_item_id=movie_id,
+                source_id=source_id,
+                image_type="poster",
+                source_path=f"/library/metadata/{movie_id}/thumb",
+                cache_status="pending",
+            )
+        )
+        db.session.commit()
+
+    calls: list[str] = []
+
+    def fetch(
+        connector: PlexConnector, source_path: str, *, width: int, height: int
+    ) -> tuple[bytes, str]:
+        del connector
+        calls.append(source_path)
+        assert (width, height) == (300, 450)
+        return b"cached-jpeg", "image/jpeg"
+
+    monkeypatch.setattr(PlexConnector, "fetch_image", fetch)
+    first = client.get(f"/media/{movie_id}/image")
+    second = client.get(f"/media/{movie_id}/image")
+    assert first.status_code == 200 and first.data == b"cached-jpeg"
+    assert second.status_code == 200 and second.data == b"cached-jpeg"
+    assert calls == [f"/library/metadata/{movie_id}/thumb"]
+
+
+def test_series_detail_groups_episodes_by_season(app: Flask) -> None:
+    with app.app_context():
+        source_id, library_id, _, _ = seed_web()
+        show = MediaItem(kind=MediaKind.SHOW, title="Futurama")
+        db.session.add(show)
+        db.session.flush()
+        season = MediaItem(
+            kind=MediaKind.SEASON,
+            title="Season 1",
+            parent_id=show.id,
+            season_number=1,
+        )
+        db.session.add(season)
+        db.session.flush()
+        episode = MediaItem(
+            kind=MediaKind.EPISODE,
+            title="Space Pilot 3000",
+            parent_id=season.id,
+            season_number=1,
+            episode_number=1,
+        )
+        db.session.add(episode)
+        db.session.flush()
+        db.session.add_all(
+            [
+                SourceMediaRef(
+                    source_id=source_id,
+                    library_id=library_id,
+                    media_item_id=show.id,
+                    external_id="show-1",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+                WatchState(
+                    media_item_id=episode.id,
+                    source_id=source_id,
+                    view_count=1,
+                    last_watched_at=NOW,
+                    completed=True,
+                    observed_at=NOW,
+                ),
+            ]
+        )
+        db.session.commit()
+        show_id = show.id
+    text = app.test_client().get(f"/media/{show_id}").get_data(as_text=True)
+    assert "Temporada 1" in text
+    assert "E01" in text
+    assert "Space Pilot 3000" in text

@@ -174,6 +174,28 @@ class MediaIdentifier(Base):
     )
 
 
+class MediaImage(TimestampMixin, Base):
+    __tablename__ = "media_images"
+    __table_args__ = (
+        UniqueConstraint("media_item_id", "image_type", name="uq_media_images_item_type"),
+        Index("ix_media_images_cache_status", "cache_status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    media_item_id: Mapped[int] = mapped_column(
+        ForeignKey("media_items.id", ondelete="CASCADE"), nullable=False
+    )
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("sources.id", ondelete="RESTRICT"), nullable=False
+    )
+    image_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    local_filename: Mapped[str | None] = mapped_column(String(255))
+    mime_type: Mapped[str | None] = mapped_column(String(128))
+    cache_status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    cached_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class WatchEvent(TimestampMixin, Base):
     __tablename__ = "watch_events"
     __table_args__ = (

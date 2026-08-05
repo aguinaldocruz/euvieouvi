@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from importlib.metadata import version
+from pathlib import Path
 from typing import Any
 
 from flask import (
@@ -14,17 +15,20 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_file,
     url_for,
 )
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 
 from euvieouvi.api.runtime import connector_for, get_executor
 from euvieouvi.api.validation import http_url
 from euvieouvi.connectors.errors import ConnectorError
+from euvieouvi.connectors.plex.connector import PlexConnector
 from euvieouvi.database.enums import ConnectorType, MediaKind, SyncStatus
 from euvieouvi.database.models import (
     Library,
+    MediaImage,
     MediaItem,
     Setting,
     Source,
@@ -37,6 +41,7 @@ from euvieouvi.database.models import (
 )
 from euvieouvi.errors import AppError
 from euvieouvi.extensions import db
+from euvieouvi.media_images import ensure_cached
 from euvieouvi.sync.discovery import LibraryDiscoveryService
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
 from euvieouvi.web.formatting import duration_ms, local_datetime
@@ -205,7 +210,7 @@ def settings_plex_test() -> Any:
         source.last_connection_test_at = datetime.now(UTC)
         db.session.commit()
         flash(f"Conexão com o Plex realizada com sucesso ({info.server_name}).", "success")
-    except ConnectorError:
+    except (ConnectorError, OSError):
         source.last_connection_status = "failed"
         source.last_connection_test_at = datetime.now(UTC)
         db.session.commit()
@@ -362,6 +367,117 @@ def history() -> Any:
     )
 
 
+@blueprint.get("/catalog")
+def catalog() -> Any:
+    query = request.args.get("query", "").strip()[:200]
+    kind = request.args.get("kind", "")
+    availability = request.args.get("availability", "all")
+    played = request.args.get("played", "all")
+    sort = request.args.get("sort", "title")
+    direction = request.args.get("direction", "asc")
+    raw_page = request.args.get("page", "1")
+    page = max(int(raw_page) if raw_page.isdigit() else 1, 1)
+    allowed_kinds = {
+        MediaKind.MOVIE,
+        MediaKind.SHOW,
+        MediaKind.ARTIST,
+        MediaKind.ALBUM,
+        MediaKind.TRACK,
+    }
+    available_ref = exists().where(
+        SourceMediaRef.media_item_id == MediaItem.id,
+        SourceMediaRef.available.is_(True),
+    )
+    statement = select(MediaItem, WatchState, available_ref.label("available")).outerjoin(
+        WatchState, WatchState.media_item_id == MediaItem.id
+    )
+    if kind in {item.value for item in allowed_kinds}:
+        statement = statement.where(MediaItem.kind == MediaKind(kind))
+    else:
+        statement = statement.where(
+            MediaItem.kind.in_([MediaKind.MOVIE, MediaKind.SHOW, MediaKind.ARTIST])
+        )
+    if query:
+        statement = statement.where(MediaItem.title.ilike(f"%{query}%"))
+    if availability == "available":
+        statement = statement.where(available_ref)
+    elif availability == "unavailable":
+        statement = statement.where(~available_ref)
+    if played == "played":
+        statement = statement.where(WatchState.view_count > 0)
+    elif played == "unplayed":
+        statement = statement.where((WatchState.id.is_(None)) | (WatchState.view_count == 0))
+    sort_columns = {
+        "title": func.coalesce(MediaItem.sort_title, MediaItem.title),
+        "year": MediaItem.year,
+        "last_played": WatchState.last_watched_at,
+        "play_count": WatchState.view_count,
+        "added": MediaItem.created_at,
+    }
+    sort_column = sort_columns.get(sort, sort_columns["title"])
+    ordering = (
+        sort_column.desc().nullslast()
+        if direction == "desc"
+        else sort_column.asc().nullslast()
+    )
+    rows = db.session.execute(
+        statement.order_by(ordering, MediaItem.title, MediaItem.id)
+        .limit(41)
+        .offset((page - 1) * 40)
+    ).all()
+    return render_template(
+        "catalog.html",
+        rows=rows[:40],
+        page=page,
+        has_more=len(rows) > 40,
+        query=query,
+        kind=kind,
+        availability=availability,
+        played=played,
+        sort=sort,
+        direction=direction,
+    )
+
+
+@blueprint.get("/media/<int:media_id>/image")
+def media_image(media_id: int) -> Any:
+    item = db.session.get(MediaItem, media_id)
+    if item is None:
+        return Response(status=404)
+    image = db.session.scalar(
+        select(MediaImage).where(
+            MediaImage.media_item_id == media_id,
+            MediaImage.image_type == "poster",
+        )
+    )
+    if image is None:
+        return _placeholder_image(item.kind)
+    source = db.session.get(Source, image.source_id)
+    if source is None or not source.enabled:
+        return _placeholder_image(item.kind)
+    connector = connector_for(source)
+    if not isinstance(connector, PlexConnector):
+        return _placeholder_image(item.kind)
+    square = item.kind in {MediaKind.ARTIST, MediaKind.ALBUM, MediaKind.TRACK}
+    try:
+        path = ensure_cached(
+            image,
+            connector,
+            Path(current_app.instance_path) / "images",
+            width=400 if square else 300,
+            height=400 if square else 450,
+        )
+        db.session.commit()
+    except (ConnectorError, OSError):
+        db.session.rollback()
+        return _placeholder_image(item.kind)
+    finally:
+        connector.close()
+    response = send_file(path, mimetype=image.mime_type, conditional=True, max_age=86400)
+    response.headers["Cache-Control"] = "private, max-age=86400"
+    return response
+
+
 @blueprint.get("/media/<int:media_id>")
 def media_detail(media_id: int) -> Any:
     item = db.session.get(MediaItem, media_id)
@@ -382,10 +498,31 @@ def media_detail(media_id: int) -> Any:
         .where(MediaItem.parent_id == media_id)
         .order_by(MediaItem.season_number, MediaItem.episode_number, MediaItem.id)
     ).all()
+    grouped_children: dict[int, list[MediaItem]] = {}
+    if item.kind in {MediaKind.SHOW, MediaKind.ARTIST} and children:
+        descendants = db.session.scalars(
+            select(MediaItem)
+            .where(MediaItem.parent_id.in_([child.id for child in children]))
+            .order_by(
+                MediaItem.parent_id,
+                MediaItem.disc_number,
+                MediaItem.track_number,
+                MediaItem.episode_number,
+                MediaItem.id,
+            )
+        ).all()
+        for descendant in descendants:
+            if descendant.parent_id is not None:
+                grouped_children.setdefault(descendant.parent_id, []).append(descendant)
+        children_for_states = [*children, *descendants]
+    else:
+        children_for_states = list(children)
     child_states = {
         child_state.media_item_id: child_state
         for child_state in db.session.scalars(
-            select(WatchState).where(WatchState.media_item_id.in_([child.id for child in children]))
+            select(WatchState).where(
+                WatchState.media_item_id.in_([child.id for child in children_for_states])
+            )
         ).all()
     }
     refs = db.session.scalars(
@@ -397,6 +534,7 @@ def media_detail(media_id: int) -> Any:
         state=state,
         events=events,
         children=children,
+        grouped_children=grouped_children,
         child_states=child_states,
         refs=refs,
     )
@@ -436,3 +574,19 @@ def _save_setting(key: str, value: str) -> None:
         db.session.add(Setting(key=key, value=value))
     else:
         setting.value = value
+
+
+def _placeholder_image(kind: MediaKind) -> Response:
+    square = kind in {MediaKind.ARTIST, MediaKind.ALBUM, MediaKind.TRACK}
+    width, height = ((400, 400) if square else (300, 450))
+    label = "Música" if square else "Sem capa"
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">'
+        '<rect width="100%" height="100%" fill="#dfe8ec"/>'
+        f'<text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" '
+        f'font-family="sans-serif" font-size="24" fill="#607080">{label}</text></svg>'
+    )
+    response = Response(svg, mimetype="image/svg+xml")
+    response.headers["Cache-Control"] = "private, max-age=3600"
+    return response

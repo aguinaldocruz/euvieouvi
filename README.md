@@ -1,7 +1,7 @@
 # euvieouvi v2
 
-Aplicação self-hosted para registrar, sincronizar e consultar o histórico de filmes e
-séries assistidos. O Plex será o primeiro conector.
+Aplicação self-hosted para registrar, sincronizar e consultar o inventário e o histórico
+de filmes, séries e músicas do Plex.
 
 ## Estado atual
 
@@ -45,16 +45,16 @@ O connector Plex agora inclui:
 - timeouts, retries limitados e erros classificados;
 - redirecionamentos limitados à mesma origem configurada;
 - descoberta explícita de bibliotecas suportadas e rejeitadas;
-- paginação defensiva de filmes, episódios e histórico real;
+- paginação defensiva de filmes, episódios, faixas e histórico real;
 - leitura encapsulada de respostas XML e JSON;
-- mapeamento de filmes, hierarquia de episódios, identificadores e estado agregado;
+- mapeamento de filmes, episódios e música com suas hierarquias e identificadores;
 - fixtures sanitizadas e testes de contrato sem acesso à rede.
 
 O motor de sincronização agora inclui:
 
 - execução local exclusiva, com bloqueio transacional global;
 - fotografia imutável das bibliotecas selecionadas em cada execução;
-- sincronização paginada de filmes, episódios e eventos reais do histórico;
+- sincronização paginada de filmes, episódios, faixas e eventos reais do histórico;
 - persistência idempotente de mídia, hierarquia, identificadores e estado assistido;
 - savepoints por item e confirmação por página;
 - checkpoints opacos para retomada a partir da última página confirmada;
@@ -85,13 +85,15 @@ A interface web agora inclui:
 - descoberta e seleção de bibliotecas com fallback tradicional;
 - dashboard, atividade recente e sincronização em segundo plano;
 - polling HTMX somente enquanto houver execução ativa;
-- histórico filtrável, paginação e detalhes de filmes, séries, temporadas e episódios;
+- catálogo visual paginado com capas, disponibilidade e estado de reprodução;
+- filtros, ordenação ascendente/descendente e detalhes hierárquicos de vídeo e música;
 - distinção visual entre eventos reais e estado assistido agregado;
 - proteção CSRF em todos os formulários de escrita;
 - cabeçalhos de segurança, navegação por teclado e layout móvel.
 
-O agendamento continua reservado às próximas fases aprovadas. A aplicação não possui
-autenticação interna e deve permanecer em rede confiável ou atrás de proxy reverso.
+A sincronização diária pode ser ativada e ter seu horário definido pela interface, sem
+remover o acionamento manual. A aplicação não possui autenticação interna e deve permanecer
+em rede confiável ou atrás de proxy reverso.
 
 O endurecimento da primeira versão agora inclui:
 
@@ -204,4 +206,3 @@ O guia prático de instalação, atualização, backup, restauração e validaç
 [`docs/operations.md`](docs/operations.md).
 
 ### Commit Inicial para Github
-

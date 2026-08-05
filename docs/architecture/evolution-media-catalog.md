@@ -37,4 +37,8 @@ Plex, com consulta visual, disponibilidade histórica e sincronização diária 
 - Fase 1: concluída (modelo, migração e sincronização diária configurável).
 - Fase 2: iniciada (descoberta, inventário, hierarquia e histórico musical implementados;
   validação ampliada contra uma biblioteca Plex real ainda pendente).
-- Fases 3–6: planejadas.
+- Fase 3: concluída (referências Plex, redimensionamento na origem, cache atômico local e
+  placeholders).
+- Fase 4: primeira entrega concluída (grade visual e detalhes de séries/música agrupados).
+- Fase 5: iniciada (busca, disponibilidade, reprodução, paginação e ordenações principais).
+- Fase 6: planejada.
