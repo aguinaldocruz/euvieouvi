@@ -13,7 +13,7 @@ biblioteca padrão do Python e não altera a interface web.
 - o serviço Docker completamente parado.
 
 O importador acompanha o esquema atual do projeto e exige a revisão Alembic
-`20260805_0006`. Execute a atualização da aplicação e confirme `flask db current` antes da
+`20260805_0007`. Execute a atualização da aplicação e confirme `flask db current` antes da
 importação; revisões anteriores são recusadas sem modificar o banco.
 
 O importador associa mídias por Plex GUID, IMDb, TMDB, TVDB e Trakt. Título não é usado

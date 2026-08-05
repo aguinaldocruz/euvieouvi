@@ -263,6 +263,8 @@ class WatchEvent(TimestampMixin, Base):
         UniqueConstraint("source_id", "dedup_key", name="uq_watch_events_dedup"),
         Index("ix_watch_events_media_watched", "media_item_id", "watched_at"),
         Index("ix_watch_events_source_watched", "source_id", "watched_at"),
+        Index("ix_watch_events_completed_id", "completed", "id"),
+        Index("ix_watch_events_watched_id", "watched_at", "id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

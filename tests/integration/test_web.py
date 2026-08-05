@@ -425,6 +425,27 @@ def test_dashboard_history_media_and_sync_detail(app: Flask) -> None:
     )
 
 
+def test_partial_event_is_distinct_from_current_in_progress_state(app: Flask) -> None:
+    with app.app_context():
+        _, _, media_id, _ = seed_web()
+        event = db.session.query(WatchEvent).one()
+        state = db.session.query(WatchState).one()
+        event.completed = False
+        event.progress_ms = 120_000
+        state.completed = False
+        state.view_count = 0
+        state.progress_ms = 120_000
+        db.session.commit()
+
+    client = app.test_client()
+    detail = client.get(f"/media/{media_id}").get_data(as_text=True)
+    dashboard = client.get("/").get_data(as_text=True)
+
+    assert "Em andamento · 0 reprodução(ões) conhecida(s)" in detail
+    assert "Reprodução parcial" in detail
+    assert "Reprodução parcial" in dashboard
+
+
 def test_sync_start_cancel_and_polling_fragment(
     app: Flask, monkeypatch: pytest.MonkeyPatch
 ) -> None:

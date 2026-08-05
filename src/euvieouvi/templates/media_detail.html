@@ -93,7 +93,7 @@
     {% for event, event_item in event_rows %}
       <a class="list-group-item list-group-item-action" href="{{ url_for('web.media_detail', media_id=event_item.id) }}">
         {% if event_item.id != item.id %}<strong>{{ event_item.title }}</strong> · {% endif %}
-        {{ format_datetime(event.watched_at) }} · {{ 'Concluído' if event.completed else 'Em andamento' }}
+        {{ format_datetime(event.watched_at) }} · {{ 'Concluído' if event.completed else 'Reprodução parcial' }}
         {% if event.view_number %} · reprodução {{ event.view_number }}{% endif %}
       </a>
     {% endfor %}

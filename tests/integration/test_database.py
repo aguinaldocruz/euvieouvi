@@ -45,6 +45,18 @@ def test_initial_migration_creates_expected_schema(app: Flask) -> None:
     } <= tables
 
 
+def test_history_indexes_support_large_playback_collections(app: Flask) -> None:
+    with app.app_context():
+        indexes = {
+            index["name"] for index in inspect(db.engine).get_indexes("watch_events")
+        }
+
+    assert {
+        "ix_watch_events_completed_id",
+        "ix_watch_events_watched_id",
+    } <= indexes
+
+
 def test_sqlite_pragmas_are_active(app: Flask) -> None:
     with app.app_context(), db.engine.connect() as connection:
         foreign_keys = connection.execute(text("PRAGMA foreign_keys")).scalar_one()
