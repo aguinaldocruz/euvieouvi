@@ -41,6 +41,7 @@ from euvieouvi.database.models import (
     WatchEvent,
     WatchState,
 )
+from euvieouvi.enrichment.runtime import get_enrichment_executor
 from euvieouvi.errors import AppError
 from euvieouvi.extensions import db
 from euvieouvi.media_images import ensure_cached
@@ -202,6 +203,58 @@ def settings_sync() -> Any:
         timezone=current_app.config["TIMEZONE"],
         errors=errors,
     )
+
+
+@blueprint.route("/settings/metadata", methods=["GET", "POST"])
+def settings_metadata() -> Any:
+    keys = (
+        "metadata.tmdb.enabled",
+        "metadata.tmdb.token",
+        "metadata.musicbrainz.enabled",
+        "metadata.auto_after_sync",
+        "metadata.language",
+        "metadata.last_summary",
+    )
+    values = _settings(*keys)
+    if request.method == "POST":
+        tmdb_enabled = request.form.get("tmdb_enabled") == "on"
+        token = request.form.get("tmdb_token", "").strip()
+        if tmdb_enabled and not token and not values.get("metadata.tmdb.token"):
+            flash("Informe o token de leitura do TMDB para ativar a integração.", "danger")
+        else:
+            _save_setting("metadata.tmdb.enabled", "true" if tmdb_enabled else "false")
+            if token:
+                _save_setting("metadata.tmdb.token", token)
+            _save_setting(
+                "metadata.musicbrainz.enabled",
+                "true" if request.form.get("musicbrainz_enabled") == "on" else "false",
+            )
+            _save_setting(
+                "metadata.auto_after_sync",
+                "true" if request.form.get("auto_after_sync") == "on" else "false",
+            )
+            language = request.form.get("language", "pt-BR")
+            _save_setting(
+                "metadata.language",
+                language if language in {"pt-BR", "en-US"} else "pt-BR",
+            )
+            db.session.commit()
+            flash("Configuração de metadados atualizada.", "success")
+            return redirect(url_for("web.settings_metadata"))
+    return render_template(
+        "settings_metadata.html",
+        values=values,
+        enrichment_active=get_enrichment_executor(current_app).active,
+    )
+
+
+@blueprint.post("/metadata/enrich")
+def metadata_enrich() -> Any:
+    if get_enrichment_executor(current_app).submit():
+        flash("Enriquecimento iniciado em segundo plano.", "success")
+    else:
+        flash("O enriquecimento já está em execução.", "warning")
+    return redirect(url_for("web.settings_metadata"))
 
 
 @blueprint.post("/settings/plex/test")

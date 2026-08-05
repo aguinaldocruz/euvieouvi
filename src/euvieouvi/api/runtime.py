@@ -14,7 +14,7 @@ from euvieouvi.connectors.base import MediaConnector
 from euvieouvi.connectors.plex.client import PlexHttpClient
 from euvieouvi.connectors.plex.connector import PlexConnector
 from euvieouvi.database.enums import SyncStatus, SyncTrigger
-from euvieouvi.database.models import Source, SyncRun
+from euvieouvi.database.models import Setting, Source, SyncRun
 from euvieouvi.extensions import db
 from euvieouvi.sync.cancellation import CancellationToken
 from euvieouvi.sync.orchestrator import SyncOrchestrator
@@ -59,9 +59,20 @@ class LocalSyncExecutor:
                     self._app.logger.error("queued synchronization source disappeared")
                     return
                 try:
-                    SyncOrchestrator(lambda: db.session(), self._factory(source)).run_queued(
+                    result = SyncOrchestrator(
+                        lambda: db.session(), self._factory(source)
+                    ).run_queued(
                         run_id, cancellation=token
                     )
+                    auto_enrich = db.session.get(Setting, "metadata.auto_after_sync")
+                    if (
+                        result.status is SyncStatus.SUCCEEDED
+                        and auto_enrich is not None
+                        and auto_enrich.value == "true"
+                    ):
+                        from euvieouvi.enrichment.runtime import get_enrichment_executor
+
+                        get_enrichment_executor(self._app).submit()
                 except BaseException:
                     self._app.logger.exception("background synchronization failed")
                 finally:

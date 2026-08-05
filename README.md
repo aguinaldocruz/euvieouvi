@@ -95,6 +95,10 @@ A sincronização diária pode ser ativada e ter seu horário definido pela inte
 remover o acionamento manual. A aplicação não possui autenticação interna e deve permanecer
 em rede confiável ou atrás de proxy reverso.
 
+O enriquecimento opcional por TMDB e MusicBrainz fica desativado por padrão. Quando ativado,
+usa somente identificadores exatos já fornecidos pelo Plex, preenche apenas campos ausentes e
+pode ser executado manualmente ou após uma sincronização concluída.
+
 O endurecimento da primeira versão agora inclui:
 
 - redaction defensiva de token, segredo e Authorization nos logs;

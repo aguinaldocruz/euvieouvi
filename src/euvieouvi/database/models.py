@@ -231,6 +231,24 @@ class MediaImage(TimestampMixin, Base):
     cached_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class EnrichmentRecord(TimestampMixin, Base):
+    __tablename__ = "enrichment_records"
+    __table_args__ = (
+        UniqueConstraint("media_item_id", "provider", name="uq_enrichment_records_item_provider"),
+        Index("ix_enrichment_records_status_checked", "status", "checked_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    media_item_id: Mapped[int] = mapped_column(
+        ForeignKey("media_items.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    message: Mapped[str | None] = mapped_column(String(500))
+
+
 class WatchEvent(TimestampMixin, Base):
     __tablename__ = "watch_events"
     __table_args__ = (

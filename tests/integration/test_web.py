@@ -106,6 +106,49 @@ def test_daily_schedule_rejects_invalid_time(app: Flask) -> None:
     assert "horário válido" in response.get_data(as_text=True)
 
 
+def test_metadata_settings_and_manual_enrichment(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = app.test_client()
+    token = csrf(client, "/settings/metadata")
+    missing = client.post(
+        "/settings/metadata",
+        data={"csrf_token": token, "tmdb_enabled": "on"},
+    )
+    assert "Informe o token" in missing.get_data(as_text=True)
+    token = csrf(client, "/settings/metadata")
+    saved = client.post(
+        "/settings/metadata",
+        data={
+            "csrf_token": token,
+            "tmdb_enabled": "on",
+            "tmdb_token": "hidden-token",
+            "musicbrainz_enabled": "on",
+            "auto_after_sync": "on",
+            "language": "pt-BR",
+        },
+        follow_redirects=True,
+    )
+    text = saved.get_data(as_text=True)
+    assert saved.status_code == 200 and "Configuração de metadados atualizada" in text
+    assert "hidden-token" not in text
+
+    class Executor:
+        active = False
+
+        def submit(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "euvieouvi.web.routes.get_enrichment_executor", lambda app: Executor()
+    )
+    token = csrf(client, "/settings/metadata")
+    started = client.post(
+        "/metadata/enrich", data={"csrf_token": token}, follow_redirects=True
+    )
+    assert "Enriquecimento iniciado" in started.get_data(as_text=True)
+
+
 def seed_web() -> tuple[int, int, int, int]:
     source = Source(
         connector_type=ConnectorType.PLEX,
