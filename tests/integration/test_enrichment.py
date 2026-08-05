@@ -8,6 +8,7 @@ from euvieouvi.database.models import (
     EnrichmentRecord,
     Genre,
     MediaIdentifier,
+    MediaImage,
     MediaItem,
     Setting,
 )
@@ -28,6 +29,8 @@ class FakeTmdb:
             studio="External studio",
             audience_rating=8.2,
             genres=("Science Fiction",),
+            poster_url="https://image.tmdb.org/t/p/w500/arrival.jpg",
+            poster_provider="tmdb",
         )
 
     def close(self) -> None:
@@ -77,6 +80,8 @@ def test_enrichment_only_fills_missing_fields_and_is_idempotent(
         assert db.session.scalar(select(Genre.name)) == "Science Fiction"
         record = db.session.scalar(select(EnrichmentRecord))
         assert record is not None and record.status == "succeeded" and record.attempts == 1
+        image = db.session.scalar(select(MediaImage))
+        assert image is not None and image.provider == "tmdb" and image.source_id is None
 
 
 def test_musicbrainz_enrichment_and_failure_are_audited(

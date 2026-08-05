@@ -44,7 +44,7 @@ from euvieouvi.database.models import (
 from euvieouvi.enrichment.runtime import get_enrichment_executor
 from euvieouvi.errors import AppError
 from euvieouvi.extensions import db
-from euvieouvi.media_images import ensure_cached
+from euvieouvi.media_images import ensure_cached, ensure_external_cached
 from euvieouvi.sync.discovery import LibraryDiscoveryService
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
 from euvieouvi.web.formatting import duration_ms, local_datetime
@@ -555,6 +555,17 @@ def media_image(media_id: int) -> Any:
     )
     if image is None:
         return _placeholder_image(item.kind)
+    cache_directory = Path(current_app.instance_path) / "images"
+    if image.provider != "plex":
+        try:
+            path = ensure_external_cached(image, cache_directory)
+            db.session.commit()
+        except (OSError, ValueError):
+            db.session.rollback()
+            return _placeholder_image(item.kind)
+        response = send_file(path, mimetype=image.mime_type, conditional=True, max_age=86400)
+        response.headers["Cache-Control"] = "private, max-age=86400"
+        return response
     source = db.session.get(Source, image.source_id)
     if source is None or not source.enabled:
         return _placeholder_image(item.kind)
@@ -566,7 +577,7 @@ def media_image(media_id: int) -> Any:
         path = ensure_cached(
             image,
             connector,
-            Path(current_app.instance_path) / "images",
+            cache_directory,
             width=400 if square else 300,
             height=400 if square else 450,
         )

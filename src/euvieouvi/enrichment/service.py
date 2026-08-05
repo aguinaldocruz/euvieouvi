@@ -14,6 +14,7 @@ from euvieouvi.database.models import (
     Genre,
     MediaGenre,
     MediaIdentifier,
+    MediaImage,
     MediaItem,
     Setting,
 )
@@ -129,6 +130,25 @@ def _apply(item: MediaItem, metadata: EnrichedMetadata) -> bool:
         )
         if link is None:
             db.session.add(MediaGenre(media_item_id=item.id, genre_id=genre.id))
+            changed = True
+    if metadata.poster_url and metadata.poster_provider:
+        image = db.session.scalar(
+            select(MediaImage).where(
+                MediaImage.media_item_id == item.id,
+                MediaImage.image_type == "poster",
+            )
+        )
+        if image is None:
+            db.session.add(
+                MediaImage(
+                    media_item_id=item.id,
+                    source_id=None,
+                    image_type="poster",
+                    provider=metadata.poster_provider,
+                    source_url=metadata.poster_url,
+                    cache_status="pending",
+                )
+            )
             changed = True
     return changed
 

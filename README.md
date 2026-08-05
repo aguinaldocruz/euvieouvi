@@ -97,7 +97,9 @@ em rede confiável ou atrás de proxy reverso.
 
 O enriquecimento opcional por TMDB e MusicBrainz fica desativado por padrão. Quando ativado,
 usa somente identificadores exatos já fornecidos pelo Plex, preenche apenas campos ausentes e
-pode ser executado manualmente ou após uma sincronização concluída.
+pode ser executado manualmente ou após uma sincronização concluída. Quando o Plex não fornece
+uma capa, a aplicação pode usar a imagem correspondente do TMDB ou Cover Art Archive; essas
+imagens passam pela mesma camada de cache local e são substituídas se uma capa Plex surgir.
 
 O endurecimento da primeira versão agora inclui:
 

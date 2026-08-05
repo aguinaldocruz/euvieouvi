@@ -24,6 +24,7 @@ def test_tmdb_exact_lookup_maps_missing_field_candidates() -> None:
                 "vote_average": 8.2,
                 "genres": [{"name": "Ficção científica"}],
                 "production_companies": [{"name": "Paramount"}],
+                "poster_path": "/arrival.jpg",
             },
             request=request,
         )
@@ -37,6 +38,8 @@ def test_tmdb_exact_lookup_maps_missing_field_candidates() -> None:
     assert value.studio == "Paramount"
     assert value.audience_rating == 8.2
     assert value.genres == ("Ficção científica",)
+    assert value.poster_url == "https://image.tmdb.org/t/p/w500/arrival.jpg"
+    assert value.poster_provider == "tmdb"
 
 
 def test_tmdb_rejects_nonexact_id_and_not_found() -> None:
@@ -59,7 +62,10 @@ def test_musicbrainz_exact_lookup_respects_one_request_per_second() -> None:
         assert request.url.params["inc"] == "genres+artist-credits+releases"
         return httpx.Response(
             200,
-            json={"genres": [{"name": "Rock"}, {"name": "Pop"}]},
+            json={
+                "genres": [{"name": "Rock"}, {"name": "Pop"}],
+                "releases": [{"id": "9dbb5ea9-118b-4203-b093-bc4b14b8aa16"}],
+            },
             request=request,
         )
 
@@ -67,7 +73,11 @@ def test_musicbrainz_exact_lookup_respects_one_request_per_second() -> None:
         base_url="https://musicbrainz.org", transport=httpx.MockTransport(handler)
     )
     client = MusicBrainzClient("euvieouvi/test", client=http, sleep=delays.append)
-    assert client.lookup_recording(MBID).genres == ("Pop", "Rock")
+    value = client.lookup_recording(MBID)
+    assert value.genres == ("Pop", "Rock")
+    assert value.poster_url == (
+        "https://coverartarchive.org/release/9dbb5ea9-118b-4203-b093-bc4b14b8aa16/front-500"
+    )
     client.lookup_recording(MBID)
     assert delays == [1.0]
     with pytest.raises(ValueError, match="exact"):

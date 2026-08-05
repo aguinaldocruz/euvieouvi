@@ -188,6 +188,7 @@ def movie(
     view_count: int | None = None,
     title: str | None = None,
     genres: tuple[str, ...] = (),
+    thumb_path: str | None = None,
 ) -> ExternalMediaItem:
     return ExternalMediaItem(
         external_id=external_id,
@@ -197,6 +198,7 @@ def movie(
         view_count=view_count,
         last_viewed_at=NOW if view_count else None,
         genres=genres,
+        thumb_path=thumb_path,
     )
 
 
@@ -317,6 +319,38 @@ def test_music_sync_persists_artist_album_track_and_history(app: Flask) -> None:
         refs = db.session.scalars(select(SourceMediaRef)).all()
         assert all(reference.available for reference in refs)
         assert db.session.scalar(select(func.count()).select_from(MediaGenre)) == 3
+
+
+def test_plex_artwork_replaces_external_fallback(app: Flask) -> None:
+    with app.app_context():
+        source_id, _ = seed_source()
+        engine = orchestrator(FixtureConnector({"movies": (movie("m1"),)}))
+        assert engine.run(source_id).status is SyncStatus.SUCCEEDED
+        media = db.session.scalar(select(MediaItem).where(MediaItem.title == "Movie m1"))
+        assert media is not None
+        db.session.add(
+            MediaImage(
+                media_item_id=media.id,
+                source_id=None,
+                image_type="poster",
+                provider="tmdb",
+                source_url="https://image.tmdb.org/t/p/w500/fallback.jpg",
+                cache_status="pending",
+            )
+        )
+        db.session.commit()
+        refreshed = orchestrator(
+            FixtureConnector(
+                {"movies": (movie("m1", thumb_path="/library/metadata/m1/thumb"),)}
+            )
+        ).run(source_id)
+        assert refreshed.status is SyncStatus.SUCCEEDED
+        image = db.session.scalar(select(MediaImage))
+        assert image is not None
+        assert image.provider == "plex"
+        assert image.source_id == source_id
+        assert image.source_path == "/library/metadata/m1/thumb"
+        assert image.source_url is None
 
 
 def test_partial_series_enumerates_all_episodes_and_preserves_144_watched(app: Flask) -> None:

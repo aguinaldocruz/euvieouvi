@@ -43,6 +43,7 @@ Plex, com consulta visual, disponibilidade histórica e sincronização diária 
 - Fase 5: concluída (biblioteca, gênero, década, disponibilidade, reprodução, busca,
   paginação e ordenações ascendentes/descendentes, incluindo primeira/última reprodução,
   inclusão, atualização e remoção).
-- Fase 6: primeira entrega concluída (TMDB e MusicBrainz opcionais, configuração protegida,
-  IDs exatos, precedência do Plex, execução manual/automática e auditoria idempotente).
-  Imagens externas permanecem como fallback futuro; capas Plex continuam prioritárias.
+- Fase 6: concluída (TMDB e MusicBrainz opcionais, configuração protegida, IDs exatos,
+  precedência do Plex, execução manual/automática, auditoria idempotente e fallback de imagens
+  do TMDB/Cover Art Archive com download restrito e cache local). Capas Plex continuam
+  prioritárias.

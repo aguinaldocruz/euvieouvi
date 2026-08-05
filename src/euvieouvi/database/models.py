@@ -220,11 +220,13 @@ class MediaImage(TimestampMixin, Base):
     media_item_id: Mapped[int] = mapped_column(
         ForeignKey("media_items.id", ondelete="CASCADE"), nullable=False
     )
-    source_id: Mapped[int] = mapped_column(
-        ForeignKey("sources.id", ondelete="RESTRICT"), nullable=False
+    source_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sources.id", ondelete="RESTRICT")
     )
     image_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    source_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), default="plex", nullable=False)
+    source_path: Mapped[str | None] = mapped_column(String(2048))
+    source_url: Mapped[str | None] = mapped_column(String(2048))
     local_filename: Mapped[str | None] = mapped_column(String(255))
     mime_type: Mapped[str | None] = mapped_column(String(128))
     cache_status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)

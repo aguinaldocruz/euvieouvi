@@ -280,12 +280,16 @@ class MediaPersistenceService:
                     media_item_id=media_item_id,
                     source_id=self.source_id,
                     image_type=image_type,
+                    provider="plex",
                     source_path=source_path,
                     cache_status="pending",
                 )
             )
-        elif image.source_path != source_path:
+        elif image.source_path != source_path or image.provider != "plex":
+            image.source_id = self.source_id
+            image.provider = "plex"
             image.source_path = source_path
+            image.source_url = None
             image.local_filename = None
             image.mime_type = None
             image.cache_status = "pending"

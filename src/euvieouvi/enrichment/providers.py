@@ -24,6 +24,8 @@ class EnrichedMetadata:
     studio: str | None = None
     audience_rating: float | None = None
     genres: tuple[str, ...] = ()
+    poster_url: str | None = None
+    poster_provider: str | None = None
 
 
 class TmdbClient:
@@ -60,6 +62,8 @@ class TmdbClient:
             studio=studio,
             audience_rating=_number(data.get("vote_average")),
             genres=_names(data.get("genres")),
+            poster_url=_tmdb_poster(data.get("poster_path")),
+            poster_provider="tmdb" if _tmdb_poster(data.get("poster_path")) else None,
         )
 
     def close(self) -> None:
@@ -105,7 +109,12 @@ class MusicBrainzClient:
             data = response.json()
         except (httpx.HTTPError, ValueError) as error:
             raise EnrichmentError("MusicBrainz request failed") from error
-        return EnrichedMetadata(genres=_names(data.get("genres")))
+        cover_url = _cover_art_url(data.get("releases"))
+        return EnrichedMetadata(
+            genres=_names(data.get("genres")),
+            poster_url=cover_url,
+            poster_provider="coverartarchive" if cover_url else None,
+        )
 
     def close(self) -> None:
         if self._owns_client:
@@ -129,3 +138,21 @@ def _names(value: Any) -> tuple[str, ...]:
         if isinstance(item, dict) and (name := _text(item.get("name"))) is not None
     }
     return tuple(sorted(result, key=str.casefold))
+
+
+def _tmdb_poster(value: Any) -> str | None:
+    path = _text(value)
+    if path is None or not path.startswith("/") or ".." in path:
+        return None
+    return f"https://image.tmdb.org/t/p/w500{path}"
+
+
+def _cover_art_url(value: Any) -> str | None:
+    if not isinstance(value, list):
+        return None
+    for release in value:
+        if isinstance(release, dict) and isinstance(release.get("id"), str):
+            release_id = release["id"]
+            if _MBID.fullmatch(release_id):
+                return f"https://coverartarchive.org/release/{release_id}/front-500"
+    return None

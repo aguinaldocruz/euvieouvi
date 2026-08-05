@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from flask import Flask
@@ -532,6 +533,37 @@ def test_media_image_placeholder_and_local_cache(
     assert first.status_code == 200 and first.data == b"cached-jpeg"
     assert second.status_code == 200 and second.data == b"cached-jpeg"
     assert calls == [f"/library/metadata/{movie_id}/thumb"]
+
+
+def test_media_image_serves_external_fallback(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with app.app_context():
+        _, _, movie_id, _ = seed_web()
+        db.session.add(
+            MediaImage(
+                media_item_id=movie_id,
+                source_id=None,
+                image_type="poster",
+                provider="tmdb",
+                source_url="https://image.tmdb.org/t/p/w500/poster.jpg",
+                cache_status="pending",
+            )
+        )
+        db.session.commit()
+
+    def cache(image: MediaImage, directory: Path) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "external.jpg"
+        path.write_bytes(b"external-image")
+        image.mime_type = "image/jpeg"
+        image.local_filename = path.name
+        return path
+
+    monkeypatch.setattr("euvieouvi.web.routes.ensure_external_cached", cache)
+    response = app.test_client().get(f"/media/{movie_id}/image")
+    assert response.status_code == 200
+    assert response.data == b"external-image"
 
 
 def test_series_detail_groups_episodes_by_season(app: Flask) -> None:
