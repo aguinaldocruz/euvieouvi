@@ -1009,14 +1009,12 @@ def _count(model: type[Any], *criteria: Any) -> int:
 def _watched_count(kind: MediaKind) -> int:
     return int(
         db.session.scalar(
-            select(func.count())
-            .select_from(MediaItem)
+            select(func.count(func.distinct(WatchEvent.media_item_id)))
+            .select_from(WatchEvent)
+            .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
             .where(
                 MediaItem.kind == kind,
-                exists().where(
-                    WatchEvent.media_item_id == MediaItem.id,
-                    WatchEvent.completed.is_(True),
-                ),
+                WatchEvent.completed.is_(True),
             )
         )
         or 0

@@ -53,6 +53,7 @@ def test_history_indexes_support_large_playback_collections(app: Flask) -> None:
 
     assert {
         "ix_watch_events_completed_id",
+        "ix_watch_events_media_completed_watched",
         "ix_watch_events_watched_id",
     } <= indexes
 

@@ -261,6 +261,12 @@ class WatchEvent(TimestampMixin, Base):
         ),
         UniqueConstraint("source_id", "source_event_id", name="uq_watch_events_source_event"),
         UniqueConstraint("source_id", "dedup_key", name="uq_watch_events_dedup"),
+        Index(
+            "ix_watch_events_media_completed_watched",
+            "media_item_id",
+            "completed",
+            "watched_at",
+        ),
         Index("ix_watch_events_media_watched", "media_item_id", "watched_at"),
         Index("ix_watch_events_source_watched", "source_id", "watched_at"),
         Index("ix_watch_events_completed_id", "completed", "id"),
