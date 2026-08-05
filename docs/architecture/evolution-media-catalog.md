@@ -39,7 +39,8 @@ Plex, com consulta visual, disponibilidade histórica e sincronização diária 
   validação ampliada contra uma biblioteca Plex real ainda pendente).
 - Fase 3: concluída (referências Plex, redimensionamento na origem, cache atômico local e
   placeholders).
-- Fase 4: primeira entrega concluída (grade visual e detalhes de séries/música agrupados).
+- Fase 4: concluída (grade visual, detalhes agrupados de séries/música, disponibilidade dos
+  itens-filhos e histórico paginado agregado por episódio ou faixa).
 - Fase 5: concluída (biblioteca, gênero, década, disponibilidade, reprodução, busca,
   paginação e ordenações ascendentes/descendentes, incluindo primeira/última reprodução,
   inclusão, atualização e remoção).

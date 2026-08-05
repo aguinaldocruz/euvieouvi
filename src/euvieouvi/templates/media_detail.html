@@ -1,6 +1,121 @@
-{% extends 'base.html' %}{% block title %}{{ item.title }} · euvieouvi{% endblock %}{% block content %}
-<a href="{{ url_for('web.catalog') }}">← Voltar ao catálogo</a><div class="row g-4 mt-1 mb-4"><div class="col-5 col-md-3 col-lg-2"><img class="img-fluid rounded shadow-sm" src="{{ url_for('web.media_image', media_id=item.id) }}" alt="Capa de {{ item.title }}"></div><div class="col"><h1 class="h2">{{ item.title }}{% if item.year %} <span class="text-secondary">({{ item.year }})</span>{% endif %}</h1>{% if item.tagline %}<p class="lead fst-italic">{{ item.tagline }}</p>{% endif %}<p class="text-secondary">{{ item.kind.value }}{% if item.season_number is not none %} · Temporada {{ item.season_number }}{% endif %}{% if item.episode_number is not none %} · Episódio {{ item.episode_number }}{% endif %} · {{ format_duration(item.duration_ms) }}{% if item.content_rating %} · {{ item.content_rating }}{% endif %}{% if item.audience_rating is not none %} · avaliação {{ '%.1f'|format(item.audience_rating) }}{% endif %}</p>{% if item.studio %}<p><strong>Estúdio:</strong> {{ item.studio }}</p>{% endif %}{% if item_genres %}<p><strong>Gêneros:</strong> {{ item_genres|map(attribute='name')|join(', ') }}</p>{% endif %}{% if item.summary %}<p>{{ item.summary }}</p>{% endif %}</div></div><div class="card mb-4"><div class="card-body"><h2 class="h5">Estado de reprodução</h2>{% if aggregate %}<p>{{ aggregate.played }}/{{ aggregate.total }} item(ns) reproduzido(s) · {{ aggregate.play_count }} reprodução(ões) no total</p><p class="mb-0">Última vez: {{ format_datetime(aggregate.last_played) }}</p>{% elif state %}<p>{{ 'Concluído' if state.completed else 'Em andamento' }} · {{ state.view_count }} reprodução(ões) conhecida(s)</p><p class="mb-0">Última vez: {{ format_datetime(state.last_watched_at) }}</p>{% else %}<p class="text-secondary mb-0">Nenhuma reprodução conhecida.</p>{% endif %}</div></div>
-{% if children %}<h2 class="h4">Conteúdo</h2>{% if grouped_children %}<div class="accordion mb-4" id="media-groups">{% for group in children %}<div class="accordion-item"><h3 class="accordion-header"><button class="accordion-button {% if not loop.first %}collapsed{% endif %}" type="button" data-bs-toggle="collapse" data-bs-target="#group-{{ group.id }}" aria-expanded="{{ 'true' if loop.first else 'false' }}">{% if item.kind.value=='show' %}Temporada {{ group.season_number }}{% else %}{{ group.title }}{% endif %} · {{ grouped_children.get(group.id, [])|length }} item(ns)</button></h3><div id="group-{{ group.id }}" class="accordion-collapse collapse {% if loop.first %}show{% endif %}" data-bs-parent="#media-groups"><div class="list-group list-group-flush">{% for child in grouped_children.get(group.id, []) %}<a class="list-group-item list-group-item-action d-flex justify-content-between" href="{{ url_for('web.media_detail', media_id=child.id) }}"><span>{% if child.episode_number is not none %}E{{ '%02d'|format(child.episode_number) }} · {% elif child.track_number is not none %}{{ child.track_number }}. {% endif %}{{ child.title }}</span><span class="small text-secondary">{% if child_states.get(child.id) %}{{ child_states[child.id].view_count }} reprodução(ões){% else %}Nunca reproduzido{% endif %}</span></a>{% endfor %}</div></div></div>{% endfor %}</div>{% else %}<div class="list-group mb-4">{% for child in children %}<a class="list-group-item list-group-item-action d-flex justify-content-between" href="{{ url_for('web.media_detail', media_id=child.id) }}"><span>{% if child.season_number is not none %}T{{ '%02d'|format(child.season_number) }}{% endif %}{% if child.episode_number is not none %}E{{ '%02d'|format(child.episode_number) }} · {% endif %}{{ child.title }}</span><span class="small text-secondary">{% if child_states.get(child.id) %}{{ child_states[child.id].view_count }} reprodução(ões){% else %}Nunca reproduzido{% endif %}</span></a>{% endfor %}</div>{% endif %}{% endif %}
-<h2 class="h4">Eventos reais conhecidos</h2>{% if events %}<ul class="list-group mb-4">{% for event in events %}<li class="list-group-item">{{ format_datetime(event.watched_at) }} · {{ 'Concluído' if event.completed else 'Em andamento' }}{% if event.view_number %} · visualização {{ event.view_number }}{% endif %}</li>{% endfor %}</ul>{% else %}<p class="text-secondary">Nenhum evento histórico foi informado; o estado agregado acima não foi transformado artificialmente em eventos.</p>{% endif %}
-<h2 class="h4">Disponibilidade</h2><ul>{% for ref in refs %}<li>Fonte {{ ref.source_id }}, biblioteca {{ ref.library_id }} — {{ 'disponível no Plex' if ref.available else 'removido do Plex' }}{% if ref.unavailable_since %} em {{ format_datetime(ref.unavailable_since) }}{% endif %}</li>{% else %}<li>Nenhuma referência ativa.</li>{% endfor %}</ul>
+{% extends 'base.html' %}
+{% block title %}{{ item.title }} · euvieouvi{% endblock %}
+{% block content %}
+<a href="{{ url_for('web.catalog') }}">← Voltar ao catálogo</a>
+<div class="row g-4 mt-1 mb-4">
+  <div class="col-5 col-md-3 col-lg-2">
+    <img class="img-fluid rounded shadow-sm" src="{{ url_for('web.media_image', media_id=item.id) }}" alt="Capa de {{ item.title }}">
+  </div>
+  <div class="col">
+    <h1 class="h2">{{ item.title }}{% if item.year %} <span class="text-secondary">({{ item.year }})</span>{% endif %}</h1>
+    {% if item.tagline %}<p class="lead fst-italic">{{ item.tagline }}</p>{% endif %}
+    <p class="text-secondary">
+      {{ item.kind.value }}
+      {% if item.season_number is not none %} · Temporada {{ item.season_number }}{% endif %}
+      {% if item.episode_number is not none %} · Episódio {{ item.episode_number }}{% endif %}
+      · {{ format_duration(item.duration_ms) }}
+      {% if item.content_rating %} · {{ item.content_rating }}{% endif %}
+      {% if item.audience_rating is not none %} · avaliação {{ '%.1f'|format(item.audience_rating) }}{% endif %}
+    </p>
+    {% if item.studio %}<p><strong>Estúdio:</strong> {{ item.studio }}</p>{% endif %}
+    {% if item_genres %}<p><strong>Gêneros:</strong> {{ item_genres|map(attribute='name')|join(', ') }}</p>{% endif %}
+    {% if item.summary %}<p>{{ item.summary }}</p>{% endif %}
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <h2 class="h5">Estado de reprodução</h2>
+    {% if aggregate %}
+      <p>{{ aggregate.played }}/{{ aggregate.total }} item(ns) reproduzido(s) · {{ aggregate.play_count }} reprodução(ões) no total</p>
+      <p class="mb-0">Última vez: {{ format_datetime(aggregate.last_played) }}</p>
+    {% elif state %}
+      <p>{{ 'Concluído' if state.completed else 'Em andamento' }} · {{ state.view_count }} reprodução(ões) conhecida(s)</p>
+      <p class="mb-0">Última vez: {{ format_datetime(state.last_watched_at) }}</p>
+    {% else %}
+      <p class="text-secondary mb-0">Nenhuma reprodução conhecida.</p>
+    {% endif %}
+  </div>
+</div>
+
+{% macro child_status(child) -%}
+  <span class="d-flex gap-2 align-items-center small">
+    <span class="media-badge {{ 'is-available' if child_available.get(child.id) else 'is-unavailable' }}"
+          title="{{ 'Disponível no Plex' if child_available.get(child.id) else 'Removido do Plex' }}">P</span>
+    <span class="text-secondary">
+      {% if child_states.get(child.id) %}{{ child_states[child.id].view_count }} reprodução(ões){% else %}Nunca reproduzido{% endif %}
+    </span>
+  </span>
+{%- endmacro %}
+
+{% if children %}
+  <h2 class="h4">Conteúdo</h2>
+  {% if grouped_children %}
+    <div class="accordion mb-4" id="media-groups">
+      {% for group in children %}
+        <div class="accordion-item">
+          <h3 class="accordion-header">
+            <button class="accordion-button {% if not loop.first %}collapsed{% endif %}" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#group-{{ group.id }}"
+                    aria-expanded="{{ 'true' if loop.first else 'false' }}">
+              {% if item.kind.value == 'show' %}Temporada {{ group.season_number }}{% else %}{{ group.title }}{% endif %}
+              · {{ grouped_children.get(group.id, [])|length }} item(ns)
+            </button>
+          </h3>
+          <div id="group-{{ group.id }}" class="accordion-collapse collapse {% if loop.first %}show{% endif %}" data-bs-parent="#media-groups">
+            <div class="list-group list-group-flush">
+              {% for child in grouped_children.get(group.id, []) %}
+                <a class="list-group-item list-group-item-action d-flex justify-content-between align-items-center gap-3" href="{{ url_for('web.media_detail', media_id=child.id) }}">
+                  <span>{% if child.episode_number is not none %}E{{ '%02d'|format(child.episode_number) }} · {% elif child.track_number is not none %}{{ child.track_number }}. {% endif %}{{ child.title }}</span>
+                  {{ child_status(child) }}
+                </a>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="list-group mb-4">
+      {% for child in children %}
+        <a class="list-group-item list-group-item-action d-flex justify-content-between align-items-center gap-3" href="{{ url_for('web.media_detail', media_id=child.id) }}">
+          <span>{% if child.season_number is not none %}T{{ '%02d'|format(child.season_number) }}{% endif %}{% if child.episode_number is not none %}E{{ '%02d'|format(child.episode_number) }} · {% elif child.track_number is not none %}{{ child.track_number }}. {% endif %}{{ child.title }}</span>
+          {{ child_status(child) }}
+        </a>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endif %}
+
+<h2 class="h4">Histórico completo <span class="text-secondary fs-6">({{ history_total }})</span></h2>
+{% if event_rows %}
+  <div class="list-group mb-3">
+    {% for event, event_item in event_rows %}
+      <a class="list-group-item list-group-item-action" href="{{ url_for('web.media_detail', media_id=event_item.id) }}">
+        {% if event_item.id != item.id %}<strong>{{ event_item.title }}</strong> · {% endif %}
+        {{ format_datetime(event.watched_at) }} · {{ 'Concluído' if event.completed else 'Em andamento' }}
+        {% if event.view_number %} · reprodução {{ event.view_number }}{% endif %}
+      </a>
+    {% endfor %}
+  </div>
+  <nav class="d-flex justify-content-between mb-4" aria-label="Paginação do histórico">
+    {% if history_page > 1 %}
+      <a class="btn btn-outline-secondary" href="{{ url_for('web.media_detail', media_id=item.id, history_page=history_page-1) }}">Histórico anterior</a>
+    {% else %}<span></span>{% endif %}
+    {% if history_has_more %}
+      <a class="btn btn-primary" href="{{ url_for('web.media_detail', media_id=item.id, history_page=history_page+1) }}">Próximo histórico</a>
+    {% endif %}
+  </nav>
+{% else %}
+  <p class="text-secondary">Nenhum evento histórico foi informado; o estado agregado acima não foi transformado artificialmente em eventos.</p>
+{% endif %}
+
+<h2 class="h4">Disponibilidade</h2>
+<ul>
+  {% for ref, source, library in availability_rows %}
+    <li>{{ source.name }} · {{ library.name }} — {{ 'disponível no Plex' if ref.available else 'removido do Plex' }}{% if ref.unavailable_since %} em {{ format_datetime(ref.unavailable_since) }}{% endif %}</li>
+  {% else %}
+    <li>Nenhuma referência encontrada.</li>
+  {% endfor %}
+</ul>
 {% endblock %}

@@ -87,6 +87,8 @@ A interface web agora inclui:
 - polling HTMX somente enquanto houver execução ativa;
 - catálogo visual paginado com capas, disponibilidade e estado de reprodução;
 - filtros, ordenação ascendente/descendente e detalhes hierárquicos de vídeo e música;
+- histórico completo paginado nas séries, temporadas, artistas e álbuns, com identificação do
+  episódio ou faixa e disponibilidade individual no Plex;
 - distinção visual entre eventos reais e estado assistido agregado;
 - proteção CSRF em todos os formulários de escrita;
 - cabeçalhos de segurança, navegação por teclado e layout móvel.

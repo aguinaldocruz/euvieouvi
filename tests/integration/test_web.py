@@ -413,8 +413,9 @@ def test_dashboard_history_media_and_sync_detail(app: Flask) -> None:
     detail = client.get(f"/media/{media_id}").get_data(as_text=True)
     assert (
         "Contato com visitantes" in detail
-        and "Eventos reais conhecidos" in detail
-        and "visualização 2" in detail
+        and "Histórico completo" in detail
+        and "reprodução 2" in detail
+        and "Principal · Filmes" in detail
     )
     sync = client.get(f"/sync/{run_id}").get_data(as_text=True)
     assert "Mensagem segura" in sync and "Bibliotecas" in sync
@@ -599,6 +600,14 @@ def test_series_detail_groups_episodes_by_season(app: Flask) -> None:
                     last_seen_at=NOW,
                     available=True,
                 ),
+                SourceMediaRef(
+                    source_id=source_id,
+                    library_id=library_id,
+                    media_item_id=episode.id,
+                    external_id="episode-1",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
                 WatchState(
                     media_item_id=episode.id,
                     source_id=source_id,
@@ -606,6 +615,15 @@ def test_series_detail_groups_episodes_by_season(app: Flask) -> None:
                     last_watched_at=NOW,
                     completed=True,
                     observed_at=NOW,
+                ),
+                WatchEvent(
+                    media_item_id=episode.id,
+                    source_id=source_id,
+                    source_event_id="episode-event-1",
+                    dedup_key="episode-dedup-1",
+                    watched_at=NOW,
+                    completed=True,
+                    view_number=1,
                 ),
             ]
         )
@@ -615,3 +633,81 @@ def test_series_detail_groups_episodes_by_season(app: Flask) -> None:
     assert "Temporada 1" in text
     assert "E01" in text
     assert "Space Pilot 3000" in text
+    assert "Histórico completo" in text
+    assert "Space Pilot 3000</strong>" in text
+    assert "reprodução 1" in text
+    assert "Disponível no Plex" in text
+
+
+def test_artist_detail_rolls_up_track_history_with_pagination(app: Flask) -> None:
+    with app.app_context():
+        source_id, library_id, _, _ = seed_web()
+        artist = MediaItem(kind=MediaKind.ARTIST, title="Massive Attack")
+        db.session.add(artist)
+        db.session.flush()
+        album = MediaItem(kind=MediaKind.ALBUM, title="Mezzanine", parent_id=artist.id)
+        db.session.add(album)
+        db.session.flush()
+        track = MediaItem(
+            kind=MediaKind.TRACK,
+            title="Teardrop",
+            parent_id=album.id,
+            disc_number=1,
+            track_number=3,
+        )
+        db.session.add(track)
+        db.session.flush()
+        db.session.add_all(
+            [
+                SourceMediaRef(
+                    source_id=source_id,
+                    library_id=library_id,
+                    media_item_id=artist.id,
+                    external_id="artist-1",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+                SourceMediaRef(
+                    source_id=source_id,
+                    library_id=library_id,
+                    media_item_id=track.id,
+                    external_id="track-1",
+                    last_seen_at=NOW,
+                    available=False,
+                    unavailable_since=NOW,
+                ),
+                WatchState(
+                    media_item_id=track.id,
+                    source_id=source_id,
+                    view_count=51,
+                    last_watched_at=NOW,
+                    completed=True,
+                    observed_at=NOW,
+                ),
+            ]
+        )
+        for number in range(1, 52):
+            db.session.add(
+                WatchEvent(
+                    media_item_id=track.id,
+                    source_id=source_id,
+                    source_event_id=f"track-event-{number}",
+                    dedup_key=f"track-dedup-{number}",
+                    watched_at=NOW,
+                    completed=True,
+                    view_number=number,
+                )
+            )
+        db.session.commit()
+        artist_id = artist.id
+
+    client = app.test_client()
+    first = client.get(f"/media/{artist_id}").get_data(as_text=True)
+    assert "Mezzanine" in first
+    assert "Teardrop</strong>" in first
+    assert "Histórico completo" in first and "(51)" in first
+    assert "Próximo histórico" in first
+    assert "Removido do Plex" in first
+    second = client.get(f"/media/{artist_id}?history_page=2").get_data(as_text=True)
+    assert "Histórico anterior" in second
+    assert "reprodução 1" in second

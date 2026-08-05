@@ -602,11 +602,6 @@ def media_detail(media_id: int) -> Any:
         .where(WatchState.media_item_id == media_id)
         .order_by(WatchState.id.desc())
     )
-    events = db.session.scalars(
-        select(WatchEvent)
-        .where(WatchEvent.media_item_id == media_id)
-        .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
-    ).all()
     children = db.session.scalars(
         select(MediaItem)
         .where(MediaItem.parent_id == media_id)
@@ -639,13 +634,18 @@ def media_detail(media_id: int) -> Any:
             )
         ).all()
     }
+    playable = [
+        child
+        for child in children_for_states
+        if child.kind in {MediaKind.EPISODE, MediaKind.TRACK}
+    ]
     aggregate = None
-    if item.kind in {MediaKind.SHOW, MediaKind.ARTIST} and children_for_states:
-        playable = [
-            child
-            for child in children_for_states
-            if child.kind in {MediaKind.EPISODE, MediaKind.TRACK}
-        ]
+    if item.kind in {
+        MediaKind.SHOW,
+        MediaKind.SEASON,
+        MediaKind.ARTIST,
+        MediaKind.ALBUM,
+    } and playable:
         played_states = [child_states[child.id] for child in playable if child.id in child_states]
         last_played = max(
             (value.last_watched_at for value in played_states if value.last_watched_at is not None),
@@ -657,26 +657,65 @@ def media_detail(media_id: int) -> Any:
             "play_count": sum(value.view_count for value in played_states),
             "last_played": last_played,
         }
+    history_ids = [child.id for child in playable] or [media_id]
+    raw_history_page = request.args.get("history_page", "1")
+    history_page = max(int(raw_history_page) if raw_history_page.isdigit() else 1, 1)
+    history_total = int(
+        db.session.scalar(
+            select(func.count())
+            .select_from(WatchEvent)
+            .where(WatchEvent.media_item_id.in_(history_ids))
+        )
+        or 0
+    )
+    event_rows = db.session.execute(
+        select(WatchEvent, MediaItem)
+        .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
+        .where(WatchEvent.media_item_id.in_(history_ids))
+        .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
+        .limit(51)
+        .offset((history_page - 1) * 50)
+    ).all()
+    child_available = {
+        child_id: available
+        for child_id, available in db.session.execute(
+            select(
+                MediaItem.id,
+                exists().where(
+                    SourceMediaRef.media_item_id == MediaItem.id,
+                    SourceMediaRef.available.is_(True),
+                ),
+            ).where(MediaItem.id.in_([child.id for child in children_for_states]))
+        )
+    }
     item_genres = db.session.scalars(
         select(Genre)
         .join(MediaGenre, MediaGenre.genre_id == Genre.id)
         .where(MediaGenre.media_item_id == media_id)
         .order_by(Genre.name)
     ).all()
-    refs = db.session.scalars(
-        select(SourceMediaRef).where(SourceMediaRef.media_item_id == media_id)
+    availability_rows = db.session.execute(
+        select(SourceMediaRef, Source, Library)
+        .join(Source, Source.id == SourceMediaRef.source_id)
+        .join(Library, Library.id == SourceMediaRef.library_id)
+        .where(SourceMediaRef.media_item_id == media_id)
+        .order_by(Source.name, Library.name)
     ).all()
     return render_template(
         "media_detail.html",
         item=item,
         state=state,
-        events=events,
+        event_rows=event_rows[:50],
+        history_page=history_page,
+        history_has_more=len(event_rows) > 50,
+        history_total=history_total,
         children=children,
         grouped_children=grouped_children,
         aggregate=aggregate,
         item_genres=item_genres,
         child_states=child_states,
-        refs=refs,
+        child_available=child_available,
+        availability_rows=availability_rows,
     )
 
 
