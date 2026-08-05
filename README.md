@@ -1,7 +1,7 @@
 # euvieouvi v2
 
 Aplicação self-hosted para registrar, sincronizar e consultar o inventário e o histórico
-de filmes, séries e músicas do Plex.
+de filmes, séries e músicas do Plex e do Jellyfin.
 
 ## Estado atual
 
@@ -37,7 +37,7 @@ A camada persistente agora inclui:
 - verificação da revisão do esquema no readiness;
 - backup e restauração consistentes pela API oficial do SQLite.
 
-O connector Plex agora inclui:
+Os conectores Plex e Jellyfin agora incluem:
 
 - DTOs neutros e imutáveis, sem dependência do banco;
 - interface `MediaConnector` tipada;
@@ -45,7 +45,7 @@ O connector Plex agora inclui:
 - timeouts, retries limitados e erros classificados;
 - redirecionamentos limitados à mesma origem configurada;
 - descoberta explícita de bibliotecas suportadas e rejeitadas;
-- paginação defensiva de filmes, episódios, faixas e histórico real;
+- paginação defensiva de filmes, episódios, faixas e histórico concluído;
 - leitura encapsulada de respostas XML e JSON;
 - mapeamento de filmes, episódios e música com suas hierarquias e identificadores;
 - fixtures sanitizadas e testes de contrato sem acesso à rede.
@@ -54,7 +54,7 @@ O motor de sincronização agora inclui:
 
 - execução local exclusiva, com bloqueio transacional global;
 - fotografia imutável das bibliotecas selecionadas em cada execução;
-- sincronização paginada de filmes, episódios, faixas e eventos reais do histórico;
+- sincronização paginada de filmes, episódios, faixas e somente conclusões do histórico;
 - persistência idempotente de mídia, hierarquia, identificadores e estado assistido;
 - savepoints por item e confirmação por página;
 - checkpoints opacos para retomada a partir da última página confirmada;
@@ -68,7 +68,7 @@ O motor de sincronização agora inclui:
 A API REST agora inclui:
 
 - contrato OpenAPI 3.1 versionado em `openapi.yaml`;
-- endpoints `/api/v1` para fontes Plex e bibliotecas;
+- endpoints `/api/v1` para fontes e bibliotecas;
 - teste de conexão e descoberta segura de bibliotecas;
 - início assíncrono, acompanhamento e cancelamento de sincronizações;
 - consultas paginadas de catálogo, eventos e estado agregado;
@@ -81,21 +81,30 @@ A interface web agora inclui:
 
 - páginas Jinja responsivas em português do Brasil;
 - Bootstrap e HTMX locais, com nomes de assets baseados em hash;
-- fluxo de primeiro acesso e configuração segura do Plex;
+- configuração segura do Plex e Jellyfin;
 - descoberta e seleção de bibliotecas com fallback tradicional;
 - dashboard, atividade recente e sincronização em segundo plano;
 - polling HTMX somente enquanto houver execução ativa;
 - catálogo visual paginado com capas, disponibilidade e estado de reprodução;
 - filtros, ordenação ascendente/descendente e detalhes hierárquicos de vídeo e música;
-- histórico completo paginado nas séries, temporadas, artistas e álbuns, com identificação do
-  episódio ou faixa e disponibilidade individual no Plex;
-- distinção visual entre eventos reais e estado assistido agregado;
+- histórico completo paginado apenas de reproduções concluídas, preservando repetições e datas;
+- indicadores condicionais de disponibilidade no Plex e Jellyfin e total global de conclusões;
 - proteção CSRF em todos os formulários de escrita;
 - cabeçalhos de segurança, navegação por teclado e layout móvel.
 
 A sincronização diária pode ser ativada e ter seu horário definido pela interface, sem
 remover o acionamento manual. A aplicação não possui autenticação interna e deve permanecer
 em rede confiável ou atrás de proxy reverso.
+
+Os webhooks opcionais reduzem o intervalo entre uma conclusão e seu registro. Em
+`Configurações → Webhooks`, copie a URL secreta para o Plex ou para o plugin oficial Webhook
+do Jellyfin. O Plex registra apenas `media.scrobble`; o Jellyfin registra apenas
+`PlaybackStop` com `PlayedToCompletion=true`. Eventos parciais e estado “reproduzindo agora”
+não são armazenados nem exibidos.
+
+No Jellyfin, crie uma API key administrativa e informe também o ID do usuário acompanhado.
+A sincronização normal utiliza `PlayCount` e `LastPlayedDate`: mantém o contador informado,
+mas cria evento histórico somente quando existe uma data real, sem inventar datas anteriores.
 
 O enriquecimento opcional por TMDB e MusicBrainz fica desativado por padrão. Quando ativado,
 usa somente identificadores exatos já fornecidos pelo Plex, preenche apenas campos ausentes e

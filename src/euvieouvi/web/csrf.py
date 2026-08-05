@@ -28,6 +28,8 @@ def register_csrf(app: Flask) -> None:
             return
         if request.path.startswith("/api/"):
             return
+        if request.path.startswith("/webhooks/"):
+            return
         expected = session.get(TOKEN_KEY)
         supplied = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
         if (

@@ -8,11 +8,11 @@ import tempfile
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from euvieouvi.connectors.plex.connector import PlexConnector
 from euvieouvi.database.models import MediaImage
 
 _EXTENSIONS = {
@@ -23,9 +23,13 @@ _EXTENSIONS = {
 _MAX_EXTERNAL_BYTES = 5 * 1024 * 1024
 
 
+class ImageConnector(Protocol):
+    def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]: ...
+
+
 def ensure_cached(
     image: MediaImage,
-    connector: PlexConnector,
+    connector: ImageConnector,
     cache_directory: Path,
     *,
     width: int,
@@ -38,7 +42,7 @@ def ensure_cached(
         if existing.is_file():
             return existing
     if image.source_path is None:
-        raise ValueError("Plex cache entry omitted its source path")
+        raise ValueError("Media cache entry omitted its source path")
     content, mime_type = connector.fetch_image(image.source_path, width=width, height=height)
     digest = hashlib.sha256(
         f"{image.source_id}:{image.media_item_id}:{image.image_type}:{image.source_path}".encode()
@@ -94,9 +98,7 @@ def _store(
     return destination
 
 
-def _download_external(
-    url: str, *, client: httpx.Client | None = None
-) -> tuple[bytes, str]:
+def _download_external(url: str, *, client: httpx.Client | None = None) -> tuple[bytes, str]:
     current = url
     owned = client is None
     http = client or httpx.Client(timeout=20, follow_redirects=False, trust_env=False)

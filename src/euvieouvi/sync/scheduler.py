@@ -73,11 +73,20 @@ def _run_if_due(app: Flask, *, now: datetime | None = None) -> bool:
         return False
     if values.get("sync.schedule.last_date") == local_date:
         return False
-    source = db.session.scalar(select(Source).where(Source.enabled.is_(True)).order_by(Source.id))
-    if source is None:
+    source_ids = tuple(
+        db.session.scalars(
+            select(Source.id).where(Source.enabled.is_(True)).order_by(Source.id)
+        ).all()
+    )
+    if not source_ids:
         return False
     try:
-        get_executor(app).submit(source.id, trigger=SyncTrigger.SCHEDULED)
+        executor = get_executor(app)
+        submit_all = getattr(executor, "submit_all", None)
+        if callable(submit_all):
+            submit_all(source_ids, trigger=SyncTrigger.SCHEDULED)
+        else:
+            executor.submit(source_ids[0], trigger=SyncTrigger.SCHEDULED)
     except (SyncAlreadyRunningError, SyncSourceUnavailableError):
         return False
     setting = db.session.get(Setting, "sync.schedule.last_date")
@@ -86,5 +95,5 @@ def _run_if_due(app: Flask, *, now: datetime | None = None) -> bool:
     else:
         setting.value = local_date
     db.session.commit()
-    app.logger.info("daily synchronization queued", extra={"source_id": source.id})
+    app.logger.info("daily synchronization queued", extra={"source_ids": source_ids})
     return True

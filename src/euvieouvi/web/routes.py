@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import secrets
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -23,8 +25,8 @@ from sqlalchemy.exc import IntegrityError
 
 from euvieouvi.api.runtime import connector_for, get_executor
 from euvieouvi.api.validation import http_url
+from euvieouvi.connectors.dtos import ExternalWatchEvent
 from euvieouvi.connectors.errors import ConnectorError
-from euvieouvi.connectors.plex.connector import PlexConnector
 from euvieouvi.database.enums import ConnectorType, MediaKind, SyncStatus
 from euvieouvi.database.models import (
     Genre,
@@ -39,14 +41,15 @@ from euvieouvi.database.models import (
     SyncRun,
     SyncRunLibrary,
     WatchEvent,
-    WatchState,
 )
+from euvieouvi.database.unit_of_work import UnitOfWork
 from euvieouvi.enrichment.runtime import get_enrichment_executor
 from euvieouvi.errors import AppError
 from euvieouvi.extensions import db
 from euvieouvi.media_images import ensure_cached, ensure_external_cached
 from euvieouvi.sync.discovery import LibraryDiscoveryService
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
+from euvieouvi.sync.persistence import MediaPersistenceService
 from euvieouvi.web.formatting import duration_ms, local_datetime
 
 blueprint = Blueprint("web", __name__)
@@ -67,8 +70,11 @@ def template_helpers() -> dict[str, Any]:
     }
 
 
-def _source() -> Source | None:
-    return db.session.scalar(select(Source).order_by(Source.id))
+def _source(connector_type: ConnectorType | None = None) -> Source | None:
+    statement = select(Source)
+    if connector_type is not None:
+        statement = statement.where(Source.connector_type == connector_type)
+    return db.session.scalar(statement.order_by(Source.id))
 
 
 def _htmx() -> bool:
@@ -85,6 +91,7 @@ def dashboard() -> Any:
     recent = db.session.execute(
         select(WatchEvent, MediaItem)
         .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
+        .where(WatchEvent.completed.is_(True))
         .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
         .limit(8)
     ).all()
@@ -127,7 +134,7 @@ def setup() -> Any:
 
 @blueprint.route("/settings/plex", methods=["GET", "POST"])
 def settings_plex() -> Any:
-    source = _source()
+    source = _source(ConnectorType.PLEX)
     errors: dict[str, str] = {}
     if request.method == "POST":
         name = request.form.get("name", "").strip()
@@ -168,6 +175,70 @@ def settings_plex() -> Any:
                 flash("Configuração do Plex salva com segurança.", "success")
                 return redirect(url_for("web.settings_plex"))
     return render_template("settings_plex.html", source=source, errors=errors)
+
+
+@blueprint.route("/settings/jellyfin", methods=["GET", "POST"])
+def settings_jellyfin() -> Any:
+    source = _source(ConnectorType.JELLYFIN)
+    errors: dict[str, str] = {}
+    persisted: dict[str, str] = {}
+    if source is not None:
+        try:
+            raw = json.loads(source.secret)
+            if isinstance(raw, dict):
+                persisted = {key: str(value) for key, value in raw.items()}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            persisted = {}
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        base_url = request.form.get("base_url", "").strip()
+        api_key = request.form.get("api_key", "").strip()
+        user_id = request.form.get("user_id", "").strip()
+        enabled = request.form.get("enabled") == "on"
+        if not name or len(name) > 255:
+            errors["name"] = "Informe um nome com até 255 caracteres."
+        try:
+            normalized_url = http_url(base_url)
+        except AppError:
+            errors["base_url"] = "Informe uma URL HTTP ou HTTPS válida."
+            normalized_url = base_url
+        if source is None and not api_key:
+            errors["api_key"] = "A API key é obrigatória no primeiro cadastro."
+        if not user_id and not persisted.get("user_id"):
+            errors["user_id"] = "Informe o ID do usuário Jellyfin acompanhado."
+        if not errors:
+            credentials = {
+                "api_key": api_key or persisted.get("api_key", ""),
+                "user_id": user_id or persisted.get("user_id", ""),
+            }
+            if source is None:
+                source = Source(
+                    connector_type=ConnectorType.JELLYFIN,
+                    name=name,
+                    base_url=normalized_url,
+                    secret=json.dumps(credentials),
+                    enabled=enabled,
+                )
+                db.session.add(source)
+            else:
+                source.name = name
+                source.base_url = normalized_url
+                source.secret = json.dumps(credentials)
+                source.enabled = enabled
+            try:
+                db.session.commit()
+            except IntegrityError:
+                db.session.rollback()
+                errors["name"] = "Já existe uma fonte com este nome."
+            else:
+                flash("Configuração do Jellyfin salva com segurança.", "success")
+                return redirect(url_for("web.settings_jellyfin"))
+    return render_template(
+        "settings_jellyfin.html",
+        source=source,
+        errors=errors,
+        persisted=persisted,
+    )
 
 
 @blueprint.route("/settings/sync", methods=["GET", "POST"])
@@ -259,7 +330,7 @@ def metadata_enrich() -> Any:
 
 @blueprint.post("/settings/plex/test")
 def settings_plex_test() -> Any:
-    source = _source()
+    source = _source(ConnectorType.PLEX)
     if source is None:
         flash("Salve a configuração antes de testar.", "warning")
         return redirect(url_for("web.settings_plex"))
@@ -277,18 +348,134 @@ def settings_plex_test() -> Any:
     return redirect(url_for("web.settings_plex"))
 
 
+@blueprint.post("/settings/jellyfin/test")
+def settings_jellyfin_test() -> Any:
+    source = _source(ConnectorType.JELLYFIN)
+    if source is None:
+        flash("Salve a configuração antes de testar.", "warning")
+        return redirect(url_for("web.settings_jellyfin"))
+    try:
+        info = connector_for(source).test_connection()
+        source.last_connection_status = "succeeded"
+        source.last_connection_test_at = datetime.now(UTC)
+        db.session.commit()
+        flash(f"Conexão com o Jellyfin realizada com sucesso ({info.server_name}).", "success")
+    except (ConnectorError, OSError, ValueError):
+        source.last_connection_status = "failed"
+        source.last_connection_test_at = datetime.now(UTC)
+        db.session.commit()
+        flash("O Jellyfin não respondeu. Verifique URL, API key e usuário.", "danger")
+    return redirect(url_for("web.settings_jellyfin"))
+
+
+@blueprint.get("/settings/webhooks")
+def settings_webhooks() -> Any:
+    tokens = _settings("webhook.plex.token", "webhook.jellyfin.token")
+    changed = False
+    for provider in ("plex", "jellyfin"):
+        key = f"webhook.{provider}.token"
+        if not tokens.get(key):
+            tokens[key] = secrets.token_urlsafe(32)
+            _save_setting(key, tokens[key])
+            changed = True
+    if changed:
+        db.session.commit()
+    return render_template(
+        "settings_webhooks.html",
+        plex_url=url_for("web.plex_webhook", token=tokens["webhook.plex.token"], _external=True),
+        jellyfin_url=url_for(
+            "web.jellyfin_webhook", token=tokens["webhook.jellyfin.token"], _external=True
+        ),
+    )
+
+
+@blueprint.post("/webhooks/plex/<token>")
+def plex_webhook(token: str) -> Any:
+    if not _valid_webhook_token("plex", token):
+        return Response(status=404)
+    source = _source(ConnectorType.PLEX)
+    payload_text = request.form.get("payload")
+    if source is None or not payload_text:
+        return Response(status=204)
+    try:
+        payload = json.loads(payload_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return Response("Payload inválido.", 400)
+    if not isinstance(payload, dict) or payload.get("event") != "media.scrobble":
+        return Response(status=204)
+    metadata = payload.get("Metadata")
+    if not isinstance(metadata, dict):
+        return Response("Metadata ausente.", 400)
+    external_id = str(metadata.get("ratingKey") or "").strip()
+    library_external_id = str(metadata.get("librarySectionID") or "").strip()
+    if not external_id or not library_external_id:
+        return Response("Identidade da mídia ausente.", 400)
+    _persist_webhook_event(
+        source,
+        external_id=external_id,
+        library_external_id=library_external_id,
+        watched_at=datetime.now(UTC),
+        source_event_id=None,
+        duration_ms=_safe_integer(metadata.get("duration")),
+    )
+    return Response(status=204)
+
+
+@blueprint.post("/webhooks/jellyfin/<token>")
+def jellyfin_webhook(token: str) -> Any:
+    if not _valid_webhook_token("jellyfin", token):
+        return Response(status=404)
+    source = _source(ConnectorType.JELLYFIN)
+    payload = request.get_json(silent=True)
+    if source is None or not isinstance(payload, dict):
+        return Response(status=204)
+    if payload.get("NotificationType") != "PlaybackStop" or not _truthy(
+        payload.get("PlayedToCompletion")
+    ):
+        return Response(status=204)
+    credentials = _jellyfin_credentials(source)
+    user_id = str(payload.get("UserId") or "").strip()
+    if credentials.get("user_id") and user_id != credentials["user_id"]:
+        return Response(status=204)
+    external_id = str(payload.get("ItemId") or "").strip()
+    watched_at = _parse_webhook_datetime(payload.get("UtcTimestamp"))
+    if not external_id or watched_at is None:
+        return Response("Identidade ou data ausente.", 400)
+    reference = db.session.scalar(
+        select(SourceMediaRef).where(
+            SourceMediaRef.source_id == source.id,
+            SourceMediaRef.external_id == external_id,
+        )
+    )
+    if reference is None:
+        _queue_source_sync(source.id)
+        return Response(status=202)
+    library = db.session.get(Library, reference.library_id)
+    if library is None:
+        return Response(status=204)
+    _persist_webhook_event(
+        source,
+        external_id=external_id,
+        library_external_id=library.external_id,
+        watched_at=watched_at,
+        source_event_id=str(payload.get("NotificationId") or "").strip() or None,
+        duration_ms=_ticks_to_ms(payload.get("RunTimeTicks")),
+    )
+    return Response(status=204)
+
+
 @blueprint.get("/libraries")
 def libraries() -> Any:
-    source = _source()
+    sources = db.session.scalars(select(Source).order_by(Source.name)).all()
     values = db.session.scalars(select(Library).order_by(Library.name, Library.id)).all()
-    return render_template("libraries.html", source=source, libraries=values)
+    return render_template("libraries.html", sources=sources, libraries=values)
 
 
-@blueprint.post("/libraries/discover")
-def libraries_discover() -> Any:
-    source = _source()
+@blueprint.post("/libraries/<int:source_id>/discover")
+def libraries_discover(source_id: int) -> Any:
+    source = db.session.get(Source, source_id)
     if source is None:
-        flash("Configure o Plex antes de descobrir bibliotecas.", "warning")
+        flash("Configure a fonte antes de descobrir bibliotecas.", "warning")
     else:
         try:
             count = LibraryDiscoveryService(lambda: db.session(), connector_for(source)).discover(
@@ -301,6 +488,16 @@ def libraries_discover() -> Any:
                 "danger",
             )
     return redirect(url_for("web.libraries"))
+
+
+@blueprint.post("/libraries/discover")
+def libraries_discover_legacy() -> Any:
+    """Keep old bookmarks and deployment instructions working for Plex."""
+    source = _source(ConnectorType.PLEX) or _source()
+    if source is None:
+        flash("Configure a fonte antes de descobrir bibliotecas.", "warning")
+        return redirect(url_for("web.libraries"))
+    return libraries_discover(source.id)
 
 
 @blueprint.post("/libraries/<int:library_id>/selection")
@@ -323,25 +520,33 @@ def library_selection(library_id: int) -> Any:
 @blueprint.route("/sync", methods=["GET", "POST"])
 def sync_list() -> Any:
     if request.method == "POST":
-        source = _source()
-        if source is None:
-            flash("Configure o Plex antes de sincronizar.", "warning")
-            return redirect(url_for("web.settings_plex"))
-        enabled_count = _count(
-            Library,
-            Library.source_id == source.id,
-            Library.enabled.is_(True),
-            Library.available.is_(True),
+        source_ids = tuple(
+            db.session.scalars(
+                select(Source.id)
+                .where(
+                    Source.enabled.is_(True),
+                    exists().where(
+                        Library.source_id == Source.id,
+                        Library.enabled.is_(True),
+                        Library.available.is_(True),
+                    ),
+                )
+                .order_by(Source.id)
+            ).all()
         )
-        if enabled_count == 0:
+        if not source_ids:
             flash("Selecione ao menos uma biblioteca disponível antes de sincronizar.", "warning")
             return redirect(url_for("web.libraries"))
         try:
-            run_id = get_executor(current_app).submit(source.id)
+            executor = get_executor(current_app)
+            submit_all = getattr(executor, "submit_all", None)
+            run_id = (
+                submit_all(source_ids) if callable(submit_all) else executor.submit(source_ids[0])
+            )
         except (SyncAlreadyRunningError, SyncSourceUnavailableError):
             flash("Uma sincronização já está ativa ou a fonte está indisponível.", "warning")
             return redirect(url_for("web.sync_list"))
-        flash("Sincronização iniciada em segundo plano.", "success")
+        flash("Sincronização das fontes iniciada em segundo plano.", "success")
         return redirect(url_for("web.sync_detail", run_id=run_id))
     runs = db.session.scalars(
         select(SyncRun).order_by(SyncRun.created_at.desc(), SyncRun.id.desc()).limit(50)
@@ -393,24 +598,32 @@ def history() -> Any:
     query = request.args.get("query", "").strip()[:200]
     kind = request.args.get("kind", "")
     watched = request.args.get("watched", "watched")
-    statement = select(MediaItem).outerjoin(WatchState, WatchState.media_item_id == MediaItem.id)
+    completed_event = exists().where(
+        WatchEvent.media_item_id == MediaItem.id,
+        WatchEvent.completed.is_(True),
+    )
+    last_completed = (
+        select(func.max(WatchEvent.watched_at))
+        .where(
+            WatchEvent.media_item_id == MediaItem.id,
+            WatchEvent.completed.is_(True),
+        )
+        .scalar_subquery()
+    )
+    statement = select(MediaItem)
     if query:
         statement = statement.where(MediaItem.title.ilike(f"%{query}%"))
     if kind in {item.value for item in MediaKind}:
         statement = statement.where(MediaItem.kind == MediaKind(kind))
     if watched == "watched":
-        statement = statement.where(WatchState.completed.is_(True))
-    elif watched == "progress":
-        statement = statement.where(
-            WatchState.completed.is_(False), WatchState.progress_ms.is_not(None)
-        )
+        statement = statement.where(completed_event)
     elif watched == "unwatched":
-        statement = statement.where(WatchState.id.is_(None))
+        statement = statement.where(~completed_event)
     raw_page = request.args.get("page", "1")
     page = max(int(raw_page) if raw_page.isdigit() else 1, 1)
     values = db.session.scalars(
         statement.distinct()
-        .order_by(WatchState.last_watched_at.desc().nullslast(), MediaItem.title, MediaItem.id)
+        .order_by(last_completed.desc().nullslast(), MediaItem.title, MediaItem.id)
         .limit(51)
         .offset((page - 1) * 50)
     ).all()
@@ -450,8 +663,41 @@ def catalog() -> Any:
         SourceMediaRef.media_item_id == MediaItem.id,
         SourceMediaRef.available.is_(True),
     )
-    statement = select(MediaItem, WatchState, available_ref.label("available")).outerjoin(
-        WatchState, WatchState.media_item_id == MediaItem.id
+    completion_count = (
+        select(func.count())
+        .select_from(WatchEvent)
+        .where(
+            WatchEvent.media_item_id == MediaItem.id,
+            WatchEvent.completed.is_(True),
+        )
+        .scalar_subquery()
+    )
+    last_completed = (
+        select(func.max(WatchEvent.watched_at))
+        .where(
+            WatchEvent.media_item_id == MediaItem.id,
+            WatchEvent.completed.is_(True),
+        )
+        .scalar_subquery()
+    )
+    plex_available = exists().where(
+        SourceMediaRef.media_item_id == MediaItem.id,
+        SourceMediaRef.available.is_(True),
+        SourceMediaRef.source_id == Source.id,
+        Source.connector_type == ConnectorType.PLEX,
+    )
+    jellyfin_available = exists().where(
+        SourceMediaRef.media_item_id == MediaItem.id,
+        SourceMediaRef.available.is_(True),
+        SourceMediaRef.source_id == Source.id,
+        Source.connector_type == ConnectorType.JELLYFIN,
+    )
+    statement = select(
+        MediaItem,
+        completion_count.label("completion_count"),
+        last_completed.label("last_completed"),
+        plex_available.label("plex_available"),
+        jellyfin_available.label("jellyfin_available"),
     )
     if kind in {item.value for item in allowed_kinds}:
         statement = statement.where(MediaItem.kind == MediaKind(kind))
@@ -488,22 +734,21 @@ def catalog() -> Any:
     elif availability == "unavailable":
         statement = statement.where(~available_ref)
     if played == "played":
-        statement = statement.where(WatchState.view_count > 0)
-    elif played == "progress":
-        statement = statement.where(
-            WatchState.completed.is_(False), WatchState.progress_ms.is_not(None)
-        )
+        statement = statement.where(completion_count > 0)
     elif played == "unplayed":
-        statement = statement.where((WatchState.id.is_(None)) | (WatchState.view_count == 0))
+        statement = statement.where(completion_count == 0)
     sort_columns = {
         "title": func.coalesce(MediaItem.sort_title, MediaItem.title),
         "original_title": func.coalesce(MediaItem.original_title, MediaItem.title),
         "year": MediaItem.year,
-        "last_played": WatchState.last_watched_at,
+        "last_played": last_completed,
         "first_played": select(func.min(WatchEvent.watched_at))
-        .where(WatchEvent.media_item_id == MediaItem.id)
+        .where(
+            WatchEvent.media_item_id == MediaItem.id,
+            WatchEvent.completed.is_(True),
+        )
         .scalar_subquery(),
-        "play_count": WatchState.view_count,
+        "play_count": completion_count,
         "added": func.coalesce(MediaItem.source_added_at, MediaItem.created_at),
         "updated": MediaItem.updated_at,
         "removed": select(func.max(SourceMediaRef.unavailable_since))
@@ -514,9 +759,7 @@ def catalog() -> Any:
     }
     sort_column = sort_columns.get(sort, sort_columns["title"])
     ordering = (
-        sort_column.desc().nullslast()
-        if direction == "desc"
-        else sort_column.asc().nullslast()
+        sort_column.desc().nullslast() if direction == "desc" else sort_column.asc().nullslast()
     )
     rows = db.session.execute(
         statement.order_by(ordering, MediaItem.title, MediaItem.id)
@@ -556,7 +799,7 @@ def media_image(media_id: int) -> Any:
     if image is None:
         return _placeholder_image(item.kind)
     cache_directory = Path(current_app.instance_path) / "images"
-    if image.provider != "plex":
+    if image.provider not in {"plex", "jellyfin"}:
         try:
             path = ensure_external_cached(image, cache_directory)
             db.session.commit()
@@ -570,8 +813,6 @@ def media_image(media_id: int) -> Any:
     if source is None or not source.enabled:
         return _placeholder_image(item.kind)
     connector = connector_for(source)
-    if not isinstance(connector, PlexConnector):
-        return _placeholder_image(item.kind)
     square = item.kind in {MediaKind.ARTIST, MediaKind.ALBUM, MediaKind.TRACK}
     try:
         path = ensure_cached(
@@ -586,7 +827,9 @@ def media_image(media_id: int) -> Any:
         db.session.rollback()
         return _placeholder_image(item.kind)
     finally:
-        connector.close()
+        close = getattr(connector, "close", None)
+        if callable(close):
+            close()
     response = send_file(path, mimetype=image.mime_type, conditional=True, max_age=86400)
     response.headers["Cache-Control"] = "private, max-age=86400"
     return response
@@ -597,10 +840,22 @@ def media_detail(media_id: int) -> Any:
     item = db.session.get(MediaItem, media_id)
     if item is None:
         return render_template("errors/404.html"), 404
-    state = db.session.scalar(
-        select(WatchState)
-        .where(WatchState.media_item_id == media_id)
-        .order_by(WatchState.id.desc())
+    item_completion_count = int(
+        db.session.scalar(
+            select(func.count())
+            .select_from(WatchEvent)
+            .where(
+                WatchEvent.media_item_id == media_id,
+                WatchEvent.completed.is_(True),
+            )
+        )
+        or 0
+    )
+    item_last_completed = db.session.scalar(
+        select(func.max(WatchEvent.watched_at)).where(
+            WatchEvent.media_item_id == media_id,
+            WatchEvent.completed.is_(True),
+        )
     )
     children = db.session.scalars(
         select(MediaItem)
@@ -626,35 +881,43 @@ def media_detail(media_id: int) -> Any:
         children_for_states = [*children, *descendants]
     else:
         children_for_states = list(children)
-    child_states = {
-        child_state.media_item_id: child_state
-        for child_state in db.session.scalars(
-            select(WatchState).where(
-                WatchState.media_item_id.in_([child.id for child in children_for_states])
+    child_completions = {
+        child_id: (int(count), last_completed)
+        for child_id, count, last_completed in db.session.execute(
+            select(
+                WatchEvent.media_item_id,
+                func.count(WatchEvent.id),
+                func.max(WatchEvent.watched_at),
             )
-        ).all()
+            .where(
+                WatchEvent.media_item_id.in_([child.id for child in children_for_states]),
+                WatchEvent.completed.is_(True),
+            )
+            .group_by(WatchEvent.media_item_id)
+        )
     }
     playable = [
-        child
-        for child in children_for_states
-        if child.kind in {MediaKind.EPISODE, MediaKind.TRACK}
+        child for child in children_for_states if child.kind in {MediaKind.EPISODE, MediaKind.TRACK}
     ]
     aggregate = None
-    if item.kind in {
-        MediaKind.SHOW,
-        MediaKind.SEASON,
-        MediaKind.ARTIST,
-        MediaKind.ALBUM,
-    } and playable:
-        played_states = [child_states[child.id] for child in playable if child.id in child_states]
+    if (
+        item.kind
+        in {
+            MediaKind.SHOW,
+            MediaKind.SEASON,
+            MediaKind.ARTIST,
+            MediaKind.ALBUM,
+        }
+        and playable
+    ):
         last_played = max(
-            (value.last_watched_at for value in played_states if value.last_watched_at is not None),
+            (child_completions[child.id][1] for child in playable if child.id in child_completions),
             default=None,
         )
         aggregate = {
             "total": len(playable),
-            "played": sum(1 for value in played_states if value.view_count > 0),
-            "play_count": sum(value.view_count for value in played_states),
+            "played": sum(1 for child in playable if child.id in child_completions),
+            "play_count": sum(child_completions.get(child.id, (0, None))[0] for child in playable),
             "last_played": last_played,
         }
     history_ids = [child.id for child in playable] or [media_id]
@@ -664,26 +927,40 @@ def media_detail(media_id: int) -> Any:
         db.session.scalar(
             select(func.count())
             .select_from(WatchEvent)
-            .where(WatchEvent.media_item_id.in_(history_ids))
+            .where(
+                WatchEvent.media_item_id.in_(history_ids),
+                WatchEvent.completed.is_(True),
+            )
         )
         or 0
     )
     event_rows = db.session.execute(
         select(WatchEvent, MediaItem)
         .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
-        .where(WatchEvent.media_item_id.in_(history_ids))
+        .where(
+            WatchEvent.media_item_id.in_(history_ids),
+            WatchEvent.completed.is_(True),
+        )
         .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
         .limit(51)
         .offset((history_page - 1) * 50)
     ).all()
-    child_available = {
-        child_id: available
-        for child_id, available in db.session.execute(
+    child_availability = {
+        child_id: (bool(plex), bool(jellyfin))
+        for child_id, plex, jellyfin in db.session.execute(
             select(
                 MediaItem.id,
                 exists().where(
                     SourceMediaRef.media_item_id == MediaItem.id,
                     SourceMediaRef.available.is_(True),
+                    SourceMediaRef.source_id == Source.id,
+                    Source.connector_type == ConnectorType.PLEX,
+                ),
+                exists().where(
+                    SourceMediaRef.media_item_id == MediaItem.id,
+                    SourceMediaRef.available.is_(True),
+                    SourceMediaRef.source_id == Source.id,
+                    Source.connector_type == ConnectorType.JELLYFIN,
                 ),
             ).where(MediaItem.id.in_([child.id for child in children_for_states]))
         )
@@ -704,7 +981,8 @@ def media_detail(media_id: int) -> Any:
     return render_template(
         "media_detail.html",
         item=item,
-        state=state,
+        item_completion_count=item_completion_count,
+        item_last_completed=item_last_completed,
         event_rows=event_rows[:50],
         history_page=history_page,
         history_has_more=len(event_rows) > 50,
@@ -713,8 +991,8 @@ def media_detail(media_id: int) -> Any:
         grouped_children=grouped_children,
         aggregate=aggregate,
         item_genres=item_genres,
-        child_states=child_states,
-        child_available=child_available,
+        child_completions=child_completions,
+        child_availability=child_availability,
         availability_rows=availability_rows,
     )
 
@@ -732,9 +1010,14 @@ def _watched_count(kind: MediaKind) -> int:
     return int(
         db.session.scalar(
             select(func.count())
-            .select_from(WatchState)
-            .join(MediaItem, MediaItem.id == WatchState.media_item_id)
-            .where(WatchState.completed.is_(True), MediaItem.kind == kind)
+            .select_from(MediaItem)
+            .where(
+                MediaItem.kind == kind,
+                exists().where(
+                    WatchEvent.media_item_id == MediaItem.id,
+                    WatchEvent.completed.is_(True),
+                ),
+            )
         )
         or 0
     )
@@ -755,9 +1038,92 @@ def _save_setting(key: str, value: str) -> None:
         setting.value = value
 
 
+def _valid_webhook_token(provider: str, supplied: str) -> bool:
+    expected = _settings(f"webhook.{provider}.token").get(f"webhook.{provider}.token")
+    return bool(expected and secrets.compare_digest(expected, supplied))
+
+
+def _jellyfin_credentials(source: Source) -> dict[str, str]:
+    try:
+        raw = json.loads(source.secret)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return {key: str(value) for key, value in raw.items()} if isinstance(raw, dict) else {}
+
+
+def _persist_webhook_event(
+    source: Source,
+    *,
+    external_id: str,
+    library_external_id: str,
+    watched_at: datetime,
+    source_event_id: str | None,
+    duration_ms: int | None,
+) -> bool:
+    reference = db.session.scalar(
+        select(SourceMediaRef).where(
+            SourceMediaRef.source_id == source.id,
+            SourceMediaRef.external_id == external_id,
+        )
+    )
+    if reference is None:
+        _queue_source_sync(source.id)
+        return False
+    event = ExternalWatchEvent(
+        media_external_id=external_id,
+        library_external_id=library_external_id,
+        watched_at=watched_at,
+        completed=True,
+        source_event_id=source_event_id,
+        duration_ms=duration_ms,
+    )
+    with UnitOfWork(db.session()) as work:
+        inserted = MediaPersistenceService(
+            work, source_id=source.id, library_id=reference.library_id
+        ).persist_event(event)
+        work.commit()
+    return inserted
+
+
+def _queue_source_sync(source_id: int) -> None:
+    try:
+        get_executor(current_app).submit(source_id)
+    except (LookupError, SyncAlreadyRunningError, SyncSourceUnavailableError):
+        current_app.logger.info("webhook media will be reconciled by an existing sync")
+
+
+def _safe_integer(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _ticks_to_ms(value: Any) -> int | None:
+    ticks = _safe_integer(value)
+    return ticks // 10_000 if ticks is not None else None
+
+
+def _parse_webhook_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _truthy(value: Any) -> bool:
+    return value is True or (isinstance(value, str) and value.casefold() == "true")
+
+
 def _placeholder_image(kind: MediaKind) -> Response:
     square = kind in {MediaKind.ARTIST, MediaKind.ALBUM, MediaKind.TRACK}
-    width, height = ((400, 400) if square else (300, 450))
+    width, height = (400, 400) if square else (300, 450)
     label = "Música" if square else "Sem capa"
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '

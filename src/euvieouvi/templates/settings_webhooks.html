@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block title %}Webhooks · euvieouvi{% endblock %}
+{% block content %}
+<h1 class="h2">Webhooks de conclusões</h1>
+<p class="text-secondary">Estas URLs contêm um token secreto. Use-as somente nos servidores configurados e não as publique.</p>
+
+<div class="card mb-3"><div class="card-body">
+  <h2 class="h5">Plex</h2>
+  <p>Adicione a URL abaixo em <strong>Settings → Webhooks</strong>. Apenas eventos <code>media.scrobble</code> são registrados.</p>
+  <input class="form-control font-monospace" readonly value="{{ plex_url }}" aria-label="URL do webhook Plex">
+</div></div>
+
+<div class="card"><div class="card-body">
+  <h2 class="h5">Jellyfin</h2>
+  <p>No plugin oficial Webhook, crie um destino Generic Form com esta URL e habilite <strong>Playback Stop</strong>. Somente <code>PlayedToCompletion=true</code> é registrado.</p>
+  <input class="form-control font-monospace" readonly value="{{ jellyfin_url }}" aria-label="URL do webhook Jellyfin">
+</div></div>
+{% endblock %}

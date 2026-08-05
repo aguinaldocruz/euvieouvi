@@ -27,6 +27,6 @@ footer { color:var(--evo-muted); }
 .media-title { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .media-badges { position:absolute; right:.45rem; top:.45rem; display:flex; gap:.3rem; }
 .media-badge { display:grid; place-items:center; width:1.65rem; height:1.65rem; border-radius:50%; color:#fff; font-size:.75rem; font-weight:800; box-shadow:0 1px 4px rgb(0 0 0 / 30%); }
-.is-available { background:#d67a00; }.is-unavailable { background:#697782; }.is-played { background:#198754; }.is-unplayed { background:#65737e; }
+.is-available { background:#d67a00; }.is-jellyfin { background:#7b3ff2; }.is-played { background:#198754; }
 @media (max-width: 767.98px) { .desktop-only { display:none; } .metric-value { font-size:1.5rem; } }
 @media (prefers-reduced-motion: reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition:none!important; animation:none!important; } }

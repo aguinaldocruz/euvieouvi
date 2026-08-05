@@ -5,6 +5,7 @@ from enum import StrEnum
 
 class ConnectorType(StrEnum):
     PLEX = "plex"
+    JELLYFIN = "jellyfin"
 
 
 class LibraryMediaType(StrEnum):

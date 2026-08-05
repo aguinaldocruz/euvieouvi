@@ -21,7 +21,7 @@
       <li class="nav-item"><a class="nav-link" href="{{ url_for('web.history') }}">Histórico</a></li>
       <li class="nav-item"><a class="nav-link" href="{{ url_for('web.sync_list') }}">Sincronizações</a></li>
       <li class="nav-item"><a class="nav-link" href="{{ url_for('web.libraries') }}">Bibliotecas</a></li>
-      <li class="nav-item"><a class="nav-link" href="{{ url_for('web.settings_plex') }}">Configurações</a></li>
+      <li class="nav-item dropdown"><a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Configurações</a><ul class="dropdown-menu"><li><a class="dropdown-item" href="{{ url_for('web.settings_plex') }}">Plex</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_jellyfin') }}">Jellyfin</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_webhooks') }}">Webhooks</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_sync') }}">Agendamento</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_metadata') }}">Metadados</a></li></ul></li>
     </ul></div>
   </div>
 </nav>

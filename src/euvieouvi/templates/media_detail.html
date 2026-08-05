@@ -29,9 +29,9 @@
     {% if aggregate %}
       <p>{{ aggregate.played }}/{{ aggregate.total }} item(ns) reproduzido(s) · {{ aggregate.play_count }} reprodução(ões) no total</p>
       <p class="mb-0">Última vez: {{ format_datetime(aggregate.last_played) }}</p>
-    {% elif state %}
-      <p>{{ 'Concluído' if state.completed else 'Em andamento' }} · {{ state.view_count }} reprodução(ões) conhecida(s)</p>
-      <p class="mb-0">Última vez: {{ format_datetime(state.last_watched_at) }}</p>
+    {% elif item_completion_count %}
+      <p>Concluído · {{ item_completion_count }} reprodução(ões) conhecida(s)</p>
+      <p class="mb-0">Última vez: {{ format_datetime(item_last_completed) }}</p>
     {% else %}
       <p class="text-secondary mb-0">Nenhuma reprodução conhecida.</p>
     {% endif %}
@@ -40,10 +40,10 @@
 
 {% macro child_status(child) -%}
   <span class="d-flex gap-2 align-items-center small">
-    <span class="media-badge {{ 'is-available' if child_available.get(child.id) else 'is-unavailable' }}"
-          title="{{ 'Disponível no Plex' if child_available.get(child.id) else 'Removido do Plex' }}">P</span>
+    {% if child_availability.get(child.id, (false, false))[0] %}<span class="media-badge is-available" title="Disponível no Plex" aria-label="Disponível no Plex">P</span>{% endif %}
+    {% if child_availability.get(child.id, (false, false))[1] %}<span class="media-badge is-jellyfin" title="Disponível no Jellyfin" aria-label="Disponível no Jellyfin">J</span>{% endif %}
     <span class="text-secondary">
-      {% if child_states.get(child.id) %}{{ child_states[child.id].view_count }} reprodução(ões){% else %}Nunca reproduzido{% endif %}
+      {% if child_completions.get(child.id) %}<span title="{{ 'Ouvida' if child.kind.value == 'track' else 'Assistido' }} {{ child_completions[child.id][0] }} {{ 'vez' if child_completions[child.id][0] == 1 else 'vezes' }}">✓</span>{% else %}Nunca concluído{% endif %}
     </span>
   </span>
 {%- endmacro %}
@@ -93,7 +93,7 @@
     {% for event, event_item in event_rows %}
       <a class="list-group-item list-group-item-action" href="{{ url_for('web.media_detail', media_id=event_item.id) }}">
         {% if event_item.id != item.id %}<strong>{{ event_item.title }}</strong> · {% endif %}
-        {{ format_datetime(event.watched_at) }} · {{ 'Concluído' if event.completed else 'Reprodução parcial' }}
+        {{ format_datetime(event.watched_at) }} · Concluído
         {% if event.view_number %} · reprodução {{ event.view_number }}{% endif %}
       </a>
     {% endfor %}
@@ -113,7 +113,7 @@
 <h2 class="h4">Disponibilidade</h2>
 <ul>
   {% for ref, source, library in availability_rows %}
-    <li>{{ source.name }} · {{ library.name }} — {{ 'disponível no Plex' if ref.available else 'removido do Plex' }}{% if ref.unavailable_since %} em {{ format_datetime(ref.unavailable_since) }}{% endif %}</li>
+    <li>{{ source.name }} · {{ library.name }} — {{ 'disponível' if ref.available else 'removido' }}{% if ref.unavailable_since %} em {{ format_datetime(ref.unavailable_since) }}{% endif %}</li>
   {% else %}
     <li>Nenhuma referência encontrada.</li>
   {% endfor %}

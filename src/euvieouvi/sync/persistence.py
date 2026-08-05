@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import select
@@ -102,6 +102,8 @@ class MediaPersistenceService:
         return PersistResult(classification, media.id, regression)
 
     def persist_event(self, event: ExternalWatchEvent) -> bool:
+        if not event.completed:
+            return False
         reference = self.work.source_media_refs.by_external_identity(
             self.source_id, event.media_external_id
         )
@@ -123,6 +125,20 @@ class MediaPersistenceService:
                 existing.view_number = event.view_number
                 return False
         if self.work.watch_events.by_dedup_key(self.source_id, dedup_key) is not None:
+            return False
+        nearby = self.work.session.scalar(
+            select(WatchEvent)
+            .where(
+                WatchEvent.media_item_id == reference.media_item_id,
+                WatchEvent.completed.is_(True),
+                WatchEvent.watched_at.between(
+                    event.watched_at - timedelta(minutes=2),
+                    event.watched_at + timedelta(minutes=2),
+                ),
+            )
+            .order_by(WatchEvent.id)
+        )
+        if nearby is not None:
             return False
         self.work.watch_events.add(
             WatchEvent(
@@ -261,9 +277,7 @@ class MediaPersistenceService:
         genres: tuple[str, ...],
         observed_at: datetime,
     ) -> None:
-        reference = self.work.source_media_refs.by_external_identity(
-            self.source_id, external_id
-        )
+        reference = self.work.source_media_refs.by_external_identity(self.source_id, external_id)
         if reference is not None and reference.media_item_id != media.id:
             raise ValueError("External hierarchy identity conflicts with historical media.")
         if reference is None:
@@ -410,26 +424,26 @@ class MediaPersistenceService:
                     )
                 )
 
-    def _sync_image(
-        self, media_item_id: int, image_type: str, source_path: str | None
-    ) -> None:
+    def _sync_image(self, media_item_id: int, image_type: str, source_path: str | None) -> None:
         if source_path is None:
             return
         image = self.work.media_images.by_item_and_type(media_item_id, image_type)
+        provider = self.work.sources.get(self.source_id)
+        provider_name = provider.connector_type.value if provider is not None else "plex"
         if image is None:
             self.work.media_images.add(
                 MediaImage(
                     media_item_id=media_item_id,
                     source_id=self.source_id,
                     image_type=image_type,
-                    provider="plex",
+                    provider=provider_name,
                     source_path=source_path,
                     cache_status="pending",
                 )
             )
-        elif image.source_path != source_path or image.provider != "plex":
+        elif image.source_path != source_path or image.provider != provider_name:
             image.source_id = self.source_id
-            image.provider = "plex"
+            image.provider = provider_name
             image.source_path = source_path
             image.source_url = None
             image.local_filename = None

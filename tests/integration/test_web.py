@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +37,7 @@ from euvieouvi.database.models import (
     MediaGenre,
     MediaImage,
     MediaItem,
+    Setting,
     Source,
     SourceMediaRef,
     SyncError,
@@ -140,13 +142,9 @@ def test_metadata_settings_and_manual_enrichment(
         def submit(self) -> bool:
             return True
 
-    monkeypatch.setattr(
-        "euvieouvi.web.routes.get_enrichment_executor", lambda app: Executor()
-    )
+    monkeypatch.setattr("euvieouvi.web.routes.get_enrichment_executor", lambda app: Executor())
     token = csrf(client, "/settings/metadata")
-    started = client.post(
-        "/metadata/enrich", data={"csrf_token": token}, follow_redirects=True
-    )
+    started = client.post("/metadata/enrich", data={"csrf_token": token}, follow_redirects=True)
     assert "Enriquecimento iniciado" in started.get_data(as_text=True)
 
 
@@ -425,7 +423,7 @@ def test_dashboard_history_media_and_sync_detail(app: Flask) -> None:
     )
 
 
-def test_partial_event_is_distinct_from_current_in_progress_state(app: Flask) -> None:
+def test_partial_event_is_hidden_from_completion_views(app: Flask) -> None:
     with app.app_context():
         _, _, media_id, _ = seed_web()
         event = db.session.query(WatchEvent).one()
@@ -441,9 +439,9 @@ def test_partial_event_is_distinct_from_current_in_progress_state(app: Flask) ->
     detail = client.get(f"/media/{media_id}").get_data(as_text=True)
     dashboard = client.get("/").get_data(as_text=True)
 
-    assert "Em andamento · 0 reprodução(ões) conhecida(s)" in detail
-    assert "Reprodução parcial" in detail
-    assert "Reprodução parcial" in dashboard
+    assert "Nenhuma reprodução conhecida" in detail
+    assert "Reprodução parcial" not in detail
+    assert "Reprodução parcial" not in dashboard
 
 
 def test_sync_start_cancel_and_polling_fragment(
@@ -503,7 +501,7 @@ def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     assert response.status_code == 200
     assert "Arrival" in text
     assert "Disponível no Plex" in text
-    assert "Reproduzido" in text
+    assert "Assistido 1 vez" in text
     advanced = client.get(
         f"/catalog?kind=movie&library={library_id}&genre=ficção+científica&decade=2010&sort=rating&direction=desc"
     )
@@ -557,9 +555,7 @@ def test_media_image_placeholder_and_local_cache(
     assert calls == [f"/library/metadata/{movie_id}/thumb"]
 
 
-def test_media_image_serves_external_fallback(
-    app: Flask, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_media_image_serves_external_fallback(app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
     with app.app_context():
         _, _, movie_id, _ = seed_web()
         db.session.add(
@@ -728,7 +724,273 @@ def test_artist_detail_rolls_up_track_history_with_pagination(app: Flask) -> Non
     assert "Teardrop</strong>" in first
     assert "Histórico completo" in first and "(51)" in first
     assert "Próximo histórico" in first
-    assert "Removido do Plex" in first
+    assert "Removido do Plex" not in first
+    assert "Ouvida 51 vezes" in first
     second = client.get(f"/media/{artist_id}?history_page=2").get_data(as_text=True)
     assert "Histórico anterior" in second
     assert "reprodução 1" in second
+
+
+def test_webhooks_accept_only_completed_events_and_deduplicate(app: Flask) -> None:
+    with app.app_context():
+        plex_source_id, plex_library_id, media_id, _ = seed_web()
+        jellyfin = Source(
+            connector_type=ConnectorType.JELLYFIN,
+            name="Jellyfin",
+            base_url="http://jellyfin",
+            secret=json.dumps({"api_key": "key", "user_id": "user-1"}),
+            enabled=True,
+        )
+        db.session.add(jellyfin)
+        db.session.flush()
+        library = Library(
+            source_id=jellyfin.id,
+            external_id="jf-lib",
+            name="Filmes JF",
+            media_type=LibraryMediaType.MOVIE,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
+        )
+        db.session.add(library)
+        db.session.flush()
+        db.session.add(
+            SourceMediaRef(
+                source_id=jellyfin.id,
+                library_id=library.id,
+                media_item_id=media_id,
+                external_id="jf-movie",
+                last_seen_at=NOW,
+                available=True,
+            )
+        )
+        db.session.add_all(
+            [
+                Setting(key="webhook.plex.token", value="plex-secret"),
+                Setting(key="webhook.jellyfin.token", value="jf-secret"),
+            ]
+        )
+        db.session.commit()
+        original_count = db.session.query(WatchEvent).count()
+
+    client = app.test_client()
+    ignored = client.post(
+        "/webhooks/plex/plex-secret",
+        data={"payload": json.dumps({"event": "media.play"})},
+    )
+    assert ignored.status_code == 204
+    plex = client.post(
+        "/webhooks/plex/plex-secret",
+        data={
+            "payload": json.dumps(
+                {
+                    "event": "media.scrobble",
+                    "Metadata": {
+                        "ratingKey": "m1",
+                        "librarySectionID": "1",
+                        "duration": 1000,
+                    },
+                }
+            )
+        },
+    )
+    assert plex.status_code == 204
+    jellyfin = client.post(
+        "/webhooks/jellyfin/jf-secret",
+        json={
+            "NotificationType": "PlaybackStop",
+            "PlayedToCompletion": True,
+            "ItemId": "jf-movie",
+            "UserId": "user-1",
+            "UtcTimestamp": "2026-08-05T10:00:00Z",
+            "RunTimeTicks": 10_000_000,
+            "NotificationId": "notification-1",
+        },
+    )
+    assert jellyfin.status_code == 204
+    assert client.post("/webhooks/plex/wrong", data={}).status_code == 404
+    with app.app_context():
+        assert db.session.query(WatchEvent).count() == original_count + 2
+        assert db.session.get(Source, plex_source_id) is not None
+        assert db.session.get(Library, plex_library_id) is not None
+
+
+def test_webhook_settings_generate_secret_urls(app: Flask) -> None:
+    response = app.test_client().get("/settings/webhooks")
+    assert response.status_code == 200
+    text = response.get_data(as_text=True)
+    assert "/webhooks/plex/" in text and "/webhooks/jellyfin/" in text
+    with app.app_context():
+        assert db.session.get(Setting, "webhook.plex.token") is not None
+
+
+def test_jellyfin_settings_validation_save_update_and_test(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = app.test_client()
+    token = csrf(client, "/settings/jellyfin")
+    invalid = client.post(
+        "/settings/jellyfin",
+        data={"csrf_token": token, "name": "", "base_url": "ftp://bad"},
+    )
+    invalid_text = invalid.get_data(as_text=True)
+    assert "API key é obrigatória" in invalid_text
+    assert "URL HTTP ou HTTPS válida" in invalid_text
+
+    token = csrf(client, "/settings/jellyfin")
+    saved = client.post(
+        "/settings/jellyfin",
+        data={
+            "csrf_token": token,
+            "name": "Jellyfin",
+            "base_url": "http://jellyfin.local:8096",
+            "api_key": "api-key",
+            "user_id": "user-1",
+            "enabled": "on",
+        },
+    )
+    assert saved.status_code == 302
+    with app.app_context():
+        source = db.session.scalar(
+            db.select(Source).where(Source.connector_type == ConnectorType.JELLYFIN)
+        )
+        assert source is not None
+        assert json.loads(source.secret)["api_key"] == "api-key"
+
+    token = csrf(client, "/settings/jellyfin")
+    updated = client.post(
+        "/settings/jellyfin",
+        data={
+            "csrf_token": token,
+            "name": "Jellyfin Casa",
+            "base_url": "http://jellyfin.local:8096",
+            "api_key": "",
+            "user_id": "",
+            "enabled": "on",
+        },
+    )
+    assert updated.status_code == 302
+    monkeypatch.setattr("euvieouvi.web.routes.connector_for", lambda source: WebConnector())
+    token = csrf(client, "/settings/jellyfin")
+    tested = client.post(
+        "/settings/jellyfin/test",
+        data={"csrf_token": token},
+        follow_redirects=True,
+    )
+    assert "Conexão com o Jellyfin realizada" in tested.get_data(as_text=True)
+
+
+def test_webhooks_reject_malformed_or_irrelevant_payloads(app: Flask) -> None:
+    with app.app_context():
+        db.session.add_all(
+            [
+                Setting(key="webhook.plex.token", value="plex-secret"),
+                Setting(key="webhook.jellyfin.token", value="jf-secret"),
+            ]
+        )
+        db.session.commit()
+    client = app.test_client()
+    assert client.post("/webhooks/plex/plex-secret", data={"payload": "{"}).status_code == 204
+    with app.app_context():
+        source = Source(
+            connector_type=ConnectorType.PLEX,
+            name="Plex",
+            base_url="http://plex",
+            secret="token",
+            enabled=True,
+        )
+        jellyfin = Source(
+            connector_type=ConnectorType.JELLYFIN,
+            name="Jellyfin",
+            base_url="http://jellyfin",
+            secret=json.dumps({"api_key": "key", "user_id": "user-1"}),
+            enabled=True,
+        )
+        db.session.add_all([source, jellyfin])
+        db.session.commit()
+    assert client.post("/webhooks/plex/plex-secret", data={"payload": "{"}).status_code == 400
+    assert (
+        client.post(
+            "/webhooks/plex/plex-secret",
+            data={"payload": json.dumps({"event": "media.scrobble"})},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/webhooks/jellyfin/jf-secret",
+            json={"NotificationType": "PlaybackStop", "PlayedToCompletion": False},
+        ).status_code
+        == 204
+    )
+    assert client.post("/webhooks/jellyfin/wrong", json={}).status_code == 404
+    assert (
+        client.post(
+            "/webhooks/plex/plex-secret",
+            data={
+                "payload": json.dumps({"event": "media.scrobble", "Metadata": {"ratingKey": "m1"}})
+            },
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/webhooks/jellyfin/jf-secret",
+            json={
+                "NotificationType": "PlaybackStop",
+                "PlayedToCompletion": True,
+                "ItemId": "missing",
+                "UserId": "other-user",
+                "UtcTimestamp": "invalid",
+            },
+        ).status_code
+        == 204
+    )
+    assert (
+        client.post(
+            "/webhooks/jellyfin/jf-secret",
+            json={
+                "NotificationType": "PlaybackStop",
+                "PlayedToCompletion": "true",
+                "ItemId": "missing",
+                "UserId": "user-1",
+                "UtcTimestamp": "invalid",
+            },
+        ).status_code
+        == 400
+    )
+
+
+def test_jellyfin_test_handles_missing_and_failed_connection(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = app.test_client()
+    token = csrf(client, "/settings/jellyfin")
+    missing = client.post(
+        "/settings/jellyfin/test", data={"csrf_token": token}, follow_redirects=True
+    )
+    assert "Salve a configuração" in missing.get_data(as_text=True)
+    with app.app_context():
+        db.session.add(
+            Source(
+                connector_type=ConnectorType.JELLYFIN,
+                name="Jellyfin",
+                base_url="http://jellyfin",
+                secret="invalid",
+                enabled=True,
+            )
+        )
+        db.session.commit()
+    monkeypatch.setattr(
+        "euvieouvi.web.routes.connector_for",
+        lambda source: (_ for _ in ()).throw(ValueError("bad credentials")),
+    )
+    token = csrf(client, "/settings/jellyfin")
+    failed = client.post(
+        "/settings/jellyfin/test", data={"csrf_token": token}, follow_redirects=True
+    )
+    assert "não respondeu" in failed.get_data(as_text=True)
+    with app.app_context():
+        source = db.session.scalar(db.select(Source))
+        assert source is not None and source.last_connection_status == "failed"

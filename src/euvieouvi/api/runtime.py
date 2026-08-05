@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from collections.abc import Callable
@@ -11,18 +12,32 @@ from flask import Flask
 from werkzeug.local import LocalProxy
 
 from euvieouvi.connectors.base import MediaConnector
+from euvieouvi.connectors.jellyfin.client import JellyfinHttpClient
+from euvieouvi.connectors.jellyfin.connector import JellyfinConnector
 from euvieouvi.connectors.plex.client import PlexHttpClient
 from euvieouvi.connectors.plex.connector import PlexConnector
-from euvieouvi.database.enums import SyncStatus, SyncTrigger
+from euvieouvi.database.enums import ConnectorType, SyncStatus, SyncTrigger
 from euvieouvi.database.models import Setting, Source, SyncRun
 from euvieouvi.extensions import db
 from euvieouvi.sync.cancellation import CancellationToken
+from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
 from euvieouvi.sync.orchestrator import SyncOrchestrator
 
 ConnectorFactory = Callable[[Source], MediaConnector]
 
 
 def connector_for(source: Source) -> MediaConnector:
+    if source.connector_type is ConnectorType.JELLYFIN:
+        try:
+            secret = json.loads(source.secret)
+            api_key = str(secret["api_key"])
+            user_id = str(secret["user_id"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("Invalid persisted Jellyfin credentials") from error
+        return JellyfinConnector(
+            JellyfinHttpClient(source.base_url, api_key),
+            user_id,
+        )
     client = PlexHttpClient(
         source.base_url,
         source.secret,
@@ -41,7 +56,13 @@ class LocalSyncExecutor:
         self._tokens: dict[int, CancellationToken] = {}
         self._lock = threading.Lock()
 
-    def submit(self, source_id: int, *, trigger: SyncTrigger = SyncTrigger.MANUAL) -> int:
+    def submit(
+        self,
+        source_id: int,
+        *,
+        trigger: SyncTrigger = SyncTrigger.MANUAL,
+        remaining_source_ids: tuple[int, ...] = (),
+    ) -> int:
         source = db.session.get(Source, source_id)
         if source is None:
             raise LookupError("Source not found")
@@ -61,9 +82,7 @@ class LocalSyncExecutor:
                 try:
                     result = SyncOrchestrator(
                         lambda: db.session(), self._factory(source)
-                    ).run_queued(
-                        run_id, cancellation=token
-                    )
+                    ).run_queued(run_id, cancellation=token)
                     auto_enrich = db.session.get(Setting, "metadata.auto_after_sync")
                     if (
                         result.status is SyncStatus.SUCCEEDED
@@ -78,9 +97,29 @@ class LocalSyncExecutor:
                 finally:
                     with self._lock:
                         self._tokens.pop(run_id, None)
+                if remaining_source_ids:
+                    try:
+                        self.submit(
+                            remaining_source_ids[0],
+                            trigger=trigger,
+                            remaining_source_ids=remaining_source_ids[1:],
+                        )
+                    except (LookupError, SyncAlreadyRunningError, SyncSourceUnavailableError):
+                        self._app.logger.exception("next source synchronization was not queued")
 
         threading.Thread(target=execute, name="euvieouvi-sync", daemon=True).start()
         return run_id
+
+    def submit_all(
+        self, source_ids: tuple[int, ...], *, trigger: SyncTrigger = SyncTrigger.MANUAL
+    ) -> int:
+        if not source_ids:
+            raise LookupError("No source available")
+        return self.submit(
+            source_ids[0],
+            trigger=trigger,
+            remaining_source_ids=source_ids[1:],
+        )
 
     def cancel(self, run_id: int) -> bool:
         with self._lock:

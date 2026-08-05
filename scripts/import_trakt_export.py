@@ -28,7 +28,7 @@ REQUIRED_TABLES = {
     "watch_events",
     "watch_states",
 }
-SUPPORTED_DATABASE_REVISIONS = {"20260805_0007"}
+SUPPORTED_DATABASE_REVISIONS = {"20260805_0008"}
 Progress = Callable[[str], None]
 
 
