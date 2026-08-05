@@ -39,6 +39,40 @@ def test_invalid_media_fields_are_classified() -> None:
         )
 
 
+def test_orphan_track_uses_stable_fallback_labels_and_album_identity() -> None:
+    track = map_media_item(
+        {
+            "ratingKey": "127830",
+            "type": "track",
+            "title": "",
+            "grandparentRatingKey": "artist-1",
+            "grandparentTitle": "The Black Crowes",
+            "parentRatingKey": "album-1",
+            "parentIndex": "1",
+            "duration": "470",
+        },
+        "3",
+    )
+    assert track.title == "Faixa sem título (127830)"
+    assert track.album_external_id == "album-1"
+    assert track.album_title == "Álbum desconhecido"
+
+
+def test_track_without_album_identity_uses_library_scoped_synthetic_identity() -> None:
+    track = map_media_item(
+        {
+            "ratingKey": "track-1",
+            "type": "track",
+            "title": "Twice As Hard",
+            "grandparentRatingKey": "artist-1",
+            "grandparentTitle": "The Black Crowes",
+        },
+        "3",
+    )
+    assert track.album_external_id == "artist-1:album:unknown"
+    assert track.album_title == "Álbum desconhecido"
+
+
 def test_history_requires_real_timestamp() -> None:
     with pytest.raises(ConnectorResponseError, match="viewedAt"):
         map_watch_event({"ratingKey": "1"}, "1")

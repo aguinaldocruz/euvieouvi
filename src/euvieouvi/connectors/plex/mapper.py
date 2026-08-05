@@ -100,12 +100,22 @@ def map_media_item(item: Mapping[str, Any], library_external_id: str) -> Externa
         kind = ExternalMediaKind(raw_kind)
     except ValueError as error:
         raise ConnectorResponseError(f"Unsupported Plex media type: {raw_kind}.") from error
+    external_id = _required(item, "ratingKey")
+    title = _optional_text(item.get("title"))
+    if title is None:
+        if kind is not ExternalMediaKind.TRACK:
+            raise ConnectorResponseError("Plex response omitted required field title.")
+        title = f"Faixa sem título ({external_id})"
+    artist_external_id = _optional_text(item.get("grandparentRatingKey"))
+    album_external_id = _optional_text(item.get("parentRatingKey"))
+    if kind is ExternalMediaKind.TRACK and album_external_id is None:
+        album_external_id = f"{artist_external_id or library_external_id}:album:unknown"
     return ExternalMediaItem(
-        external_id=_required(item, "ratingKey"),
+        external_id=external_id,
         external_key=_optional_text(item.get("key")),
         library_external_id=library_external_id,
         kind=kind,
-        title=_required(item, "title"),
+        title=title,
         original_title=_optional_text(item.get("originalTitle")),
         year=_integer(item.get("year")),
         show_external_id=_optional_text(item.get("grandparentRatingKey")),
@@ -113,10 +123,13 @@ def map_media_item(item: Mapping[str, Any], library_external_id: str) -> Externa
         season_external_id=_optional_text(item.get("parentRatingKey")),
         season_number=_integer(item.get("parentIndex")),
         episode_number=_integer(item.get("index")),
-        artist_external_id=_optional_text(item.get("grandparentRatingKey")),
+        artist_external_id=artist_external_id,
         artist_title=_optional_text(item.get("grandparentTitle")),
-        album_external_id=_optional_text(item.get("parentRatingKey")),
-        album_title=_optional_text(item.get("parentTitle")),
+        album_external_id=album_external_id,
+        album_title=(
+            _optional_text(item.get("parentTitle"))
+            or ("Álbum desconhecido" if kind is ExternalMediaKind.TRACK else None)
+        ),
         disc_number=_integer(item.get("parentIndex")) if raw_kind == "track" else None,
         track_number=_integer(item.get("index")) if raw_kind == "track" else None,
         duration_ms=_integer(item.get("duration")),
