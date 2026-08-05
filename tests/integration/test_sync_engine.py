@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 
 from euvieouvi.connectors.dtos import (
     ConnectionInfo,
+    ExternalIdentifier,
     ExternalLibrary,
     ExternalLibraryRef,
     ExternalLibraryType,
@@ -34,6 +35,7 @@ from euvieouvi.database.models import (
     Genre,
     Library,
     MediaGenre,
+    MediaIdentifier,
     MediaImage,
     MediaItem,
     Source,
@@ -189,6 +191,7 @@ def movie(
     title: str | None = None,
     genres: tuple[str, ...] = (),
     thumb_path: str | None = None,
+    identifiers: tuple[ExternalIdentifier, ...] = (),
 ) -> ExternalMediaItem:
     return ExternalMediaItem(
         external_id=external_id,
@@ -199,6 +202,7 @@ def movie(
         last_viewed_at=NOW if view_count else None,
         genres=genres,
         thumb_path=thumb_path,
+        identifiers=identifiers,
     )
 
 
@@ -387,6 +391,141 @@ def test_plex_artwork_replaces_external_fallback(app: Flask) -> None:
         assert image.source_id == source_id
         assert image.source_path == "/library/metadata/m1/thumb"
         assert image.source_url is None
+
+
+def test_plex_sync_reuses_trakt_movie_and_adds_artwork(app: Flask) -> None:
+    with app.app_context():
+        source_id, _ = seed_source()
+        historical = MediaItem(kind=MediaKind.MOVIE, title="Historical title", year=2016)
+        db.session.add(historical)
+        db.session.flush()
+        db.session.add_all(
+            [
+                MediaIdentifier(
+                    media_item_id=historical.id,
+                    provider="tmdb",
+                    external_id="329865",
+                ),
+                WatchEvent(
+                    media_item_id=historical.id,
+                    source_id=source_id,
+                    source_event_id="trakt:1",
+                    dedup_key="trakt-event-1",
+                    watched_at=NOW,
+                    completed=True,
+                ),
+            ]
+        )
+        db.session.commit()
+
+        plex_item = movie(
+            "plex-rating-key",
+            title="Arrival",
+            thumb_path="/library/metadata/plex-rating-key/thumb",
+            identifiers=(ExternalIdentifier("tmdb", "329865"),),
+        )
+        result = orchestrator(FixtureConnector({"movies": (plex_item,)})).run(source_id)
+
+        assert result.status is SyncStatus.SUCCEEDED
+        assert db.session.scalar(select(func.count()).select_from(MediaItem)) == 1
+        reference = db.session.scalar(select(SourceMediaRef))
+        image = db.session.scalar(select(MediaImage))
+        event = db.session.scalar(select(WatchEvent))
+        assert reference is not None and reference.media_item_id == historical.id
+        assert reference.external_id == "plex-rating-key"
+        assert image is not None and image.media_item_id == historical.id
+        assert image.source_path == "/library/metadata/plex-rating-key/thumb"
+        assert event is not None and event.media_item_id == historical.id
+
+
+def test_plex_sync_reuses_trakt_episode_hierarchy(app: Flask) -> None:
+    with app.app_context():
+        source_id, library_ids = seed_source(second_library=True)
+        movie_library = db.session.get(Library, library_ids[0])
+        assert movie_library is not None
+        movie_library.enabled = False
+        show = MediaItem(kind=MediaKind.SHOW, title="Futurama", year=1999)
+        db.session.add(show)
+        db.session.flush()
+        season = MediaItem(
+            kind=MediaKind.SEASON,
+            title="Season 1",
+            parent_id=show.id,
+            season_number=1,
+        )
+        db.session.add(season)
+        db.session.flush()
+        historical = MediaItem(
+            kind=MediaKind.EPISODE,
+            title="Space Pilot 3000",
+            parent_id=season.id,
+            season_number=1,
+            episode_number=1,
+        )
+        db.session.add(historical)
+        db.session.flush()
+        db.session.add(
+            MediaIdentifier(
+                media_item_id=historical.id,
+                provider="tvdb",
+                external_id="131091",
+            )
+        )
+        db.session.commit()
+
+        plex_item = ExternalMediaItem(
+            external_id="episode-plex-1",
+            library_external_id="shows",
+            kind=ExternalMediaKind.EPISODE,
+            title="Space Pilot 3000",
+            show_external_id="show-plex",
+            show_title="Futurama",
+            season_external_id="season-plex-1",
+            season_number=1,
+            episode_number=1,
+            thumb_path="/library/metadata/episode-plex-1/thumb",
+            artist_thumb_path="/library/metadata/show-plex/thumb",
+            album_thumb_path="/library/metadata/season-plex-1/thumb",
+            identifiers=(ExternalIdentifier("tvdb", "131091"),),
+        )
+        previously_unseen_episode = ExternalMediaItem(
+            external_id="episode-plex-2",
+            library_external_id="shows",
+            kind=ExternalMediaKind.EPISODE,
+            title="The Series Has Landed",
+            show_external_id="show-plex",
+            show_title="Futurama",
+            season_external_id="season-plex-1",
+            season_number=1,
+            episode_number=2,
+        )
+        result = orchestrator(
+            FixtureConnector({"shows": (previously_unseen_episode, plex_item)})
+        ).run(source_id)
+
+        assert result.status is SyncStatus.SUCCEEDED
+        assert db.session.scalar(select(func.count()).select_from(MediaItem)) == 4
+        references = db.session.scalars(select(SourceMediaRef)).all()
+        assert {reference.external_id for reference in references} == {
+            "show-plex",
+            "season-plex-1",
+            "episode-plex-1",
+            "episode-plex-2",
+        }
+        assert {reference.media_item_id for reference in references} == {
+            show.id,
+            season.id,
+            historical.id,
+            db.session.scalar(
+                select(MediaItem.id).where(MediaItem.title == "The Series Has Landed")
+            ),
+        }
+        images = db.session.scalars(select(MediaImage)).all()
+        assert {image.media_item_id for image in images} == {
+            show.id,
+            season.id,
+            historical.id,
+        }
 
 
 def test_partial_series_enumerates_all_episodes_and_preserves_144_watched(app: Flask) -> None:

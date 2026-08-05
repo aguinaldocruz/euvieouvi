@@ -47,18 +47,20 @@ class MediaPersistenceService:
         self.library_id = library_id
 
     def persist_media(self, item: ExternalMediaItem, observed_at: datetime) -> PersistResult:
-        parent_id = self._ensure_hierarchy(item, observed_at)
-        signature = media_signature(item)
         reference = self.work.source_media_refs.by_external_identity(
             self.source_id, item.external_id
         )
+        matched_media = None if reference is not None else self._match_by_identifiers(item)
+        parent_id = self._ensure_hierarchy(item, observed_at, matched_media=matched_media)
+        signature = media_signature(item)
         if reference is None:
-            media = MediaItem(
+            media = matched_media or MediaItem(
                 kind=MediaKind(item.kind.value), title=item.title, parent_id=parent_id
             )
             self._apply_media(media, item, parent_id)
-            self.work.media_items.add(media)
-            self.work.session.flush()
+            if matched_media is None:
+                self.work.media_items.add(media)
+                self.work.session.flush()
             reference = SourceMediaRef(
                 source_id=self.source_id,
                 library_id=self.library_id,
@@ -71,7 +73,11 @@ class MediaPersistenceService:
                 raw_hash=signature,
             )
             self.work.source_media_refs.add(reference)
-            classification = ItemClassification.INSERTED
+            classification = (
+                ItemClassification.UPDATED
+                if matched_media is not None
+                else ItemClassification.INSERTED
+            )
         else:
             media = self._required_media(reference.media_item_id)
             classification = (
@@ -133,7 +139,13 @@ class MediaPersistenceService:
         )
         return True
 
-    def _ensure_hierarchy(self, item: ExternalMediaItem, observed_at: datetime) -> int | None:
+    def _ensure_hierarchy(
+        self,
+        item: ExternalMediaItem,
+        observed_at: datetime,
+        *,
+        matched_media: MediaItem | None,
+    ) -> int | None:
         if item.kind is ExternalMediaKind.TRACK:
             assert item.artist_external_id is not None
             assert item.artist_title is not None
@@ -165,6 +177,8 @@ class MediaPersistenceService:
         assert item.show_external_id is not None
         assert item.show_title is not None
         assert item.season_number is not None
+        if matched_media is not None:
+            return self._bind_existing_episode_hierarchy(item, matched_media, observed_at)
         show = self._ensure_container(
             external_id=item.show_external_id,
             kind=MediaKind.SHOW,
@@ -190,6 +204,86 @@ class MediaPersistenceService:
         )
         return season.id
 
+    def _match_by_identifiers(self, item: ExternalMediaItem) -> MediaItem | None:
+        identities = tuple(
+            (identifier.provider, identifier.external_id) for identifier in item.identifiers
+        )
+        matches = self.work.media_identifiers.media_ids_for_kind(item.kind.value, identities)
+        if len(matches) > 1:
+            raise ValueError("External identifiers match more than one catalog item.")
+        if not matches:
+            return None
+        return self._required_media(matches.pop())
+
+    def _bind_existing_episode_hierarchy(
+        self,
+        item: ExternalMediaItem,
+        episode: MediaItem,
+        observed_at: datetime,
+    ) -> int:
+        season = self._required_media(episode.parent_id or 0)
+        show = self._required_media(season.parent_id or 0)
+        if (
+            episode.kind is not MediaKind.EPISODE
+            or season.kind is not MediaKind.SEASON
+            or show.kind is not MediaKind.SHOW
+            or season.season_number != item.season_number
+        ):
+            raise ValueError("Matched episode has an incompatible historical hierarchy.")
+        assert item.show_external_id is not None
+        assert item.show_title is not None
+        show.title = item.show_title
+        self._bind_existing_container(
+            show,
+            external_id=item.show_external_id,
+            image_source_path=item.artist_thumb_path,
+            genres=item.genres,
+            observed_at=observed_at,
+        )
+        season_external_id = item.season_external_id or (
+            f"{item.show_external_id}:season:{item.season_number}"
+        )
+        self._bind_existing_container(
+            season,
+            external_id=season_external_id,
+            image_source_path=item.album_thumb_path,
+            genres=item.genres,
+            observed_at=observed_at,
+        )
+        return season.id
+
+    def _bind_existing_container(
+        self,
+        media: MediaItem,
+        *,
+        external_id: str,
+        image_source_path: str | None,
+        genres: tuple[str, ...],
+        observed_at: datetime,
+    ) -> None:
+        reference = self.work.source_media_refs.by_external_identity(
+            self.source_id, external_id
+        )
+        if reference is not None and reference.media_item_id != media.id:
+            raise ValueError("External hierarchy identity conflicts with historical media.")
+        if reference is None:
+            self.work.source_media_refs.add(
+                SourceMediaRef(
+                    source_id=self.source_id,
+                    library_id=self.library_id,
+                    media_item_id=media.id,
+                    external_id=external_id,
+                    last_seen_at=observed_at,
+                    available=True,
+                )
+            )
+        else:
+            reference.last_seen_at = observed_at
+            reference.available = True
+            reference.unavailable_since = None
+        self._sync_image(media.id, "poster", image_source_path)
+        self._merge_genres(media.id, genres)
+
     def _ensure_container(
         self,
         *,
@@ -214,6 +308,21 @@ class MediaPersistenceService:
             if genres:
                 self._merge_genres(media.id, genres)
             return media
+        historical = self._match_historical_container(
+            kind=kind,
+            title=title,
+            parent_id=parent_id,
+            season_number=season_number,
+        )
+        if historical is not None:
+            self._bind_existing_container(
+                historical,
+                external_id=external_id,
+                image_source_path=image_source_path,
+                genres=genres,
+                observed_at=observed_at,
+            )
+            return historical
         media = MediaItem(
             kind=kind,
             parent_id=parent_id,
@@ -235,6 +344,29 @@ class MediaPersistenceService:
         self._sync_image(media.id, "poster", image_source_path)
         self._merge_genres(media.id, genres)
         return media
+
+    def _match_historical_container(
+        self,
+        *,
+        kind: MediaKind,
+        title: str,
+        parent_id: int | None,
+        season_number: int | None,
+    ) -> MediaItem | None:
+        statement = select(MediaItem).where(
+            MediaItem.kind == kind,
+            MediaItem.parent_id == parent_id,
+        )
+        if kind is MediaKind.SHOW:
+            statement = statement.where(MediaItem.title == title)
+        elif kind is MediaKind.SEASON:
+            statement = statement.where(MediaItem.season_number == season_number)
+        else:
+            return None
+        candidates = self.work.session.scalars(statement.limit(2)).all()
+        if len(candidates) > 1:
+            raise ValueError("Historical hierarchy has more than one matching container.")
+        return candidates[0] if candidates else None
 
     def _required_media(self, media_item_id: int) -> MediaItem:
         media = self.work.media_items.get(media_item_id)

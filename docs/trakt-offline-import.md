@@ -7,7 +7,8 @@ biblioteca padrão do Python e não altera a interface web.
 ## Pré-condições
 
 - Python 3.12 disponível no host;
-- uma sincronização Plex completa e bem-sucedida já realizada;
+- uma fonte Plex já configurada no banco; a sincronização completa pode ocorrer antes ou
+  depois da importação;
 - o ZIP original do export do Trakt acessível no host;
 - o caminho real do `euvieouvi.db` conhecido;
 - o serviço Docker completamente parado.
@@ -19,6 +20,10 @@ importação; revisões anteriores são recusadas sem modificar o banco.
 O importador associa mídias por Plex GUID, IMDb, TMDB, TVDB e Trakt. Título não é usado
 como identidade. Filmes e episódios históricos que não existem no catálogo atual são
 criados com os dados do Trakt, sem uma referência falsa de disponibilidade no Plex.
+O export histórico do Trakt não contém as capas. Em um banco novo, elas serão associadas
+ao mesmo registro na sincronização posterior com o Plex. Como alternativa, filmes e
+séries com ID TMDB podem receber capas pela tela de metadados, quando a integração TMDB
+estiver configurada.
 
 ## Execução recomendada
 

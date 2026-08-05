@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, select, tuple_
 from sqlalchemy.orm import Session
 
 from euvieouvi.database.models import (
@@ -128,6 +128,26 @@ class MediaIdentifierRepository(Repository[MediaIdentifier]):
                 MediaIdentifier.provider == provider,
                 MediaIdentifier.external_id == external_id,
             )
+        )
+
+    def media_ids_for_kind(
+        self,
+        kind: str,
+        identifiers: Sequence[tuple[str, str]],
+    ) -> set[int]:
+        if not identifiers:
+            return set()
+        return set(
+            self.session.scalars(
+                select(MediaIdentifier.media_item_id)
+                .join(MediaItem, MediaItem.id == MediaIdentifier.media_item_id)
+                .where(
+                    MediaItem.kind == kind,
+                    tuple_(MediaIdentifier.provider, MediaIdentifier.external_id).in_(
+                        identifiers
+                    ),
+                )
+            ).all()
         )
 
 
