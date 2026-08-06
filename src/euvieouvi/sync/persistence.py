@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from euvieouvi.connectors.dtos import ExternalMediaItem, ExternalMediaKind, ExternalWatchEvent
 from euvieouvi.database.enums import MediaKind
@@ -170,6 +170,102 @@ class MediaPersistenceService:
             )
         )
         return True
+
+    def rebuild_container_watch_states(self, observed_at: datetime) -> None:
+        """Derive season/show and album/artist state from their playable children."""
+        playable = self.work.session.execute(
+            select(MediaItem.id, MediaItem.parent_id)
+            .join(SourceMediaRef, SourceMediaRef.media_item_id == MediaItem.id)
+            .where(
+                SourceMediaRef.source_id == self.source_id,
+                SourceMediaRef.library_id == self.library_id,
+                SourceMediaRef.available.is_(True),
+                MediaItem.kind.in_([MediaKind.EPISODE, MediaKind.TRACK]),
+            )
+            .distinct()
+        ).all()
+        if not playable:
+            return
+        playable_ids = [int(row.id) for row in playable]
+        states = {
+            state.media_item_id: state
+            for state in self.work.session.scalars(
+                select(WatchState).where(
+                    WatchState.source_id == self.source_id,
+                    WatchState.media_item_id.in_(playable_ids),
+                )
+            )
+        }
+        event_facts = {
+            int(media_id): (int(count), last_watched)
+            for media_id, count, last_watched in self.work.session.execute(
+                select(
+                    WatchEvent.media_item_id,
+                    func.count(WatchEvent.id),
+                    func.max(WatchEvent.watched_at),
+                )
+                .where(
+                    WatchEvent.media_item_id.in_(playable_ids),
+                    WatchEvent.source_id == self.source_id,
+                    WatchEvent.completed.is_(True),
+                )
+                .group_by(WatchEvent.media_item_id)
+            )
+        }
+        parent_ids = {int(row.parent_id) for row in playable if row.parent_id is not None}
+        parents = {
+            item.id: item
+            for item in self.work.session.scalars(
+                select(MediaItem).where(MediaItem.id.in_(parent_ids))
+            )
+        }
+        grouped: dict[int, list[tuple[int, int, datetime | None]]] = {}
+        for row in playable:
+            if row.parent_id is None:
+                continue
+            state = states.get(int(row.id))
+            event_count, event_last = event_facts.get(int(row.id), (0, None))
+            known_count = max(state.view_count if state is not None else 0, event_count)
+            last_watched = _latest_datetime(
+                state.last_watched_at if state is not None else None,
+                event_last,
+            )
+            grouped.setdefault(int(row.parent_id), []).append(
+                (int(row.id), known_count, last_watched)
+            )
+        top_grouped: dict[int, list[tuple[int, int, datetime | None]]] = {}
+        for parent_id, children in grouped.items():
+            count, last_watched = _aggregate_completion(children)
+            self._set_derived_watch_state(parent_id, count, last_watched, observed_at)
+            parent = parents.get(parent_id)
+            if parent is not None and parent.parent_id is not None:
+                top_grouped.setdefault(parent.parent_id, []).extend(children)
+        for parent_id, children in top_grouped.items():
+            count, last_watched = _aggregate_completion(children)
+            self._set_derived_watch_state(parent_id, count, last_watched, observed_at)
+
+    def _set_derived_watch_state(
+        self,
+        media_item_id: int,
+        view_count: int,
+        last_watched_at: datetime | None,
+        observed_at: datetime,
+    ) -> None:
+        state = self.work.watch_states.by_item_and_source(media_item_id, self.source_id)
+        if state is None:
+            state = WatchState(
+                media_item_id=media_item_id,
+                source_id=self.source_id,
+                view_count=view_count,
+                completed=view_count > 0,
+                observed_at=observed_at,
+            )
+            self.work.watch_states.add(state)
+        state.view_count = view_count
+        state.completed = view_count > 0
+        state.last_watched_at = last_watched_at
+        state.progress_ms = None
+        state.observed_at = observed_at
 
     def _ensure_hierarchy(
         self,
@@ -539,6 +635,20 @@ def media_signature(item: ExternalMediaItem) -> str:
     payload = asdict(item)
     normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=_json_default)
     return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def _aggregate_completion(
+    children: list[tuple[int, int, datetime | None]],
+) -> tuple[int, datetime | None]:
+    last_watched = _latest_datetime(*(value for _, _, value in children))
+    if not children or any(view_count <= 0 for _, view_count, _ in children):
+        return 0, last_watched
+    return min(view_count for _, view_count, _ in children), last_watched
+
+
+def _latest_datetime(*values: datetime | None) -> datetime | None:
+    known = [value for value in values if value is not None]
+    return max(known, default=None)
 
 
 def event_dedup_key(source_id: int, event: ExternalWatchEvent) -> str:

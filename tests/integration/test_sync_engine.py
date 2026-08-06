@@ -583,6 +583,40 @@ def test_partial_series_enumerates_all_episodes_and_preserves_144_watched(app: F
         )
         second_run = db.session.get(SyncRun, second.run_id)
         assert second_run is not None and second_run.items_unchanged == 161
+        containers = db.session.scalars(
+            select(WatchState)
+            .join(MediaItem, MediaItem.id == WatchState.media_item_id)
+            .where(MediaItem.kind.in_([MediaKind.SEASON, MediaKind.SHOW]))
+        ).all()
+        assert len(containers) == 2
+        assert all(state.completed is False and state.view_count == 0 for state in containers)
+
+
+def test_fully_watched_series_derives_season_and_show_completion(app: Flask) -> None:
+    with app.app_context():
+        source_id, library_ids = seed_source(second_library=True)
+        movie_library = db.session.get(Library, library_ids[0])
+        assert movie_library is not None
+        movie_library.enabled = False
+        db.session.commit()
+
+        result = orchestrator(
+            FixtureConnector({"shows": (episode(1, watched=True), episode(2, watched=True))})
+        ).run(source_id)
+
+        assert result.status is SyncStatus.SUCCEEDED
+        containers = db.session.execute(
+            select(MediaItem.kind, WatchState)
+            .join(WatchState, WatchState.media_item_id == MediaItem.id)
+            .where(MediaItem.kind.in_([MediaKind.SEASON, MediaKind.SHOW]))
+        ).all()
+        assert {kind for kind, _ in containers} == {MediaKind.SEASON, MediaKind.SHOW}
+        assert all(
+            state.completed is True
+            and state.view_count == 1
+            and state.last_watched_at == NOW.replace(tzinfo=None)
+            for _, state in containers
+        )
 
 
 def test_page_failure_keeps_last_confirmed_checkpoint_and_valid_items(app: Flask) -> None:

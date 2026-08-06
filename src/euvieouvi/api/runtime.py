@@ -75,25 +75,62 @@ class LocalSyncExecutor:
 
         def execute() -> None:
             with self._app.app_context():
+                orchestrator: SyncOrchestrator | None = None
                 source = db.session.get(Source, source_id)
                 if source is None:
                     self._app.logger.error("queued synchronization source disappeared")
                     return
                 try:
-                    result = SyncOrchestrator(
-                        lambda: db.session(), self._factory(source)
-                    ).run_queued(run_id, cancellation=token)
                     auto_enrich = db.session.get(Setting, "metadata.auto_after_sync")
-                    if (
-                        result.status is SyncStatus.SUCCEEDED
-                        and auto_enrich is not None
-                        and auto_enrich.value == "true"
-                    ):
-                        from euvieouvi.enrichment.runtime import get_enrichment_executor
+                    enrich_after_sync = auto_enrich is not None and auto_enrich.value == "true"
+                    orchestrator = SyncOrchestrator(
+                        lambda: db.session(), self._factory(source)
+                    )
+                    result = orchestrator.run_queued(
+                        run_id,
+                        cancellation=token,
+                        finalize_on_success=not enrich_after_sync,
+                    )
+                    if result.status is SyncStatus.SUCCEEDED and enrich_after_sync:
+                        from euvieouvi.enrichment.service import enrich_catalog
 
-                        get_enrichment_executor(self._app).submit()
-                except BaseException:
+                        orchestrator.update_progress(
+                            run_id, "Enriquecendo metadados externos · preparando lote."
+                        )
+
+                        def report(counters: dict[str, int]) -> None:
+                            token.raise_if_cancelled()
+                            if counters["processed"] % 5 != 0:
+                                return
+                            orchestrator.update_progress(
+                                run_id,
+                                "Enriquecendo metadados externos · "
+                                f"{counters['processed']} processados, "
+                                f"{counters['updated']} atualizados e "
+                                f"{counters['failed']} falhas.",
+                            )
+
+                        counters = enrich_catalog(self._app, progress=report)
+                        orchestrator.finish_success(
+                            run_id,
+                            "Sincronização e enriquecimento concluídos · "
+                            f"{counters['processed']} metadados processados, "
+                            f"{counters['updated']} atualizados e "
+                            f"{counters['failed']} falhas seguras.",
+                        )
+                except Exception as error:
                     self._app.logger.exception("background synchronization failed")
+                    db.session.rollback()
+                    run = db.session.get(SyncRun, run_id)
+                    if orchestrator is not None and run is not None and run.status in {
+                        SyncStatus.QUEUED,
+                        SyncStatus.RUNNING,
+                    }:
+                        orchestrator.finish_failure(
+                            run_id,
+                            error,
+                            "Sincronização ou enriquecimento falhou com segurança.",
+                        )
                 finally:
                     with self._lock:
                         self._tokens.pop(run_id, None)

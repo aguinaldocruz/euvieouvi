@@ -83,7 +83,11 @@ class SyncOrchestrator:
         return run_id
 
     def run_queued(
-        self, run_id: int, *, cancellation: CancellationToken | None = None
+        self,
+        run_id: int,
+        *,
+        cancellation: CancellationToken | None = None,
+        finalize_on_success: bool = True,
     ) -> SyncRunResult:
         """Claim and execute a previously queued run."""
         session = self._session_factory()
@@ -103,7 +107,13 @@ class SyncOrchestrator:
             session.close()
         if self._on_acquired is not None:
             self._on_acquired(run_id)
-        return self._execute(run_id, source_id, libraries, cancellation or CancellationToken())
+        return self._execute(
+            run_id,
+            source_id,
+            libraries,
+            cancellation or CancellationToken(),
+            finalize_on_success=finalize_on_success,
+        )
 
     def _execute(
         self,
@@ -111,6 +121,8 @@ class SyncOrchestrator:
         source_id: int,
         library_ids: tuple[int, ...],
         token: CancellationToken,
+        *,
+        finalize_on_success: bool = True,
     ) -> SyncRunResult:
         try:
             for library_id in library_ids:
@@ -127,8 +139,19 @@ class SyncOrchestrator:
             self._record_run_error(run_id, error)
             self._finish_run(run_id, SyncStatus.FAILED, "Synchronization failed safely.")
             raise
-        self._finish_run(run_id, SyncStatus.SUCCEEDED, "Synchronization completed.")
+        if finalize_on_success:
+            self._finish_run(run_id, SyncStatus.SUCCEEDED, "Synchronization completed.")
         return SyncRunResult(run_id, SyncStatus.SUCCEEDED)
+
+    def update_progress(self, run_id: int, summary: str) -> None:
+        self._update_progress(run_id, summary)
+
+    def finish_success(self, run_id: int, summary: str) -> None:
+        self._finish_run(run_id, SyncStatus.SUCCEEDED, summary)
+
+    def finish_failure(self, run_id: int, error: Exception, summary: str) -> None:
+        self._record_run_error(run_id, error)
+        self._finish_run(run_id, SyncStatus.FAILED, summary)
 
     def _acquire(
         self, source_id: int, trigger: SyncTrigger, *, queued: bool
@@ -151,6 +174,11 @@ class SyncOrchestrator:
                 status=SyncStatus.QUEUED if queued else SyncStatus.RUNNING,
                 started_at=None if queued else now,
                 heartbeat_at=None if queued else now,
+                summary=(
+                    "Sincronização aguardando início."
+                    if queued
+                    else "Preparando sincronização."
+                ),
             )
             work.sync_runs.add(run)
             session.flush()
@@ -194,6 +222,10 @@ class SyncOrchestrator:
         if stage == "media":
             while True:
                 token.raise_if_cancelled()
+                self._update_progress(
+                    run_id,
+                    f"Coletando catálogo de {library.name} · posição {start}.",
+                )
                 media_page = self._connector.get_media_page(
                     reference,
                     media_kind,
@@ -220,6 +252,10 @@ class SyncOrchestrator:
 
         while stage == "history":
             token.raise_if_cancelled()
+            self._update_progress(
+                run_id,
+                f"Coletando histórico de {library.name} · posição {start}.",
+            )
             history_page = self._connector.get_history_page(
                 reference,
                 HistoryCheckpoint(
@@ -240,6 +276,8 @@ class SyncOrchestrator:
             if not history_page.has_more:
                 break
             start = next_start
+        self._update_progress(run_id, f"Reconciliando estados assistidos de {library.name}.")
+        self._rebuild_container_watch_states(source_id, library_id)
         self._finish_library(run_id, library_id, SyncStatus.SUCCEEDED, None)
 
     def _persist_media_page(
@@ -368,6 +406,19 @@ class SyncOrchestrator:
         finally:
             session.close()
 
+    def _rebuild_container_watch_states(self, source_id: int, library_id: int) -> None:
+        session = self._session_factory()
+        try:
+            work = UnitOfWork(session)
+            MediaPersistenceService(
+                work,
+                source_id=source_id,
+                library_id=library_id,
+            ).rebuild_container_watch_states(self._clock())
+            session.commit()
+        finally:
+            session.close()
+
     def _start_library(self, run_id: int, library_id: int) -> Library:
         session = self._session_factory()
         try:
@@ -429,6 +480,19 @@ class SyncOrchestrator:
                     detail.status = status
                     detail.finished_at = self._clock()
                     detail.message = summary
+            session.commit()
+        finally:
+            session.close()
+
+    def _update_progress(self, run_id: int, summary: str) -> None:
+        session = self._session_factory()
+        try:
+            work = UnitOfWork(session)
+            run = work.sync_runs.get(run_id)
+            if run is None:
+                raise RuntimeError("Synchronization run disappeared.")
+            run.summary = summary
+            run.heartbeat_at = self._clock()
             session.commit()
         finally:
             session.close()

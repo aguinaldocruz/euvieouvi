@@ -1,0 +1,59 @@
+<section id="sync-detail"
+  {% if run.status.value in ['queued', 'running'] %}
+    hx-get="{{ url_for('web.sync_detail_fragment', run_id=run.id) }}"
+    hx-trigger="every 3s"
+    hx-swap="outerHTML"
+  {% endif %}
+  aria-live="polite">
+  <div class="d-flex justify-content-between">
+    <div>
+      <h1 class="h2">Sincronização #{{ run.id }}</h1>
+      <p><span class="status-dot status-{{ run.status.value }}"></span>{{ run.status.value }}</p>
+    </div>
+    {% if run.status.value in ['queued','running'] %}
+      <form method="post" action="{{ url_for('web.sync_cancel', run_id=run.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-outline-warning">Cancelar</button>
+      </form>
+    {% endif %}
+  </div>
+  <div class="card mb-4">
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-6 col-md">Lidos <strong class="d-block">{{ run.items_read }}</strong></div>
+        <div class="col-6 col-md">Inseridos <strong class="d-block">{{ run.items_inserted }}</strong></div>
+        <div class="col-6 col-md">Atualizados <strong class="d-block">{{ run.items_updated }}</strong></div>
+        <div class="col-6 col-md">Inalterados <strong class="d-block">{{ run.items_unchanged }}</strong></div>
+        <div class="col-6 col-md">Conclusões <strong class="d-block">{{ run.events_inserted }}</strong></div>
+        <div class="col-6 col-md">Erros <strong class="d-block">{{ run.items_failed }}</strong></div>
+      </div>
+      <hr>
+      <p class="mb-1"><strong>Etapa atual</strong></p>
+      <p class="mb-0">{{ run.summary or 'Execução aguardando atualização.' }}</p>
+      {% if run.status.value in ['queued', 'running'] %}
+        <p class="small text-secondary mb-0 mt-2">Atualizada em {{ format_datetime(run.heartbeat_at or run.updated_at) }}</p>
+      {% endif %}
+    </div>
+  </div>
+  <h2 class="h4">Bibliotecas</h2>
+  <div class="table-responsive bg-white mb-4">
+    <table class="table">
+      <thead><tr><th>ID</th><th>Status</th><th>Lidos</th><th>Inseridos</th><th>Atualizados</th><th>Erros</th></tr></thead>
+      <tbody>
+        {% for item in libraries %}
+          <tr><td>{{ item.library_id }}</td><td>{{ item.status.value }}</td><td>{{ item.items_read }}</td><td>{{ item.items_inserted }}</td><td>{{ item.items_updated }}</td><td>{{ item.items_failed }}</td></tr>
+        {% else %}
+          <tr><td colspan="6">Ainda sem resultados por biblioteca.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if errors %}
+    <h2 class="h4">Erros seguros</h2>
+    <ul class="list-group">
+      {% for error in errors %}
+        <li class="list-group-item"><strong>{{ error.category }}</strong> — {{ error.message }}<br><span class="small text-secondary">{{ format_datetime(error.occurred_at) }}</span></li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</section>

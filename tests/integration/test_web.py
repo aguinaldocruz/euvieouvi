@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from flask import Flask
+from sqlalchemy import select
 
+from euvieouvi.api.runtime import LocalSyncExecutor
 from euvieouvi.connectors.dtos import (
     ConnectionInfo,
     ExternalLibrary,
@@ -501,7 +504,7 @@ def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     assert response.status_code == 200
     assert "Arrival" in text
     assert "Disponível no Plex" in text
-    assert "Assistido 1 vez" in text
+    assert "Assistido 2 vezes" in text
     advanced = client.get(
         f"/catalog?kind=movie&library={library_id}&genre=ficção+científica&decade=2010&sort=rating&direction=desc"
     )
@@ -513,6 +516,64 @@ def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     assert client.get("/catalog?sort=original_title").status_code == 200
     assert client.get("/catalog?sort=updated&direction=desc").status_code == 200
     assert client.get("/catalog?sort=removed&direction=desc").status_code == 200
+
+
+def test_state_without_history_still_marks_media_as_watched(app: Flask) -> None:
+    with app.app_context():
+        seed_web()
+        for event in db.session.scalars(select(WatchEvent)).all():
+            db.session.delete(event)
+        db.session.commit()
+
+    client = app.test_client()
+    catalog = client.get("/catalog?kind=movie&played=played").get_data(as_text=True)
+    history = client.get("/history?kind=movie&watched=watched").get_data(as_text=True)
+
+    assert "Arrival" in catalog
+    assert "Assistido 2 vezes" in catalog
+    assert "Arrival" in history
+
+
+def test_auto_enrichment_remains_part_of_active_sync(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with app.app_context():
+        source_id, _, _, _ = seed_web()
+        db.session.add(Setting(key="metadata.auto_after_sync", value="true"))
+        db.session.commit()
+
+        def enrich(
+            application: Flask,
+            *,
+            limit: int = 100,
+            progress: object = None,
+        ) -> dict[str, int]:
+            del limit
+            assert application is app
+            assert callable(progress)
+            progress({"processed": 1, "updated": 1, "failed": 0})
+            return {"processed": 1, "updated": 1, "failed": 0}
+
+        monkeypatch.setattr("euvieouvi.enrichment.service.enrich_catalog", enrich)
+        run_id = LocalSyncExecutor(app, lambda source: WebConnector()).submit(source_id)
+
+    for _ in range(200):
+        with app.app_context():
+            run = db.session.get(SyncRun, run_id)
+            if run is not None and run.status is SyncStatus.SUCCEEDED:
+                break
+        time.sleep(0.01)
+    else:
+        pytest.fail("background synchronization did not finish")
+
+    with app.app_context():
+        run = db.session.get(SyncRun, run_id)
+        assert run is not None
+        assert run.finished_at is not None
+        assert run.summary is not None and "enriquecimento concluídos" in run.summary
+        fragment = app.test_client().get(f"/sync/{run_id}/fragment")
+        assert fragment.status_code == 200
+        assert "Etapa atual" in fragment.get_data(as_text=True)
 
 
 def test_media_image_placeholder_and_local_cache(

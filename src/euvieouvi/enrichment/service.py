@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from importlib.metadata import version
 
@@ -27,7 +28,12 @@ from euvieouvi.enrichment.providers import (
 from euvieouvi.extensions import db
 
 
-def enrich_catalog(app: Flask, *, limit: int = 100) -> dict[str, int]:
+def enrich_catalog(
+    app: Flask,
+    *,
+    limit: int = 100,
+    progress: Callable[[dict[str, int]], None] | None = None,
+) -> dict[str, int]:
     """Enrich a bounded batch selected only by exact external identifiers."""
     settings = {item.key: item.value for item in db.session.scalars(select(Setting))}
     language = settings.get("metadata.language", "pt-BR")
@@ -98,6 +104,8 @@ def enrich_catalog(app: Flask, *, limit: int = 100) -> dict[str, int]:
                 record.message = str(error)[:500]
                 counters["failed"] += 1
             db.session.commit()
+            if progress is not None:
+                progress(dict(counters))
     finally:
         if tmdb is not None:
             tmdb.close()

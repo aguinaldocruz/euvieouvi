@@ -20,7 +20,7 @@ from flask import (
     send_file,
     url_for,
 )
-from sqlalchemy import exists, func, select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from euvieouvi.api.runtime import connector_for, get_executor
@@ -41,6 +41,7 @@ from euvieouvi.database.models import (
     SyncRun,
     SyncRunLibrary,
     WatchEvent,
+    WatchState,
 )
 from euvieouvi.database.unit_of_work import UnitOfWork
 from euvieouvi.enrichment.runtime import get_enrichment_executor
@@ -566,9 +567,24 @@ def sync_active_fragment() -> Any:
 
 @blueprint.get("/sync/<int:run_id>")
 def sync_detail(run_id: int) -> Any:
+    context = _sync_detail_context(run_id)
+    if context is None:
+        return render_template("errors/404.html"), 404
+    return render_template("sync_detail.html", **context)
+
+
+@blueprint.get("/sync/<int:run_id>/fragment")
+def sync_detail_fragment(run_id: int) -> Any:
+    context = _sync_detail_context(run_id)
+    if context is None:
+        return Response("Sincronização não encontrada.", 404)
+    return render_template("fragments/sync_detail_content.html", **context)
+
+
+def _sync_detail_context(run_id: int) -> dict[str, Any] | None:
     run = db.session.get(SyncRun, run_id)
     if run is None:
-        return render_template("errors/404.html"), 404
+        return None
     libraries = db.session.scalars(
         select(SyncRunLibrary)
         .where(SyncRunLibrary.sync_run_id == run_id)
@@ -577,7 +593,7 @@ def sync_detail(run_id: int) -> Any:
     errors = db.session.scalars(
         select(SyncError).where(SyncError.sync_run_id == run_id).order_by(SyncError.id).limit(100)
     ).all()
-    return render_template("sync_detail.html", run=run, libraries=libraries, errors=errors)
+    return {"run": run, "libraries": libraries, "errors": errors}
 
 
 @blueprint.post("/sync/<int:run_id>/cancel")
@@ -598,27 +614,16 @@ def history() -> Any:
     query = request.args.get("query", "").strip()[:200]
     kind = request.args.get("kind", "")
     watched = request.args.get("watched", "watched")
-    completed_event = exists().where(
-        WatchEvent.media_item_id == MediaItem.id,
-        WatchEvent.completed.is_(True),
-    )
-    last_completed = (
-        select(func.max(WatchEvent.watched_at))
-        .where(
-            WatchEvent.media_item_id == MediaItem.id,
-            WatchEvent.completed.is_(True),
-        )
-        .scalar_subquery()
-    )
+    _, last_completed, completed_known = _completion_expressions(MediaItem.id)
     statement = select(MediaItem)
     if query:
         statement = statement.where(MediaItem.title.ilike(f"%{query}%"))
     if kind in {item.value for item in MediaKind}:
         statement = statement.where(MediaItem.kind == MediaKind(kind))
     if watched == "watched":
-        statement = statement.where(completed_event)
+        statement = statement.where(completed_known)
     elif watched == "unwatched":
-        statement = statement.where(~completed_event)
+        statement = statement.where(~completed_known)
     raw_page = request.args.get("page", "1")
     page = max(int(raw_page) if raw_page.isdigit() else 1, 1)
     values = db.session.scalars(
@@ -663,23 +668,7 @@ def catalog() -> Any:
         SourceMediaRef.media_item_id == MediaItem.id,
         SourceMediaRef.available.is_(True),
     )
-    completion_count = (
-        select(func.count())
-        .select_from(WatchEvent)
-        .where(
-            WatchEvent.media_item_id == MediaItem.id,
-            WatchEvent.completed.is_(True),
-        )
-        .scalar_subquery()
-    )
-    last_completed = (
-        select(func.max(WatchEvent.watched_at))
-        .where(
-            WatchEvent.media_item_id == MediaItem.id,
-            WatchEvent.completed.is_(True),
-        )
-        .scalar_subquery()
-    )
+    completion_count, last_completed, completed_known = _completion_expressions(MediaItem.id)
     plex_available = exists().where(
         SourceMediaRef.media_item_id == MediaItem.id,
         SourceMediaRef.available.is_(True),
@@ -734,9 +723,9 @@ def catalog() -> Any:
     elif availability == "unavailable":
         statement = statement.where(~available_ref)
     if played == "played":
-        statement = statement.where(completion_count > 0)
+        statement = statement.where(completed_known)
     elif played == "unplayed":
-        statement = statement.where(completion_count == 0)
+        statement = statement.where(~completed_known)
     sort_columns = {
         "title": func.coalesce(MediaItem.sort_title, MediaItem.title),
         "original_title": func.coalesce(MediaItem.original_title, MediaItem.title),
@@ -840,23 +829,9 @@ def media_detail(media_id: int) -> Any:
     item = db.session.get(MediaItem, media_id)
     if item is None:
         return render_template("errors/404.html"), 404
-    item_completion_count = int(
-        db.session.scalar(
-            select(func.count())
-            .select_from(WatchEvent)
-            .where(
-                WatchEvent.media_item_id == media_id,
-                WatchEvent.completed.is_(True),
-            )
-        )
-        or 0
-    )
-    item_last_completed = db.session.scalar(
-        select(func.max(WatchEvent.watched_at)).where(
-            WatchEvent.media_item_id == media_id,
-            WatchEvent.completed.is_(True),
-        )
-    )
+    item_count_expression, item_last_expression, _ = _completion_expressions(media_id)
+    item_completion_count = int(db.session.scalar(select(item_count_expression)) or 0)
+    item_last_completed = db.session.scalar(select(item_last_expression))
     children = db.session.scalars(
         select(MediaItem)
         .where(MediaItem.parent_id == media_id)
@@ -896,6 +871,28 @@ def media_detail(media_id: int) -> Any:
             .group_by(WatchEvent.media_item_id)
         )
     }
+    child_state_facts = {
+        child_id: (int(count), last_completed)
+        for child_id, count, last_completed in db.session.execute(
+            select(
+                WatchState.media_item_id,
+                func.max(WatchState.view_count),
+                func.max(WatchState.last_watched_at),
+            )
+            .where(
+                WatchState.media_item_id.in_([child.id for child in children_for_states]),
+                WatchState.completed.is_(True),
+            )
+            .group_by(WatchState.media_item_id)
+        )
+    }
+    for child_id, (state_count, state_last) in child_state_facts.items():
+        event_count, event_last = child_completions.get(child_id, (0, None))
+        known_last = max(
+            (value for value in (event_last, state_last) if value is not None),
+            default=None,
+        )
+        child_completions[child_id] = (max(event_count, state_count), known_last)
     playable = [
         child for child in children_for_states if child.kind in {MediaKind.EPISODE, MediaKind.TRACK}
     ]
@@ -1006,15 +1003,68 @@ def _count(model: type[Any], *criteria: Any) -> int:
     return int(db.session.scalar(select(func.count()).select_from(model).where(*criteria)) or 0)
 
 
+def _completion_expressions(media_item_id: Any) -> tuple[Any, Any, Any]:
+    event_count = (
+        select(func.count(WatchEvent.id))
+        .where(
+            WatchEvent.media_item_id == media_item_id,
+            WatchEvent.completed.is_(True),
+        )
+        .scalar_subquery()
+    )
+    state_count = (
+        select(func.coalesce(func.max(WatchState.view_count), 0))
+        .where(
+            WatchState.media_item_id == media_item_id,
+            WatchState.completed.is_(True),
+        )
+        .scalar_subquery()
+    )
+    event_last = (
+        select(func.max(WatchEvent.watched_at))
+        .where(
+            WatchEvent.media_item_id == media_item_id,
+            WatchEvent.completed.is_(True),
+        )
+        .scalar_subquery()
+    )
+    state_last = (
+        select(func.max(WatchState.last_watched_at))
+        .where(
+            WatchState.media_item_id == media_item_id,
+            WatchState.completed.is_(True),
+        )
+        .scalar_subquery()
+    )
+    known_count = case((event_count >= state_count, event_count), else_=state_count)
+    last_known = case(
+        (event_last.is_(None), state_last),
+        (state_last.is_(None), event_last),
+        (event_last >= state_last, event_last),
+        else_=state_last,
+    )
+    completed_known = or_(
+        exists().where(
+            WatchEvent.media_item_id == media_item_id,
+            WatchEvent.completed.is_(True),
+        ),
+        exists().where(
+            WatchState.media_item_id == media_item_id,
+            WatchState.completed.is_(True),
+        ),
+    )
+    return known_count, last_known, completed_known
+
+
 def _watched_count(kind: MediaKind) -> int:
+    _, _, completed_known = _completion_expressions(MediaItem.id)
     return int(
         db.session.scalar(
-            select(func.count(func.distinct(WatchEvent.media_item_id)))
-            .select_from(WatchEvent)
-            .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
+            select(func.count(MediaItem.id))
+            .select_from(MediaItem)
             .where(
                 MediaItem.kind == kind,
-                WatchEvent.completed.is_(True),
+                completed_known,
             )
         )
         or 0
