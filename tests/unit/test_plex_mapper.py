@@ -110,3 +110,16 @@ def test_history_view_count_takes_precedence_over_partial_offset() -> None:
     assert completed.completed is True
     assert partial.completed is False
     assert threshold.completed is True
+
+
+def test_history_without_progress_is_a_completed_plex_history_entry() -> None:
+    completed = map_watch_event(
+        {
+            "historyKey": "history-1",
+            "ratingKey": "1",
+            "viewedAt": "1785800100",
+            "duration": "1000",
+        },
+        "1",
+    )
+    assert completed.completed is True

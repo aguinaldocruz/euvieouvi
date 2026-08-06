@@ -162,6 +162,8 @@ def map_watch_event(item: Mapping[str, Any], library_external_id: str) -> Extern
         completed = True
     elif duration and progress is not None:
         completed = progress / duration >= 0.9
+    elif _optional_text(item.get("historyKey")) is not None and progress is None:
+        completed = True
     else:
         completed = False
     return ExternalWatchEvent(

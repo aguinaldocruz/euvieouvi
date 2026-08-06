@@ -36,6 +36,7 @@ class PersistResult:
     classification: ItemClassification
     media_item_id: int
     view_count_regression: bool = False
+    event_inserted: bool = False
 
 
 class MediaPersistenceService:
@@ -99,7 +100,22 @@ class MediaPersistenceService:
         self._sync_image(media.id, "poster", item.thumb_path)
         self._sync_image(media.id, "backdrop", item.art_path)
         regression = self._sync_watch_state(media.id, item, observed_at)
-        return PersistResult(classification, media.id, regression)
+        event_inserted = False
+        if item.view_count and item.last_viewed_at is not None:
+            event_inserted = self.persist_event(
+                ExternalWatchEvent(
+                    media_external_id=item.external_id,
+                    library_external_id=item.library_external_id,
+                    watched_at=item.last_viewed_at,
+                    completed=True,
+                    source_event_id=(
+                        f"state:{item.external_id}:{item.last_viewed_at.isoformat()}"
+                    ),
+                    duration_ms=item.duration_ms,
+                    view_number=item.view_count,
+                )
+            )
+        return PersistResult(classification, media.id, regression, event_inserted)
 
     def persist_event(self, event: ExternalWatchEvent) -> bool:
         if not event.completed:

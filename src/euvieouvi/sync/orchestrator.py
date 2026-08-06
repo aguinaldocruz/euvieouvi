@@ -279,6 +279,8 @@ class SyncOrchestrator:
                     detail.items_updated += 1
                 else:
                     run.items_unchanged += 1
+                if result.event_inserted:
+                    run.events_inserted += 1
                 if result.view_count_regression:
                     self._add_reconciliation_warning(work, run_id, library_id, item.external_id)
             run.heartbeat_at = self._clock()

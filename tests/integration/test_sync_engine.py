@@ -324,6 +324,29 @@ def test_repeated_history_repairs_existing_event_completion(app: Flask) -> None:
         assert events[0].view_number == 1
 
 
+def test_catalog_watched_state_creates_one_known_completion_event(app: Flask) -> None:
+    with app.app_context():
+        source_id, _ = seed_source()
+        connector = FixtureConnector(
+            {"movies": (movie("m1", view_count=3),)},
+            {"movies": ()},
+        )
+        engine = orchestrator(connector)
+
+        first_run = engine.run(source_id)
+        second_run = engine.run(source_id)
+        assert first_run.status is SyncStatus.SUCCEEDED
+        assert second_run.status is SyncStatus.SUCCEEDED
+        assert db.session.get(SyncRun, first_run.run_id).events_inserted == 1
+        assert db.session.get(SyncRun, second_run.run_id).events_inserted == 0
+
+        events = db.session.scalars(select(WatchEvent)).all()
+        assert len(events) == 1
+        assert events[0].completed is True
+        assert events[0].watched_at == NOW.replace(tzinfo=None)
+        assert events[0].view_number == 3
+
+
 def test_music_sync_persists_artist_album_track_and_history(app: Flask) -> None:
     with app.app_context():
         source_id, _ = seed_music_source()
