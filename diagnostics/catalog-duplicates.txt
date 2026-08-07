@@ -1,0 +1,208 @@
+2026-08-05T23:43:42Z level=INFO component=application request_id=- message=application initialized
+=== TOTAIS ===
+{'media': 36834, 'events': 33302, 'identifiers': 143592, 'available_refs': 2960}
+
+=== IDENTIFICADORES ASSOCIADOS A MAIS DE UMA MÍDIA ===
+{'provider': 'tmdb', 'external_id': '1402', 'media_count': 3, 'media': "24081:show:The Walking Dead,30234:episode:You're My Best Friend,35512:movie:The Pursuit of Happyness"}
+{'provider': 'tmdb', 'external_id': '1422', 'media_count': 3, 'media': "30260:episode:(I Can't Get No) Satisfaction,33481:show:The Middle,35672:movie:The Departed"}
+{'provider': 'trakt', 'external_id': '2276', 'media_count': 3, 'media': "30321:episode:Eric's Corvette Caper,30724:show:Stargate Atlantis,35030:movie:I Now Pronounce You Chuck & Larry"}
+{'provider': 'trakt', 'external_id': '2289', 'media_count': 3, 'media': '2979:movie:The Millionairess,4178:show:Hawaii Five-O,30307:episode:Thank You'}
+{'provider': 'trakt', 'external_id': '605', 'media_count': 3, 'media': '7240:show:Ed, Edd n Eddy,18916:episode:Up Above the World So High,28245:movie:Monty Python and the Holy Grail'}
+{'provider': 'imdb', 'external_id': 'tt0026635', 'media_count': 2, 'media': '7890:movie:Little Dutch Plate,25414:episode:Little Dutch Plate'}
+{'provider': 'imdb', 'external_id': 'tt0026735', 'media_count': 2, 'media': '12805:movie:Mr. and Mrs. Is the Name,25422:episode:Mr. and Mrs. Is the Name'}
+{'provider': 'imdb', 'external_id': 'tt0027785', 'media_count': 2, 'media': "7813:movie:I'd Love to Take Orders from You,25408:episode:I'd Love to Take Orders From You"}
+{'provider': 'imdb', 'external_id': 'tt0032507', 'media_count': 2, 'media': '8320:movie:A Gander at Mother Goose,25340:episode:A Gander at Mother Goose'}
+{'provider': 'imdb', 'external_id': 'tt0033046', 'media_count': 2, 'media': '8301:movie:Shop Look & Listen,25327:episode:Shop Look & Listen'}
+{'provider': 'imdb', 'external_id': 'tt0033065', 'media_count': 2, 'media': '8303:movie:Sniffles Takes a Trip,25341:episode:Sniffles Takes a Trip'}
+{'provider': 'imdb', 'external_id': 'tt0033233', 'media_count': 2, 'media': '8308:movie:Wacky Wildlife,25330:episode:Wacky Wildlife'}
+{'provider': 'imdb', 'external_id': 'tt0033724', 'media_count': 2, 'media': '8300:movie:Hollywood Steps Out,25316:episode:Hollywood Steps Out'}
+{'provider': 'imdb', 'external_id': 'tt0034097', 'media_count': 2, 'media': '8295:movie:Rhapsody in Rivets,25306:episode:Rhapsody in Rivets'}
+{'provider': 'imdb', 'external_id': 'tt0034206', 'media_count': 2, 'media': '8299:movie:Sniffles Bells the Cat,25324:episode:Sniffles Bells the Cat'}
+{'provider': 'imdb', 'external_id': 'tt0034207', 'media_count': 2, 'media': '8294:movie:Snow Time for Comedy,25312:episode:Snowtime for Comedy'}
+{'provider': 'imdb', 'external_id': 'tt0034225', 'media_count': 2, 'media': '8297:movie:Sport Chumpions,25313:episode:Sport Chumpions'}
+{'provider': 'imdb', 'external_id': 'tt0034369', 'media_count': 2, 'media': '8296:movie:The Wacky Worm,25315:episode:The Wacky Worm'}
+{'provider': 'imdb', 'external_id': 'tt0034452', 'media_count': 2, 'media': '8256:movie:Aloha Hooey,25303:episode:Aloha Hooey'}
+{'provider': 'imdb', 'external_id': 'tt0034752', 'media_count': 2, 'media': '8254:movie:Fox Pop,25294:episode:Fox Pop'}
+{'provider': 'imdb', 'external_id': 'tt0034845', 'media_count': 2, 'media': '8306:movie:The Hep Cat,25292:episode:The Hep Cat'}
+{'provider': 'imdb', 'external_id': 'tt0035101', 'media_count': 2, 'media': '8305:movie:My Favorite Duck,25287:episode:My Favorite Duck'}
+{'provider': 'imdb', 'external_id': 'tt0035314', 'media_count': 2, 'media': '8252:movie:The Sheepish Wolf,25291:episode:The Sheepish Wolf'}
+{'provider': 'imdb', 'external_id': 'tt0035646', 'media_count': 2, 'media': '8302:movie:The Aristo-Cat,25278:episode:The Aristo-Cat'}
+{'provider': 'imdb', 'external_id': 'tt0035872', 'media_count': 2, 'media': '8251:movie:Fifth Column Mouse,25283:episode:The Fifth-Column Mouse'}
+{'provider': 'imdb', 'external_id': 'tt0036264', 'media_count': 2, 'media': '8321:movie:Pigs in a Polka,25285:episode:Pigs in a Polka'}
+{'provider': 'imdb', 'external_id': 'tt0036542', 'media_count': 2, 'media': '7991:movie:The Wise Quacking Duck,25281:episode:The Wise Quacking Duck'}
+{'provider': 'imdb', 'external_id': 'tt0036546', 'media_count': 2, 'media': '7990:movie:Yankee Doodle Daffy,25279:episode:Yankee Doodle Daffy'}
+{'provider': 'imdb', 'external_id': 'tt0037026', 'media_count': 2, 'media': '5451:movie:Lost and Foundling,25263:episode:Lost and Foundling'}
+{'provider': 'imdb', 'external_id': 'tt0037285', 'media_count': 2, 'media': '7236:movie:Slightly Daffy,25267:episode:Slightly Daffy'}
+{'provider': 'imdb', 'external_id': 'tt0037319', 'media_count': 2, 'media': '5449:movie:The Stupid Cupid,25261:episode:The Stupid Cupid'}
+{'provider': 'imdb', 'external_id': 'tt0037339', 'media_count': 2, 'media': '7981:movie:Swooner Crooner,25269:episode:Swooner Crooner'}
+{'provider': 'imdb', 'external_id': 'tt0037501', 'media_count': 2, 'media': "8277:movie:Ain't That Ducky,25254:episode:Ain't That Ducky"}
+{'provider': 'imdb', 'external_id': 'tt0037977', 'media_count': 2, 'media': '5450:movie:Peck Up Your Troubles,25248:episode:Peck Up Your Troubles'}
+{'provider': 'imdb', 'external_id': 'tt0038233', 'media_count': 2, 'media': '5447:movie:Wagon Heels,25251:episode:Wagon Heels'}
+{'provider': 'imdb', 'external_id': 'tt0038516', 'media_count': 2, 'media': '7985:movie:Fair and Worm-er,25233:episode:Fair and Worm-er'}
+{'provider': 'imdb', 'external_id': 'tt0038605', 'media_count': 2, 'media': '5452:movie:Holiday for Shoestrings,25245:episode:Holiday for Shoestrings'}
+{'provider': 'imdb', 'external_id': 'tt0039144', 'media_count': 2, 'media': '7237:movie:Along Came Daffy,25223:episode:Along Came Daffy'}
+{'provider': 'imdb', 'external_id': 'tt0039189', 'media_count': 2, 'media': '4426:movie:Birth of a Notion,25226:episode:Birth of a Notion'}
+{'provider': 'imdb', 'external_id': 'tt0039620', 'media_count': 2, 'media': '5548:movie:Mexican Joyride,25216:episode:Mexican Joyride'}
+{'provider': 'imdb', 'external_id': 'tt0040262', 'media_count': 2, 'media': '4525:movie:Daffy Duck Slept Here,23944:episode:Daffy Duck Slept Here'}
+{'provider': 'imdb', 'external_id': 'tt0045167', 'media_count': 2, 'media': '8259:movie:Sock a Doodle Do,25150:episode:Sock a Doodle Do'}
+{'provider': 'imdb', 'external_id': 'tt0046195', 'media_count': 2, 'media': '8240:movie:Plop Goes the Weasel!,25129:episode:Plop Goes the Weasel'}
+{'provider': 'imdb', 'external_id': 'tt0048661', 'media_count': 2, 'media': '8355:movie:Stork Naked,23816:episode:Stork Naked'}
+{'provider': 'imdb', 'external_id': 'tt0049878', 'media_count': 2, 'media': '5108:movie:Tree Cornered Tweety,25094:episode:Tree Cornered Tweety'}
+{'provider': 'imdb', 'external_id': 'tt0052692', 'media_count': 2, 'media': '4479:movie:China Jones,25051:episode:China Jones'}
+{'provider': 'imdb', 'external_id': 'tt0052904', 'media_count': 2, 'media': '8959:movie:Hot-Rod and Reel!,25048:episode:Hot-Rod and Reel!'}
+{'provider': 'imdb', 'external_id': 'tt0053082', 'media_count': 2, 'media': '8956:movie:Mouse-Placed Kitten,25052:episode:Mouse-Placed Kitten'}
+{'provider': 'imdb', 'external_id': 'tt0053921', 'media_count': 2, 'media': '8345:movie:Hopalong Casualty,25026:episode:Hopalong Casualty'}
+{'provider': 'imdb', 'external_id': 'tt0055085', 'media_count': 2, 'media': '4465:movie:Lickety-Splat,25018:episode:Lickety-Splat'}
+{'provider': 'imdb', 'external_id': 'tt0058736', 'media_count': 2, 'media': '4414:movie:War and Pieces,24994:episode:War and Pieces'}
+{'provider': 'imdb', 'external_id': 'tt0058987', 'media_count': 2, 'media': '4457:movie:Boulder Wham!,24978:episode:Boulder Wham!'}
+{'provider': 'imdb', 'external_id': 'tt0059027', 'media_count': 2, 'media': '8967:movie:Chaser on the Rocks,24972:episode:Chaser on the Rocks'}
+{'provider': 'imdb', 'external_id': 'tt0059811', 'media_count': 2, 'media': '4409:movie:Tired and Feathered,24979:episode:Tired and Feathered'}
+{'provider': 'imdb', 'external_id': 'tt0060971', 'media_count': 2, 'media': '4454:movie:Shot and Bothered,24969:episode:Shot and Bothered'}
+{'provider': 'imdb', 'external_id': 'tt0069638', 'media_count': 2, 'media': '18835:show:The Starlost,18844:episode:The Goddess Calabra'}
+{'provider': 'imdb', 'external_id': 'tt0096708', 'media_count': 2, 'media': "15600:show:Tales from the Crypt,15631:episode:The Man Who Was Death / And All Through the House / Dig That Cat... He's Real Gone"}
+{'provider': 'imdb', 'external_id': 'tt0111282', 'media_count': 2, 'media': '17721:movie:Stargate,31576:episode:From Stargate to Atlantis: A Sci-Fi Lowdown'}
+{'provider': 'imdb', 'external_id': 'tt0220892', 'media_count': 2, 'media': '18420:show:Drak Pack,18426:episode:A Dire Day At Dredfulland'}
+{'provider': 'imdb', 'external_id': 'tt0471711', 'media_count': 2, 'media': "15917:episode:Bender's Big Score,35545:movie:Futurama: Bender's Big Score"}
+{'provider': 'imdb', 'external_id': 'tt1054486', 'media_count': 2, 'media': "15914:episode:Bender's Game,35482:movie:Futurama: Bender's Game"}
+{'provider': 'imdb', 'external_id': 'tt1054487', 'media_count': 2, 'media': '15913:episode:Into the Wild Green Yonder,35480:movie:Futurama: Into the Wild Green Yonder'}
+{'provider': 'imdb', 'external_id': 'tt10584792', 'media_count': 2, 'media': '25924:show:The Family Chantel,30924:episode:Burning Bridges'}
+{'provider': 'imdb', 'external_id': 'tt1253575', 'media_count': 2, 'media': '15915:episode:The Lost Adventure,35320:movie:Futurama: The Lost Adventure'}
+{'provider': 'imdb', 'external_id': 'tt2342499', 'media_count': 2, 'media': "6274:show:Below Deck,33374:episode:We're Not in the Caribbean Anymore"}
+{'provider': 'imdb', 'external_id': 'tt5665418', 'media_count': 2, 'media': "2981:show:Below Deck Mediterranean,31807:episode:Can't Fight This Feeling"}
+{'provider': 'imdb', 'external_id': 'tt9170070', 'media_count': 2, 'media': '30930:show:90 Day Fiancé: The Other Way,31786:episode:Fight For Love'}
+{'provider': 'tmdb', 'external_id': '10009', 'media_count': 2, 'media': '3646:show:The New Adventures of Mighty Mouse and Heckle & Jeckle,35227:movie:Brother Bear'}
+{'provider': 'tmdb', 'external_id': '10057', 'media_count': 2, 'media': '18450:show:Partridge Family 2200 A.D.,35283:movie:The Three Musketeers'}
+{'provider': 'tmdb', 'external_id': '10083', 'media_count': 2, 'media': '7297:show:The Fugitive,28233:movie:No Way Out'}
+{'provider': 'tmdb', 'external_id': '10156', 'media_count': 2, 'media': '16465:show:The Super Powers Team: Galactic Guardians,28322:movie:History of the World: Part I'}
+{'provider': 'tmdb', 'external_id': '10159', 'media_count': 2, 'media': '6150:movie:The Rundown,16815:show:The All-New Super Friends Hour'}
+{'provider': 'tmdb', 'external_id': '103', 'media_count': 2, 'media': '22271:show:The Time Tunnel,28098:movie:Taxi Driver'}
+{'provider': 'tmdb', 'external_id': '10366', 'media_count': 2, 'media': '5195:movie:Universal Soldier: The Return,19759:episode:Moving Targets'}
+{'provider': 'tmdb', 'external_id': '10372', 'media_count': 2, 'media': '9527:movie:Ewoks: The Battle for Endor,19757:episode:Dark Days Night'}
+{'provider': 'tmdb', 'external_id': '10377', 'media_count': 2, 'media': '19750:episode:The Warren Omission,28241:movie:My Cousin Vinny'}
+{'provider': 'tmdb', 'external_id': '10378', 'media_count': 2, 'media': '19749:episode:White Rabbit,35042:movie:Big Buck Bunny'}
+{'provider': 'tmdb', 'external_id': '10380', 'media_count': 2, 'media': '19745:episode:To Prey in Darkness,34996:movie:An American Tail: Fievel Goes West'}
+{'provider': 'tmdb', 'external_id': '10501', 'media_count': 2, 'media': '7918:show:Shazzan,28187:movie:The Road to El Dorado'}
+{'provider': 'tmdb', 'external_id': '10518', 'media_count': 2, 'media': '9437:movie:Marathon Man,30031:show:Clue Club'}
+{'provider': 'tmdb', 'external_id': '10724', 'media_count': 2, 'media': '3961:show:Aquaman,28394:movie:Firefox'}
+{'provider': 'tmdb', 'external_id': '11003', 'media_count': 2, 'media': '4270:show:Will the Real Jerry Lewis Please Sit Down?,35258:movie:The Wedding Singer'}
+{'provider': 'tmdb', 'external_id': '11008', 'media_count': 2, 'media': '16021:movie:Major Payne,21017:show:Wheelie and the Chopper Bunch'}
+{'provider': 'tmdb', 'external_id': '11167', 'media_count': 2, 'media': '14885:movie:Peeping Tom,19235:show:The Magilla Gorilla Show'}
+{'provider': 'tmdb', 'external_id': '11520', 'media_count': 2, 'media': '10664:show:Pinocchio: The Series,12573:movie:Grumpy Old Men'}
+{'provider': 'tmdb', 'external_id': '121', 'media_count': 2, 'media': '15939:movie:The Lord of the Rings: The Two Towers,18068:show:Doctor Who'}
+{'provider': 'tmdb', 'external_id': '12208', 'media_count': 2, 'media': '19958:episode:The Iowa Scuba Affair,28473:movie:Casino Royale'}
+{'provider': 'tmdb', 'external_id': '12222', 'media_count': 2, 'media': '19944:episode:The Fiddlesticks Affair,35699:movie:Horton Hears a Who!'}
+{'provider': 'tmdb', 'external_id': '12223', 'media_count': 2, 'media': '19943:episode:The Yellow Scarf Affair,28110:movie:The Stepford Wives'}
+{'provider': 'tmdb', 'external_id': '12230', 'media_count': 2, 'media': '19936:episode:The Hong Kong Shilling Affair,28221:movie:One Hundred and One Dalmatians'}
+{'provider': 'tmdb', 'external_id': '12266', 'media_count': 2, 'media': "19929:episode:The Her Master's Voice Affair,19975:show:Yogi's Space Race"}
+{'provider': 'tmdb', 'external_id': '12268', 'media_count': 2, 'media': '19927:episode:The Galatea Affair,28215:movie:The Pink Panther Strikes Again'}
+{'provider': 'tmdb', 'external_id': '12278', 'media_count': 2, 'media': '6449:movie:Soul Man,19917:episode:The Abominable Snowman Affair'}
+{'provider': 'tmdb', 'external_id': '12505', 'media_count': 2, 'media': '14955:movie:Little Nikita,18870:episode:Pig of Action'}
+{'provider': 'tmdb', 'external_id': '12519', 'media_count': 2, 'media': '3616:episode:The New Cadet,21003:show:The Ruff and Reddy Show'}
+{'provider': 'tmdb', 'external_id': '12662', 'media_count': 2, 'media': '14866:movie:Psycho III,19228:show:Adventures of Superman'}
+{'provider': 'tmdb', 'external_id': '13200', 'media_count': 2, 'media': '6278:movie:Red,9866:episode:Shroud of Death'}
+{'provider': 'tmdb', 'external_id': '13205', 'media_count': 2, 'media': '9861:episode:Tina, Is That You?,35605:movie:Bambi II'}
+{'provider': 'tmdb', 'external_id': '134', 'media_count': 2, 'media': '21886:show:Space: 1999,28232:movie:O Brother, Where Art Thou?'}
+{'provider': 'tmdb', 'external_id': '13958', 'media_count': 2, 'media': "19561:show:Here Comes the Grump,27107:episode:Mudd's Women"}
+{'provider': 'tmdb', 'external_id': '1398', 'media_count': 2, 'media': '30231:episode:Long Away,31687:show:The Sopranos'}
+{'provider': 'tmdb', 'external_id': '1399', 'media_count': 2, 'media': '12270:show:Game of Thrones,30233:episode:Misfire'}
+{'provider': 'tmdb', 'external_id': '13997', 'media_count': 2, 'media': '27080:episode:The Apple,35221:movie:Black Sheep'}
+{'provider': 'tmdb', 'external_id': '14009', 'media_count': 2, 'media': '12806:show:The Addams Family,27034:episode:Turnabout Intruder'}
+{'provider': 'tmdb', 'external_id': '1405', 'media_count': 2, 'media': '30229:episode:Good Company,34774:show:Dexter'}
+{'provider': 'tmdb', 'external_id': '1406', 'media_count': 2, 'media': '28943:show:Deadwood,30222:episode:Keep Yourself Alive'}
+{'provider': 'tmdb', 'external_id': '1408', 'media_count': 2, 'media': '15095:movie:Cutthroat Island,30216:episode:Love of My Life'}
+{'provider': 'tmdb', 'external_id': '141', 'media_count': 2, 'media': '22343:show:Cheers,28419:movie:Donnie Darko'}
+{'provider': 'tmdb', 'external_id': '1410', 'media_count': 2, 'media': '15091:movie:Dark Star,30227:episode:Sweet Lady'}
+{'provider': 'tmdb', 'external_id': '1411', 'media_count': 2, 'media': "12964:show:Person of Interest,30217:episode:Leaving Home Ain't Easy"}
+{'provider': 'tmdb', 'external_id': '1413', 'media_count': 2, 'media': '27994:show:American Horror Story,30221:episode:My Fairy King'}
+{'provider': 'tmdb', 'external_id': '1417', 'media_count': 2, 'media': "30235:episode:Somebody to Love,35593:movie:Pan's Labyrinth"}
+{'provider': 'tmdb', 'external_id': '1420', 'media_count': 2, 'media': '6522:show:New Girl,30262:episode:Time Is on My Side'}
+{'provider': 'tmdb', 'external_id': '1421', 'media_count': 2, 'media': "28795:show:Modern Family,30261:episode:Let's Spend the Night Together"}
+{'provider': 'tmdb', 'external_id': '1423', 'media_count': 2, 'media': '30259:episode:Beast of Burden,32602:show:Ray Donovan'}
+{'provider': 'tmdb', 'external_id': '1425', 'media_count': 2, 'media': '4379:show:House of Cards,30257:episode:Rip This Joint'}
+{'provider': 'tmdb', 'external_id': '1428', 'media_count': 2, 'media': "30254:episode:You Can't Always Get What You Want,35550:movie:Once Upon a Time in Mexico"}
+{'provider': 'tmdb', 'external_id': '1433', 'media_count': 2, 'media': "9078:show:American Dad!,30248:episode:It's All Over Now"}
+{'provider': 'tmdb', 'external_id': '1452', 'media_count': 2, 'media': '30280:episode:Young Man Blues,35033:movie:Superman Returns'}
+{'provider': 'tmdb', 'external_id': '1472', 'media_count': 2, 'media': '20032:show:Kung Fu,30310:episode:Ramble On'}
+{'provider': 'tmdb', 'external_id': '1482', 'media_count': 2, 'media': '4278:show:Spider-Man,30311:episode:Heartbreaker'}
+{'provider': 'tmdb', 'external_id': '1486', 'media_count': 2, 'media': '19118:show:21 Jump Street,30305:episode:The Crunge'}
+{'provider': 'tmdb', 'external_id': '1487', 'media_count': 2, 'media': '12408:movie:Hellboy,30296:episode:Bring It on Home'}
+{'provider': 'tmdb', 'external_id': '1491', 'media_count': 2, 'media': '30295:episode:No Quarter,35683:movie:The Illusionist'}
+{'provider': 'tmdb', 'external_id': '1493', 'media_count': 2, 'media': '30309:episode:Over the Hills and Far Away,35242:movie:Miss Congeniality'}
+{'provider': 'tmdb', 'external_id': '1497', 'media_count': 2, 'media': "30319:episode:That '70s Musical,35201:movie:Teenage Mutant Ninja Turtles II: The Secret of the Ooze"}
+{'provider': 'tmdb', 'external_id': '1498', 'media_count': 2, 'media': "30320:episode:Hyde's Birthday,35351:movie:Teenage Mutant Ninja Turtles"}
+{'provider': 'tmdb', 'external_id': '1516', 'media_count': 2, 'media': '13655:show:The A-Team,30333:episode:Red and Stacey'}
+{'provider': 'tmdb', 'external_id': '1523', 'media_count': 2, 'media': '30345:episode:Backstage Pass,35430:movie:The Last King of Scotland'}
+{'provider': 'tmdb', 'external_id': '1532', 'media_count': 2, 'media': "9791:show:Starsky & Hutch,30354:episode:Donna's Panties"}
+{'provider': 'tmdb', 'external_id': '1535', 'media_count': 2, 'media': '30357:episode:Fez Gets a Girl,35429:movie:Spy Game'}
+{'provider': 'tmdb', 'external_id': '1537', 'media_count': 2, 'media': '30359:episode:Ice Shack,35096:movie:Changing Lanes'}
+{'provider': 'tmdb', 'external_id': '1538', 'media_count': 2, 'media': "30360:episode:Hyde's Christmas Rager,35458:movie:Collateral"}
+{'provider': 'tmdb', 'external_id': '1541', 'media_count': 2, 'media': "12686:movie:Thelma & Louise,30363:episode:Eric's Panties"}
+{'provider': 'tmdb', 'external_id': '1547', 'media_count': 2, 'media': '6147:movie:The Lost Boys,30370:episode:Moon Over Point Place'}
+{'provider': 'tmdb', 'external_id': '1550', 'media_count': 2, 'media': '7186:show:The Tomorrow People,30373:episode:Holy Crap!'}
+{'provider': 'tmdb', 'external_id': '1551', 'media_count': 2, 'media': '15054:movie:Flatliners,30374:episode:Jackie Moves On'}
+{'provider': 'tmdb', 'external_id': '1552', 'media_count': 2, 'media': "30375:episode:Kelso's Serenade,34963:movie:Parenthood"}
+{'provider': 'tmdb', 'external_id': '15566', 'media_count': 2, 'media': '9467:movie:Surviving Christmas,26023:episode:Shockwave (2)'}
+{'provider': 'tmdb', 'external_id': '15567', 'media_count': 2, 'media': '5277:movie:Stitch! The Movie,26017:episode:The Seventh'}
+{'provider': 'tmdb', 'external_id': '15577', 'media_count': 2, 'media': '26018:episode:Marauders,35125:movie:Crossing Over'}
+{'provider': 'tmdb', 'external_id': '15596', 'media_count': 2, 'media': '16022:movie:Back to School,25982:episode:Harbinger'}
+{'provider': 'tmdb', 'external_id': '15602', 'media_count': 2, 'media': '9532:movie:Grumpier Old Men,25990:episode:The Shipment'}
+{'provider': 'tmdb', 'external_id': '1562', 'media_count': 2, 'media': '30385:episode:Laurie Moves Out,35466:movie:28 Weeks Later'}
+{'provider': 'tmdb', 'external_id': '1570', 'media_count': 2, 'media': '3513:show:The Adventures of Tintin,30395:episode:Garage Sale'}
+{'provider': 'tmdb', 'external_id': '1571', 'media_count': 2, 'media': '28289:movie:Live Free or Die Hard,30391:episode:Halloween'}
+{'provider': 'tmdb', 'external_id': '1572', 'media_count': 2, 'media': '28427:movie:Die Hard: With a Vengeance,30397:episode:The Good Son'}
+{'provider': 'tmdb', 'external_id': '1573', 'media_count': 2, 'media': '28426:movie:Die Hard 2,30398:episode:Hyde Moves In'}
+{'provider': 'tmdb', 'external_id': '1574', 'media_count': 2, 'media': "30399:episode:Grandma's Dead,35123:movie:Chicago"}
+{'provider': 'tmdb', 'external_id': '1576', 'media_count': 2, 'media': '6427:movie:Resident Evil,30401:episode:Water Tower'}
+{'provider': 'tmdb', 'external_id': '1577', 'media_count': 2, 'media': '30402:episode:A New Hope,35682:movie:Resident Evil: Apocalypse'}
+{'provider': 'tmdb', 'external_id': '1579', 'media_count': 2, 'media': '30404:episode:Career Day,35584:movie:Apocalypto'}
+{'provider': 'tmdb', 'external_id': '1584', 'media_count': 2, 'media': '30409:episode:Ski Trip,35394:movie:School of Rock'}
+{'provider': 'tmdb', 'external_id': '1586', 'media_count': 2, 'media': "30411:episode:Eric's Buddy,35309:movie:Secret Window"}
+{'provider': 'tmdb', 'external_id': '1588', 'media_count': 2, 'media': '30413:episode:Thanksgiving,35071:movie:Bring It On'}
+{'provider': 'tmdb', 'external_id': '1592', 'media_count': 2, 'media': "8364:movie:Primal Fear,30417:episode:Eric's Burger Job"}
+{'provider': 'tmdb', 'external_id': '1593', 'media_count': 2, 'media': '30418:episode:Battle of the Sexists,35293:movie:Night at the Museum'}
+{'provider': 'tmdb', 'external_id': '1594', 'media_count': 2, 'media': '14846:movie:A Shot in the Dark,30419:episode:Streaking'}
+{'provider': 'tmdb', 'external_id': '164', 'media_count': 2, 'media': "19742:show:Dark Skies,23224:movie:Breakfast at Tiffany's"}
+{'provider': 'tmdb', 'external_id': '1649', 'media_count': 2, 'media': "30089:show:Sliders,35632:movie:Bill & Ted's Bogus Journey"}
+{'provider': 'tmdb', 'external_id': '16538', 'media_count': 2, 'media': '21676:episode:Terrible Leprechaun,35433:movie:I Love You, Man'}
+{'provider': 'tmdb', 'external_id': '168191', 'media_count': 2, 'media': "8298:movie:Hiawatha's Rabbit Hunt,10853:episode:Penguin's Clean Sweep"}
+{'provider': 'tmdb', 'external_id': '1705', 'media_count': 2, 'media': '5585:show:Fringe,28506:movie:Battle for the Planet of the Apes'}
+{'provider': 'tmdb', 'external_id': '1712', 'media_count': 2, 'media': '4549:show:The Munsters,15023:movie:Giant'}
+{'provider': 'tmdb', 'external_id': '177677', 'media_count': 2, 'media': '14925:movie:Mission: Impossible - Rogue Nation,20617:episode:G.I. Jetson'}
+{'provider': 'tmdb', 'external_id': '187017', 'media_count': 2, 'media': "5378:movie:22 Jump Street,14281:episode:Jacob's Boy"}
+{'provider': 'tmdb', 'external_id': '1891', 'media_count': 2, 'media': '14737:show:Rome,17515:movie:The Empire Strikes Back'}
+{'provider': 'tmdb', 'external_id': '19', 'media_count': 2, 'media': '18914:show:Planet of the Apes,28251:movie:Metropolis'}
+{'provider': 'tmdb', 'external_id': '1909', 'media_count': 2, 'media': '5965:show:The Greatest American Hero,34997:movie:Don Juan DeMarco'}
+{'provider': 'tmdb', 'external_id': '19259', 'media_count': 2, 'media': '9211:show:Festival of Family Classics,9554:movie:Volunteers'}
+{'provider': 'tmdb', 'external_id': '19494', 'media_count': 2, 'media': "8193:movie:Nine to Five,19037:episode:Doug's Big Brawl"}
+{'provider': 'tmdb', 'external_id': '1992', 'media_count': 2, 'media': '20256:show:Star Trek: The Animated Series,35443:movie:Planet Terror'}
+{'provider': 'tmdb', 'external_id': '1996', 'media_count': 2, 'media': '29555:show:The Flintstones,35032:movie:Lara Croft: Tomb Raider - The Cradle of Life'}
+{'provider': 'tmdb', 'external_id': '2085', 'media_count': 2, 'media': '26371:show:Courage the Cowardly Dog,35318:movie:Romeo Must Die'}
+{'provider': 'tmdb', 'external_id': '2098', 'media_count': 2, 'media': '14654:show:Batman: The Animated Series,28061:movie:Viva Las Vegas'}
+{'provider': 'tmdb', 'external_id': '2119', 'media_count': 2, 'media': '29850:show:Airwolf,35215:movie:Days of Thunder'}
+{'provider': 'tmdb', 'external_id': '2157', 'media_count': 2, 'media': '10796:show:Lancelot Link, Secret Chimp,14950:movie:Lost in Space'}
+{'provider': 'tmdb', 'external_id': '2164', 'media_count': 2, 'media': '12640:show:The Marvel Super Heroes,17721:movie:Stargate'}
+{'provider': 'tmdb', 'external_id': '236009', 'media_count': 2, 'media': '3892:episode:Walkabout,8350:movie:Hare We Go'}
+{'provider': 'tmdb', 'external_id': '2362', 'media_count': 2, 'media': '20610:show:The Jetsons,28053:movie:Westworld'}
+{'provider': 'tmdb', 'external_id': '236710', 'media_count': 2, 'media': '7989:movie:Jack-Wabbit and the Beanstalk,30026:episode:You Made Me Kill You'}
+{'provider': 'tmdb', 'external_id': '2395', 'media_count': 2, 'media': '9756:show:The Legend of Tarzan,28522:movie:Asterix at the Olympic Games'}
+{'provider': 'tmdb', 'external_id': '24126', 'media_count': 2, 'media': '14783:movie:Warlock: The Armageddon,18244:episode:Avalanche'}
+{'provider': 'tmdb', 'external_id': '24130', 'media_count': 2, 'media': '18240:episode:Spectrum Strikes Back,25605:movie:In Like Flint'}
+{'provider': 'tmdb', 'external_id': '253', 'media_count': 2, 'media': '27032:show:Star Trek,28287:movie:Live and Let Die'}
+{'provider': 'tmdb', 'external_id': '255752', 'media_count': 2, 'media': '6228:show:Haunted Hotel,21452:episode:Web of Death'}
+{'provider': 'tmdb', 'external_id': '28260', 'media_count': 2, 'media': '15187:movie:Return of the Living Dead III,15690:episode:High Explosive'}
+{'provider': 'tmdb', 'external_id': '28333', 'media_count': 2, 'media': '14963:movie:The Ladies Man,15660:episode:Thrill Show'}
+{'provider': 'tmdb', 'external_id': '2898', 'media_count': 2, 'media': '19880:show:Small Wonder,35582:movie:As Good as It Gets'}
+{'provider': 'tmdb', 'external_id': '31867', 'media_count': 2, 'media': '21132:show:The Green Hornet,35328:movie:Repo Men'}
+{'provider': 'tmdb', 'external_id': '335977', 'media_count': 2, 'media': '15305:movie:Indiana Jones and the Dial of Destiny,31417:episode:Lost City (1)'}
+{'provider': 'tmdb', 'external_id': '335983', 'media_count': 2, 'media': '5178:movie:Venom,31406:episode:Sacrifices'}
+{'provider': 'tmdb', 'external_id': '335984', 'media_count': 2, 'media': '5370:movie:Blade Runner 2049,31405:episode:Endgame'}
+{'provider': 'tmdb', 'external_id': '338952', 'media_count': 2, 'media': '5380:movie:Fantastic Beasts: The Crimes of Grindelwald,11999:episode:Some Enchanted Evening'}
+{'provider': 'tmdb', 'external_id': '35019', 'media_count': 2, 'media': '5249:movie:Nanny McPhee and the Big Bang,15899:episode:I Second That Emotion'}
+{'provider': 'tmdb', 'external_id': '36362', 'media_count': 2, 'media': '14965:movie:King of Kings,21130:episode:The Beast Within'}
+{'provider': 'tmdb', 'external_id': '364', 'media_count': 2, 'media': '16039:movie:Batman Returns,18297:show:Sealab 2020'}
+{'provider': 'tmdb', 'external_id': '37094', 'media_count': 2, 'media': '11338:episode:The Dauphin,25639:movie:Falling Down'}
+{'provider': 'tmdb', 'external_id': '37135', 'media_count': 2, 'media': '11267:episode:Silicon Avatar,28099:movie:Tarzan'}
+{'provider': 'tmdb', 'external_id': '37136', 'media_count': 2, 'media': '11266:episode:Disaster,14705:movie:The Naked Gun: From the Files of Police Squad!'}
+
+=== POSSÍVEIS DUPLICAÇÕES TRAKT X PLEX POR TÍTULO E ANO ===
+canceled

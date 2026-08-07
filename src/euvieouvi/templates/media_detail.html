@@ -90,10 +90,10 @@
 <h2 class="h4">Histórico completo <span class="text-secondary fs-6">({{ history_total }})</span></h2>
 {% if event_rows %}
   <div class="list-group mb-3">
-    {% for event, event_item in event_rows %}
+    {% for event, event_item, evt_src in event_rows %}
       <a class="list-group-item list-group-item-action" href="{{ url_for('web.media_detail', media_id=event_item.id) }}">
         {% if event_item.id != item.id %}<strong>{{ event_item.title }}</strong> · {% endif %}
-        {{ format_datetime(event.watched_at) }} · Concluído
+        {{ format_datetime(event.watched_at) }} · {{ evt_src.name }} ({{ evt_src.connector_type.value }}) · Concluído
         {% if event.view_number %} · reprodução {{ event.view_number }}{% endif %}
       </a>
     {% endfor %}

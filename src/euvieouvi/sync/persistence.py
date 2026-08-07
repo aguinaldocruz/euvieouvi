@@ -108,9 +108,7 @@ class MediaPersistenceService:
                     library_external_id=item.library_external_id,
                     watched_at=item.last_viewed_at,
                     completed=True,
-                    source_event_id=(
-                        f"state:{item.external_id}:{item.last_viewed_at.isoformat()}"
-                    ),
+                    source_event_id=(f"state:{item.external_id}:{item.last_viewed_at.isoformat()}"),
                     duration_ms=item.duration_ms,
                     view_number=item.view_count,
                 )

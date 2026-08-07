@@ -220,9 +220,7 @@ class MediaImage(TimestampMixin, Base):
     media_item_id: Mapped[int] = mapped_column(
         ForeignKey("media_items.id", ondelete="CASCADE"), nullable=False
     )
-    source_id: Mapped[int | None] = mapped_column(
-        ForeignKey("sources.id", ondelete="RESTRICT")
-    )
+    source_id: Mapped[int | None] = mapped_column(ForeignKey("sources.id", ondelete="RESTRICT"))
     image_type: Mapped[str] = mapped_column(String(32), nullable=False)
     provider: Mapped[str] = mapped_column(String(32), default="plex", nullable=False)
     source_path: Mapped[str | None] = mapped_column(String(2048))

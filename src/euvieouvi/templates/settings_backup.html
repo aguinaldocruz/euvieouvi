@@ -1,0 +1,28 @@
+{% extends 'base.html' %}{% block title %}Backup · euvieouvi{% endblock %}{% block content %}
+<div class="d-flex justify-content-between align-items-start mb-4"><div><h1 class="h2">Backup e retenção</h1><p class="text-secondary mb-0">Dump SQLite agendado, retenção e restauração com sobrescrita.</p></div><a class="btn btn-outline-secondary" href="{{ url_for('web.settings_sync') }}">Agendamento sync</a></div>
+<div class="card mb-4"><div class="card-body">
+<form method="post" novalidate><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<div class="form-check form-switch mb-3"><input class="form-check-input" id="backup_enabled" name="backup_enabled" type="checkbox" {% if backup_enabled %}checked{% endif %}><label class="form-check-label" for="backup_enabled">Ativar backup diário</label></div>
+<div class="row g-3 mb-3">
+  <div class="col-md-4"><label class="form-label" for="backup_time">Horário backup</label><input class="form-control {% if errors.backup_time %}is-invalid{% endif %}" id="backup_time" name="backup_time" type="time" value="{{ backup_time }}">{% if errors.backup_time %}<div class="invalid-feedback">{{ errors.backup_time }}</div>{% endif %}<div class="form-text">Fuso: {{ timezone }}</div></div>
+  <div class="col-md-4"><label class="form-label" for="backup_keep">Manter últimos backups</label><input class="form-control {% if errors.backup_keep %}is-invalid{% endif %}" id="backup_keep" name="backup_keep" type="number" min="1" max="500" value="{{ backup_keep }}">{% if errors.backup_keep %}<div class="invalid-feedback">{{ errors.backup_keep }}</div>{% endif %}<div class="form-text">Default 15</div></div>
+  <div class="col-md-4"><label class="form-label" for="sync_keep">Manter últimas sincronizações</label><input class="form-control {% if errors.sync_keep %}is-invalid{% endif %}" id="sync_keep" name="sync_keep" type="number" min="1" max="500" value="{{ sync_keep }}">{% if errors.sync_keep %}<div class="invalid-feedback">{{ errors.sync_keep }}</div>{% endif %}<div class="form-text">Default 15</div></div>
+</div>
+<button class="btn btn-primary">Salvar</button></form>
+</div></div>
+
+<div class="card mb-4"><div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-3">
+  <div><strong>Backup agora</strong><br><span class="text-secondary small">Cria dump em instance/backups/</span></div>
+  <form method="post" action="{{ url_for('web.backup_now') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-success d-inline-flex align-items-center gap-2"><img src="{{ url_for('static', filename='icons/euvieouvi-sync.svg') }}" alt="" width="16" height="16">Backup now</button></form>
+</div></div>
+
+<div class="card mb-4"><div class="card-body">
+<h2 class="h5">Histórico de backups internos ({{ backups|length }})</h2>
+{% if backups %}<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Arquivo</th><th>Tamanho</th><th>Data</th><th class="text-end">Ações</th></tr></thead><tbody>{% for b in backups %}<tr><td><code>{{ b.name }}</code></td><td>{{ (b.size/1024)|round(1) }} KB</td><td>{{ b.mtime.strftime('%Y-%m-%d %H:%M:%S') }}</td><td class="text-end d-flex gap-1 justify-content-end"><a class="btn btn-sm btn-outline-secondary" href="{{ url_for('web.backup_download', filename=b.name) }}">Download</a><form method="post" action="{{ url_for('web.backup_restore', filename=b.name) }}" onsubmit="return confirm('Restaurar e sobrescrever o banco atual a partir de {{ b.name }}?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-warning">Restaurar</button></form><form method="post" action="{{ url_for('web.backup_delete', filename=b.name) }}" onsubmit="return confirm('Apagar {{ b.name }}?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-outline-danger">Apagar</button></form></td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="text-secondary mb-0">Nenhum backup interno.</p>{% endif %}
+</div></div>
+
+<div class="card"><div class="card-body">
+<h2 class="h5">Restaurar de arquivo externo</h2><p class="text-secondary small">Selecione um .db do seu computador/mídia externa. Será validado com PRAGMA integrity_check antes de sobrescrever.</p>
+<form method="post" action="{{ url_for('web.backup_restore_upload') }}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><div class="row g-3 align-items-end"><div class="col-md-8"><label class="form-label" for="file">Arquivo .db</label><input class="form-control" id="file" name="file" type="file" accept=".db" required></div><div class="col-md-4"><button class="btn btn-warning w-100">Restaurar externo</button></div></div></form>
+</div></div>
+{% endblock %}

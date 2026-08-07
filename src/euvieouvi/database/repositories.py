@@ -143,9 +143,7 @@ class MediaIdentifierRepository(Repository[MediaIdentifier]):
                 .join(MediaItem, MediaItem.id == MediaIdentifier.media_item_id)
                 .where(
                     MediaItem.kind == kind,
-                    tuple_(MediaIdentifier.provider, MediaIdentifier.external_id).in_(
-                        identifiers
-                    ),
+                    tuple_(MediaIdentifier.provider, MediaIdentifier.external_id).in_(identifiers),
                 )
             ).all()
         )

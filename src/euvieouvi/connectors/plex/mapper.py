@@ -237,8 +237,7 @@ def _tag_values(value: Any) -> tuple[str, ...]:
     values = {
         normalized
         for item in value
-        if isinstance(item, Mapping)
-        and (normalized := _optional_text(item.get("tag"))) is not None
+        if isinstance(item, Mapping) and (normalized := _optional_text(item.get("tag"))) is not None
     }
     return tuple(sorted(values, key=str.casefold))
 

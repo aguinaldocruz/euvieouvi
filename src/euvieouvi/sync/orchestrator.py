@@ -175,9 +175,7 @@ class SyncOrchestrator:
                 started_at=None if queued else now,
                 heartbeat_at=None if queued else now,
                 summary=(
-                    "Sincronização aguardando início."
-                    if queued
-                    else "Preparando sincronização."
+                    "Sincronização aguardando início." if queued else "Preparando sincronização."
                 ),
             )
             work.sync_runs.add(run)

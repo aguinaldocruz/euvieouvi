@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import secrets
 from datetime import UTC, datetime
@@ -90,8 +91,9 @@ def dashboard() -> Any:
         select(SyncRun).order_by(SyncRun.created_at.desc(), SyncRun.id.desc())
     )
     recent = db.session.execute(
-        select(WatchEvent, MediaItem)
+        select(WatchEvent, MediaItem, Source)
         .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
+        .join(Source, Source.id == WatchEvent.source_id)
         .where(WatchEvent.completed.is_(True))
         .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
         .limit(8)
@@ -247,33 +249,148 @@ def settings_sync() -> Any:
     values = _settings(
         "sync.schedule.enabled",
         "sync.schedule.time",
+        "sync.schedule.mode",
+        "sync.schedule.time.plex",
+        "sync.schedule.time.jellyfin",
+        "sync.schedule.enabled.plex",
+        "sync.schedule.enabled.jellyfin",
+        "sync.schedule.last_date",
+        "sync.schedule.last_date.plex",
+        "sync.schedule.last_date.jellyfin",
     )
+    # Compat: legacy single enabled/time -> migrate view defaults
+    legacy_enabled = values.get("sync.schedule.enabled", "false") == "true"
+    legacy_time = values.get("sync.schedule.time", "03:00")
     errors: dict[str, str] = {}
     if request.method == "POST":
-        enabled = request.form.get("enabled") == "on"
-        scheduled_time = request.form.get("scheduled_time", "").strip()
-        try:
-            parsed = datetime.strptime(scheduled_time, "%H:%M")
-        except ValueError:
-            errors["scheduled_time"] = "Informe um horário válido entre 00:00 e 23:59."
-        if not errors:
-            _save_setting("sync.schedule.enabled", "true" if enabled else "false")
-            _save_setting("sync.schedule.time", parsed.strftime("%H:%M"))
-            db.session.commit()
-            flash("Agendamento diário atualizado.", "success")
-            return redirect(url_for("web.settings_sync"))
+        # Backwards compat: legacy fields 'enabled' / 'scheduled_time'
+        if "enabled" in request.form or "scheduled_time" in request.form:
+            legacy_post_enabled = request.form.get("enabled") == "on"
+            legacy_sched_raw = request.form.get("scheduled_time", "").strip()
+            # always validate legacy scheduled_time if provided (even when disabled)
+            parsed_legacy: datetime | None = None
+            if legacy_sched_raw:
+                try:
+                    parsed_legacy = datetime.strptime(legacy_sched_raw, "%H:%M")
+                except ValueError:
+                    errors["scheduled_time"] = "Informe um horário válido entre 00:00 e 23:59."
+                    errors["time_shared"] = "Informe um horário válido entre 00:00 e 23:59."
+            elif legacy_post_enabled:
+                errors["scheduled_time"] = "Informe um horário válido entre 00:00 e 23:59."
+                errors["time_shared"] = "Informe um horário válido entre 00:00 e 23:59."
+            if not errors and parsed_legacy is not None:
+                _save_setting("sync.schedule.enabled", "true" if legacy_post_enabled else "false")
+                _save_setting(
+                    "sync.schedule.enabled.plex", "true" if legacy_post_enabled else "false"
+                )
+                _save_setting("sync.schedule.time", parsed_legacy.strftime("%H:%M"))
+                _save_setting("sync.schedule.time.plex", parsed_legacy.strftime("%H:%M"))
+                # keep shared mode for legacy
+                _save_setting("sync.schedule.mode", "shared")
+                db.session.commit()
+                flash("Agendamento diário atualizado.", "success")
+                return redirect(url_for("web.settings_sync"))
+            # if errors, fall through to render with errors
+        else:
+            mode = request.form.get("mode", "shared").strip()
+            if mode not in {"shared", "per_source"}:
+                mode = "shared"
+            enabled_plex = request.form.get("enabled_plex") == "on"
+            enabled_jellyfin = request.form.get("enabled_jellyfin") == "on"
+            time_shared = request.form.get("time_shared", "").strip() or legacy_time
+            time_plex = request.form.get("time_plex", "").strip() or values.get(
+                "sync.schedule.time.plex", legacy_time
+            )
+            time_jellyfin = request.form.get("time_jellyfin", "").strip() or values.get(
+                "sync.schedule.time.jellyfin", legacy_time
+            )
+
+            # validate times that are actually used
+            def _parse(t: str, field: str) -> datetime | None:
+                try:
+                    return datetime.strptime(t, "%H:%M")
+                except ValueError:
+                    errors[field] = "Informe um horário válido entre 00:00 e 23:59."
+                    return None
+
+            parsed_shared = (
+                _parse(time_shared, "time_shared")
+                if (enabled_plex or enabled_jellyfin) and mode == "shared"
+                else None
+            )
+            parsed_plex = (
+                _parse(time_plex, "time_plex") if enabled_plex and mode == "per_source" else None
+            )
+            parsed_jelly = (
+                _parse(time_jellyfin, "time_jellyfin")
+                if enabled_jellyfin and mode == "per_source"
+                else None
+            )
+            if not (enabled_plex or enabled_jellyfin):
+                # allow disabling all -> still valid, no time needed
+                pass
+            elif mode == "shared" and parsed_shared is None and "time_shared" not in errors:
+                errors["time_shared"] = "Informe um horário válido entre 00:00 e 23:59."
+            elif mode == "per_source":
+                if enabled_plex and parsed_plex is None:
+                    pass
+                if enabled_jellyfin and parsed_jelly is None:
+                    pass
+            if not errors:
+                _save_setting("sync.schedule.mode", mode)
+                _save_setting("sync.schedule.enabled.plex", "true" if enabled_plex else "false")
+                _save_setting(
+                    "sync.schedule.enabled.jellyfin", "true" if enabled_jellyfin else "false"
+                )
+                # keep legacy keys for compat
+                _save_setting(
+                    "sync.schedule.enabled",
+                    "true" if (enabled_plex or enabled_jellyfin) else "false",
+                )
+                if mode == "shared" and parsed_shared is not None:
+                    _save_setting("sync.schedule.time", parsed_shared.strftime("%H:%M"))
+                    _save_setting("sync.schedule.time.plex", parsed_shared.strftime("%H:%M"))
+                    _save_setting("sync.schedule.time.jellyfin", parsed_shared.strftime("%H:%M"))
+                else:
+                    if parsed_plex is not None:
+                        _save_setting("sync.schedule.time.plex", parsed_plex.strftime("%H:%M"))
+                    if parsed_jelly is not None:
+                        _save_setting("sync.schedule.time.jellyfin", parsed_jelly.strftime("%H:%M"))
+                    # keep shared time for fallback
+                    if parsed_shared is not None:
+                        _save_setting("sync.schedule.time", parsed_shared.strftime("%H:%M"))
+                db.session.commit()
+                flash("Agendamento diário atualizado.", "success")
+                return redirect(url_for("web.settings_sync"))
+    # GET defaults
+    mode_val = values.get("sync.schedule.mode", "shared")
+    if mode_val not in {"shared", "per_source"}:
+        mode_val = "shared"
+    enabled_plex_val = (
+        values.get("sync.schedule.enabled.plex", "true" if legacy_enabled else "false") == "true"
+    )
+    enabled_jelly_val = values.get("sync.schedule.enabled.jellyfin", "false") == "true"
+    # if per-source keys absent, fallback to legacy
+    if (
+        "sync.schedule.enabled.plex" not in values
+        and "sync.schedule.enabled.jellyfin" not in values
+    ):
+        enabled_plex_val = legacy_enabled
+        enabled_jelly_val = False
     return render_template(
         "settings_sync.html",
-        enabled=(
-            request.form.get("enabled") == "on"
-            if request.method == "POST"
-            else values.get("sync.schedule.enabled", "false") == "true"
-        ),
-        scheduled_time=request.form.get(
-            "scheduled_time", values.get("sync.schedule.time", "03:00")
+        mode=mode_val,
+        enabled_plex=enabled_plex_val,
+        enabled_jellyfin=enabled_jelly_val,
+        time_shared=values.get("sync.schedule.time", legacy_time),
+        time_plex=values.get("sync.schedule.time.plex", values.get("sync.schedule.time", "03:00")),
+        time_jellyfin=values.get(
+            "sync.schedule.time.jellyfin", values.get("sync.schedule.time", "03:00")
         ),
         timezone=current_app.config["TIMEZONE"],
         errors=errors,
+        legacy_enabled=legacy_enabled,
+        legacy_time=legacy_time,
     )
 
 
@@ -369,6 +486,252 @@ def settings_jellyfin_test() -> Any:
     return redirect(url_for("web.settings_jellyfin"))
 
 
+def _backup_dir() -> Path:
+    return Path(current_app.instance_path) / "backups"
+
+
+def _list_backups() -> list[dict[str, Any]]:
+    d = _backup_dir()
+    if not d.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    for p in sorted(d.glob("euvieouvi-*.db"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            st = p.stat()
+            out.append(
+                {
+                    "name": p.name,
+                    "path": p,
+                    "size": st.st_size,
+                    "mtime": datetime.fromtimestamp(st.st_mtime, tz=UTC),
+                }
+            )
+        except OSError:
+            continue
+    return out
+
+
+def _prune_backups(keep: int) -> int:
+    items = _list_backups()
+    removed = 0
+    for item in items[keep:]:
+        try:
+            Path(item["path"]).unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _prune_sync_runs(keep: int) -> int:
+    if keep < 1:
+        return 0
+    ids = db.session.scalars(
+        select(SyncRun.id).order_by(SyncRun.created_at.desc(), SyncRun.id.desc()).limit(keep)
+    ).all()
+    if not ids:
+        return 0
+    to_keep = set(ids)
+    # delete older runs not in keep set (and cascading children via FK CASCADE)
+    old_ids = db.session.scalars(
+        select(SyncRun.id).where(SyncRun.id.notin_(to_keep)).order_by(SyncRun.id)
+    ).all()
+    if not old_ids:
+        return 0
+    # delete older runs (FK CASCADE handles children)
+    from sqlalchemy import delete
+
+    db.session.execute(delete(SyncRun).where(SyncRun.id.in_(old_ids)))
+    db.session.commit()
+    return len(old_ids)
+
+
+@blueprint.route("/settings/backup", methods=["GET", "POST"])
+def settings_backup() -> Any:
+    values = _settings(
+        "backup.schedule.enabled",
+        "backup.schedule.time",
+        "backup.retention.keep_last",
+        "sync.retention.keep_last",
+        "backup.retention.keep_last",
+    )
+    errors: dict[str, str] = {}
+    if request.method == "POST":
+        backup_enabled = request.form.get("backup_enabled") == "on"
+        backup_time = request.form.get("backup_time", "").strip() or "04:00"
+        try:
+            datetime.strptime(backup_time, "%H:%M")
+        except ValueError:
+            errors["backup_time"] = "Informe um horário válido entre 00:00 e 23:59."
+        backup_keep_raw = request.form.get("backup_keep", "15").strip()
+        sync_keep_raw = request.form.get("sync_keep", "15").strip()
+        try:
+            backup_keep = int(backup_keep_raw)
+            if not 1 <= backup_keep <= 500:
+                raise ValueError
+        except ValueError:
+            errors["backup_keep"] = "Informe um número entre 1 e 500."
+            backup_keep = 15
+        try:
+            sync_keep = int(sync_keep_raw)
+            if not 1 <= sync_keep <= 500:
+                raise ValueError
+        except ValueError:
+            errors["sync_keep"] = "Informe um número entre 1 e 500."
+            sync_keep = 15
+        if not errors:
+            _save_setting("backup.schedule.enabled", "true" if backup_enabled else "false")
+            _save_setting("backup.schedule.time", backup_time)
+            _save_setting("backup.retention.keep_last", str(backup_keep))
+            _save_setting("sync.retention.keep_last", str(sync_keep))
+            db.session.commit()
+            # prune immediately on save
+            _prune_backups(backup_keep)
+            _prune_sync_runs(sync_keep)
+            flash("Configurações de backup e retenção salvas.", "success")
+            return redirect(url_for("web.settings_backup"))
+    backups = _list_backups()
+    return render_template(
+        "settings_backup.html",
+        backup_enabled=values.get("backup.schedule.enabled", "false") == "true",
+        backup_time=values.get("backup.schedule.time", "04:00"),
+        backup_keep=values.get("backup.retention.keep_last", "15"),
+        sync_keep=values.get("sync.retention.keep_last", "15"),
+        backups=backups,
+        timezone=current_app.config["TIMEZONE"],
+        errors=errors,
+    )
+
+
+@blueprint.post("/backups/backup-now")
+def backup_now() -> Any:
+    from euvieouvi.database.backup import backup_database
+
+    # ensure instance dir exists
+    db_path = Path(current_app.instance_path) / "euvieouvi.db"
+    # fallback to sqlite uri path
+    uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    if uri.startswith("sqlite:///"):
+        with contextlib.suppress(Exception):
+            db_path = Path(uri.removeprefix("sqlite:///"))
+    dest_dir = _backup_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    dest = dest_dir / f"euvieouvi-{ts}.db"
+    try:
+        backup_database(db_path, dest)
+    except Exception as exc:
+        flash(f"Backup falhou: {exc}", "danger")
+        return redirect(url_for("web.settings_backup"))
+    # prune per retention
+    keep_raw = _settings("backup.retention.keep_last").get("backup.retention.keep_last", "15")
+    try:
+        keep = int(keep_raw)
+    except ValueError:
+        keep = 15
+    _prune_backups(keep)
+    flash(f"Backup criado: {dest.name}", "success")
+    return redirect(url_for("web.settings_backup"))
+
+
+@blueprint.post("/backups/<path:filename>/delete")
+def backup_delete(filename: str) -> Any:
+    # sanitize
+    if "/" in filename or "\\" in filename or not filename.endswith(".db"):
+        return Response("Nome inválido.", 400)
+    p = _backup_dir() / filename
+    if not p.is_file():
+        flash("Backup não encontrado.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    try:
+        p.unlink()
+        flash(f"Backup apagado: {filename}", "success")
+    except OSError as exc:
+        flash(f"Falha ao apagar: {exc}", "danger")
+    return redirect(url_for("web.settings_backup"))
+
+
+@blueprint.get("/backups/<path:filename>/download")
+def backup_download(filename: str) -> Any:
+    if "/" in filename or "\\" in filename or not filename.endswith(".db"):
+        return Response("Nome inválido.", 400)
+    p = _backup_dir() / filename
+    if not p.is_file():
+        return Response("Backup não encontrado.", 404)
+    return send_file(
+        p, as_attachment=True, download_name=filename, mimetype="application/octet-stream"
+    )
+
+
+@blueprint.post("/backups/<path:filename>/restore")
+def backup_restore(filename: str) -> Any:
+    if "/" in filename or "\\" in filename or not filename.endswith(".db"):
+        return Response("Nome inválido.", 400)
+    src = _backup_dir() / filename
+    if not src.is_file():
+        flash("Backup não encontrado.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    # block if sync active
+    active = db.session.scalar(
+        select(SyncRun).where(SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]))
+    )
+    if active is not None:
+        flash("Há sincronização ativa; aguarde terminar antes de restaurar.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    from euvieouvi.database.backup import restore_database
+
+    uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    dest = Path(current_app.instance_path) / "euvieouvi.db"
+    if uri.startswith("sqlite:///"):
+        with contextlib.suppress(Exception):
+            dest = Path(uri.removeprefix("sqlite:///"))
+    try:
+        restore_database(src, dest)
+        flash(
+            f"Restauração concluída a partir de {filename}. Reinicie o serviço se necessário.",
+            "success",
+        )
+    except Exception as exc:
+        flash(f"Restauração falhou: {exc}", "danger")
+    return redirect(url_for("web.settings_backup"))
+
+
+@blueprint.post("/backups/restore-upload")
+def backup_restore_upload() -> Any:
+    if "file" not in request.files:
+        flash("Selecione um arquivo .db para restaurar.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    f = request.files["file"]
+    if not f.filename or not f.filename.endswith(".db"):
+        flash("Arquivo deve ser .db SQLite.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    active = db.session.scalar(
+        select(SyncRun).where(SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]))
+    )
+    if active is not None:
+        flash("Há sincronização ativa; aguarde terminar antes de restaurar.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    tmp = _backup_dir() / f"upload-{secrets.token_hex(6)}.db"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        f.save(tmp)
+        from euvieouvi.database.backup import restore_database
+
+        uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+        dest = Path(current_app.instance_path) / "euvieouvi.db"
+        if uri.startswith("sqlite:///"):
+            with contextlib.suppress(Exception):
+                dest = Path(uri.removeprefix("sqlite:///"))
+        restore_database(tmp, dest)
+        flash("Restauração por upload concluída e sobrescrita.", "success")
+    except Exception as exc:
+        flash(f"Restauração por upload falhou: {exc}", "danger")
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+    return redirect(url_for("web.settings_backup"))
+
+
 @blueprint.get("/settings/webhooks")
 def settings_webhooks() -> Any:
     tokens = _settings("webhook.plex.token", "webhook.jellyfin.token")
@@ -396,7 +759,11 @@ def plex_webhook(token: str) -> Any:
         return Response(status=404)
     source = _source(ConnectorType.PLEX)
     payload_text = request.form.get("payload")
+    # Webhook is processed even if source is disabled/missing sync config — independent of sync
     if source is None or not payload_text:
+        # if no source configured, store minimal to avoid losing event? just acknowledge
+        if source is None:
+            return Response(status=204)
         return Response(status=204)
     try:
         payload = json.loads(payload_text)
@@ -411,6 +778,7 @@ def plex_webhook(token: str) -> Any:
     library_external_id = str(metadata.get("librarySectionID") or "").strip()
     if not external_id or not library_external_id:
         return Response("Identidade da mídia ausente.", 400)
+    # process even if source.enabled is False
     _persist_webhook_event(
         source,
         external_id=external_id,
@@ -448,9 +816,25 @@ def jellyfin_webhook(token: str) -> Any:
             SourceMediaRef.external_id == external_id,
         )
     )
+    # Independent of sync config: persist even if no prior SourceMediaRef
     if reference is None:
-        _queue_source_sync(source.id)
-        return Response(status=202)
+        # try to infer library from any library of this source
+        fallback_lib = db.session.scalar(
+            select(Library.external_id).where(Library.source_id == source.id).order_by(Library.id)
+        )
+        library_external_id = fallback_lib or "unknown"
+        _persist_webhook_event(
+            source,
+            external_id=external_id,
+            library_external_id=library_external_id,
+            watched_at=watched_at,
+            source_event_id=str(payload.get("NotificationId") or "").strip() or None,
+            duration_ms=_ticks_to_ms(payload.get("RunTimeTicks")),
+        )
+        # also queue a sync to enrich metadata, but don't block webhook response
+        with contextlib.suppress(Exception):
+            _queue_source_sync(source.id)
+        return Response(status=204)
     library = db.session.get(Library, reference.library_id)
     if library is None:
         return Response(status=204)
@@ -521,20 +905,26 @@ def library_selection(library_id: int) -> Any:
 @blueprint.route("/sync", methods=["GET", "POST"])
 def sync_list() -> Any:
     if request.method == "POST":
-        source_ids = tuple(
-            db.session.scalars(
-                select(Source.id)
-                .where(
-                    Source.enabled.is_(True),
-                    exists().where(
-                        Library.source_id == Source.id,
-                        Library.enabled.is_(True),
-                        Library.available.is_(True),
-                    ),
-                )
-                .order_by(Source.id)
-            ).all()
+        target = (request.form.get("targets") or "both").strip().lower()
+        allowed_targets = {"plex", "jellyfin", "both"}
+        if target not in allowed_targets:
+            target = "both"
+        type_filter = None
+        if target == "plex":
+            type_filter = ConnectorType.PLEX
+        elif target == "jellyfin":
+            type_filter = ConnectorType.JELLYFIN
+        stmt = select(Source.id).where(
+            Source.enabled.is_(True),
+            exists().where(
+                Library.source_id == Source.id,
+                Library.enabled.is_(True),
+                Library.available.is_(True),
+            ),
         )
+        if type_filter is not None:
+            stmt = stmt.where(Source.connector_type == type_filter)
+        source_ids = tuple(db.session.scalars(stmt.order_by(Source.id)).all())
         if not source_ids:
             flash("Selecione ao menos uma biblioteca disponível antes de sincronizar.", "warning")
             return redirect(url_for("web.libraries"))
@@ -614,21 +1004,55 @@ def history() -> Any:
     query = request.args.get("query", "").strip()[:200]
     kind = request.args.get("kind", "")
     watched = request.args.get("watched", "watched")
-    _, last_completed, completed_known = _completion_expressions(MediaItem.id)
-    statement = select(MediaItem)
+    # Performance: use aggregated outer joins instead of correlated scalar subqueries
+    evt_agg = (
+        select(
+            WatchEvent.media_item_id.label("mid"),
+            func.max(WatchEvent.watched_at).label("evt_last"),
+        )
+        .where(WatchEvent.completed.is_(True))
+        .group_by(WatchEvent.media_item_id)
+        .subquery()
+    )
+    st_agg = (
+        select(
+            WatchState.media_item_id.label("mid"),
+            func.max(WatchState.last_watched_at).label("st_last"),
+        )
+        .where(WatchState.completed.is_(True))
+        .group_by(WatchState.media_item_id)
+        .subquery()
+    )
+    last_completed_expr = func.coalesce(
+        case(
+            (evt_agg.c.evt_last.is_(None), st_agg.c.st_last),
+            (st_agg.c.st_last.is_(None), evt_agg.c.evt_last),
+            (evt_agg.c.evt_last >= st_agg.c.st_last, evt_agg.c.evt_last),
+            else_=st_agg.c.st_last,
+        ),
+        evt_agg.c.evt_last,
+        st_agg.c.st_last,
+    )
+    # For watched filter, use exists is still cheap, but we can use join non-null
+    has_evt = evt_agg.c.evt_last.is_not(None)
+    has_st = st_agg.c.st_last.is_not(None)
+    statement = (
+        select(MediaItem)
+        .outerjoin(evt_agg, evt_agg.c.mid == MediaItem.id)
+        .outerjoin(st_agg, st_agg.c.mid == MediaItem.id)
+    )
     if query:
         statement = statement.where(MediaItem.title.ilike(f"%{query}%"))
     if kind in {item.value for item in MediaKind}:
         statement = statement.where(MediaItem.kind == MediaKind(kind))
     if watched == "watched":
-        statement = statement.where(completed_known)
+        statement = statement.where(or_(has_evt, has_st))
     elif watched == "unwatched":
-        statement = statement.where(~completed_known)
+        statement = statement.where(~or_(has_evt, has_st))
     raw_page = request.args.get("page", "1")
     page = max(int(raw_page) if raw_page.isdigit() else 1, 1)
     values = db.session.scalars(
-        statement.distinct()
-        .order_by(last_completed.desc().nullslast(), MediaItem.title, MediaItem.id)
+        statement.order_by(last_completed_expr.desc().nullslast(), MediaItem.title, MediaItem.id)
         .limit(51)
         .offset((page - 1) * 50)
     ).all()
@@ -752,14 +1176,35 @@ def catalog() -> Any:
     )
     rows = db.session.execute(
         statement.order_by(ordering, MediaItem.title, MediaItem.id)
-        .limit(41)
+        .limit(80)
         .offset((page - 1) * 40)
     ).all()
+    # Deduplicate by title/year/kind merging Plex/Jellyfin badges.
+    # When same media exists in both sources as separate rows (e.g., Plex
+    # without identifiers), show single card with both badges.
+    # Keep DB order and merge badges via OR.
+    deduped: dict[tuple[str, int | None, str], Any] = {}
+    ordered_keys: list[tuple[str, int | None, str]] = []
+    for row in rows:
+        item = row[0]
+        key = (item.title.strip().casefold(), item.year, item.kind.value)
+        if key not in deduped:
+            deduped[key] = row
+            ordered_keys.append(key)
+        else:
+            prev = deduped[key]
+            merged_plex = bool(prev[3] or row[3])
+            merged_jelly = bool(prev[4] or row[4])
+            keep = prev if prev[0].id < item.id else row
+            deduped[key] = (keep[0], keep[1], keep[2], merged_plex, merged_jelly)
+    merged_rows = [deduped[k] for k in ordered_keys]
+    has_more = len(merged_rows) > 40
+    merged_rows = merged_rows[:40]
     return render_template(
         "catalog.html",
-        rows=rows[:40],
+        rows=merged_rows,
         page=page,
-        has_more=len(rows) > 40,
+        has_more=has_more,
         query=query,
         kind=kind,
         availability=availability,
@@ -932,8 +1377,9 @@ def media_detail(media_id: int) -> Any:
         or 0
     )
     event_rows = db.session.execute(
-        select(WatchEvent, MediaItem)
+        select(WatchEvent, MediaItem, Source)
         .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
+        .join(Source, Source.id == WatchEvent.source_id)
         .where(
             WatchEvent.media_item_id.in_(history_ids),
             WatchEvent.completed.is_(True),
@@ -1057,14 +1503,18 @@ def _completion_expressions(media_item_id: Any) -> tuple[Any, Any, Any]:
 
 
 def _watched_count(kind: MediaKind) -> int:
-    _, _, completed_known = _completion_expressions(MediaItem.id)
+    # Optimized: count distinct media with completed history via union
+    # instead of correlated EXISTS per row (was 4-9s on 36k items).
+    evt_ids = select(WatchEvent.media_item_id).where(WatchEvent.completed.is_(True))
+    state_ids = select(WatchState.media_item_id).where(WatchState.completed.is_(True))
+    combined = evt_ids.union(state_ids).subquery()
     return int(
         db.session.scalar(
-            select(func.count(MediaItem.id))
+            select(func.count())
             .select_from(MediaItem)
             .where(
                 MediaItem.kind == kind,
-                completed_known,
+                MediaItem.id.in_(select(combined.c.media_item_id)),
             )
         )
         or 0

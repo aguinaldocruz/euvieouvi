@@ -76,6 +76,24 @@ class JellyfinHttpClient:
             raise ConnectorResponseError("Jellyfin returned an unsupported image.")
         return response.content, mime_type
 
+    def resolve_user_id(self, name_or_id: str) -> str:
+        candidate = name_or_id.strip()
+        # GUID is 32 hex chars (with or without dashes) - use directly
+        normalized = candidate.replace("-", "")
+        if len(normalized) == 32 and all(c in "0123456789abcdefABCDEF" for c in normalized):
+            return normalized.lower()
+        # otherwise treat as username and lookup via /Users
+        raw = self.get_json("/Users")
+        if not isinstance(raw, list):
+            raise ConnectorResponseError("Jellyfin user lookup failed.")
+        lowered = candidate.casefold()
+        for entry in raw:
+            if isinstance(entry, dict) and str(entry.get("Name", "")).casefold() == lowered:
+                user_id = entry.get("Id")
+                if isinstance(user_id, str) and user_id.strip():
+                    return user_id.strip().replace("-", "").lower()
+        raise ConnectorNotFoundError(f"Jellyfin user '{candidate}' not found.")
+
     def _get(self, path: str, *, params: Mapping[str, str | int | bool] | None) -> httpx.Response:
         if not path.startswith("/") or path.startswith("//"):
             raise ConnectorConfigurationError("Jellyfin path must be server-local.")

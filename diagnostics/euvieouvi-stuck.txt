@@ -1,0 +1,77 @@
+=== DATA ===
+Wed Aug  5 08:32:55 PM -03 2026
+
+=== GIT ===
+df426cf
+ D compose.yaml
+ M compose.yaml.sample
+?? diagnostics/
+?? docker-compose.yml
+
+=== CONTAINERS ===
+NAME        IMAGE                 COMMAND                  SERVICE     CREATED         STATUS                   PORTS
+euvieouvi   euvieouvi:2.0.0-dev   "euvieouvi-entrypoin…"   euvieouvi   4 minutes ago   Up 4 minutes (healthy)   0.0.0.0:8000->8000/tcp, :::8000->8000/tcp
+
+=== HEALTHCHECKS ===
+{"status":"alive"}
+
+HTTP 200 em 0.002913s
+{"database":"ready","persistence":"ready","schema":"current","status":"ready"}
+
+HTTP 200 em 0.024506s
+
+=== PAGINA INICIAL ===
+curl: (28) Operation timed out after 30002 milliseconds with 0 bytes received
+HTTP 000 em 30.002548s
+
+=== PROCESSOS NO CONTAINER ===
+OCI runtime exec failed: exec failed: unable to start container process: exec: "ps": executable file not found in $PATH: unknown
+
+=== TAMANHO DO VOLUME ===
+53M	/data/euvieouvi
+
+=== ULTIMOS LOGS ===
+euvieouvi  | euvieouvi startup validation succeeded
+euvieouvi  | 2026-08-05T23:28:36Z level=INFO component=application request_id=- message=application initialized
+euvieouvi  | INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+euvieouvi  | INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+euvieouvi  | 2026-08-05T23:28:39Z level=INFO component=application request_id=- message=application initialized
+euvieouvi  | euvieouvi reconciled orphaned sync runs: 0
+euvieouvi  | [2026-08-05 23:28:40 +0000] [7] [INFO] Starting gunicorn 26.0.0
+euvieouvi  | [2026-08-05 23:28:40 +0000] [7] [INFO] Listening at: http://0.0.0.0:8000 (7)
+euvieouvi  | [2026-08-05 23:28:40 +0000] [7] [INFO] Using worker: gthread
+euvieouvi  | [2026-08-05 23:28:40 +0000] [19] [INFO] Booting worker with pid: 19
+euvieouvi  | [2026-08-05 23:28:40 +0000] [7] [ERROR] Control server error: [Errno 30] Read-only file system: '/home/euvieouvi/.gunicorn'
+euvieouvi  | 2026-08-05T23:28:42Z level=INFO component=application request_id=- message=application initialized
+euvieouvi  | 2026-08-05T23:28:46Z level=INFO component=alembic.runtime.migration request_id=51cbeb7a-e849-4b2e-9650-470f68f72de4 message=Context impl SQLiteImpl.
+euvieouvi  | 2026-08-05T23:28:46Z level=INFO component=alembic.runtime.migration request_id=51cbeb7a-e849-4b2e-9650-470f68f72de4 message=Will assume non-transactional DDL.
+euvieouvi  | [05/Aug/2026:23:28:47 +0000] method=GET path="/health/ready" status=200 response_bytes=79 duration_us=36787 request_id=51cbeb7a-e849-4b2e-9650-470f68f72de4
+euvieouvi  | 2026-08-05T23:29:19Z level=INFO component=alembic.runtime.migration request_id=a3985ff0-bf52-4988-bc1a-2855a3246ad6 message=Context impl SQLiteImpl.
+euvieouvi  | 2026-08-05T23:29:19Z level=INFO component=alembic.runtime.migration request_id=a3985ff0-bf52-4988-bc1a-2855a3246ad6 message=Will assume non-transactional DDL.
+euvieouvi  | [05/Aug/2026:23:29:19 +0000] method=GET path="/health/ready" status=200 response_bytes=79 duration_us=22725 request_id=a3985ff0-bf52-4988-bc1a-2855a3246ad6
+euvieouvi  | 2026-08-05T23:29:52Z level=INFO component=alembic.runtime.migration request_id=72ee7021-55bc-48b7-806e-42c6fcdb0e8f message=Context impl SQLiteImpl.
+euvieouvi  | 2026-08-05T23:29:52Z level=INFO component=alembic.runtime.migration request_id=72ee7021-55bc-48b7-806e-42c6fcdb0e8f message=Will assume non-transactional DDL.
+euvieouvi  | [05/Aug/2026:23:29:52 +0000] method=GET path="/health/ready" status=200 response_bytes=79 duration_us=20097 request_id=72ee7021-55bc-48b7-806e-42c6fcdb0e8f
+euvieouvi  | 2026-08-05T23:30:25Z level=INFO component=alembic.runtime.migration request_id=e47f472a-32d3-4026-b485-b4e6504513e1 message=Context impl SQLiteImpl.
+euvieouvi  | 2026-08-05T23:30:25Z level=INFO component=alembic.runtime.migration request_id=e47f472a-32d3-4026-b485-b4e6504513e1 message=Will assume non-transactional DDL.
+euvieouvi  | [05/Aug/2026:23:30:25 +0000] method=GET path="/health/ready" status=200 response_bytes=79 duration_us=19897 request_id=e47f472a-32d3-4026-b485-b4e6504513e1
+euvieouvi  | 2026-08-05T23:30:58Z level=INFO component=alembic.runtime.migration request_id=4ab25587-6b1e-459a-84b6-330b1f36d145 message=Context impl SQLiteImpl.
+euvieouvi  | 2026-08-05T23:30:58Z level=INFO component=alembic.runtime.migration request_id=4ab25587-6b1e-459a-84b6-330b1f36d145 message=Will assume non-transactional DDL.
+euvieouvi  | [05/Aug/2026:23:30:58 +0000] method=GET path="/health/ready" status=200 response_bytes=79 duration_us=20128 request_id=4ab25587-6b1e-459a-84b6-330b1f36d145
+euvieouvi  | 2026-08-05T23:31:31Z level=INFO component=alembic.runtime.migration request_id=294397e5-6b9f-4ac7-8fe2-794c569d72df message=Context impl SQLiteImpl.
+euvieouvi  | 2026-08-05T23:31:31Z level=INFO component=alembic.runtime.migration request_id=294397e5-6b9f-4ac7-8fe2-794c569d72df message=Will assume non-transactional DDL.
+euvieouvi  | [05/Aug/2026:23:31:31 +0000] method=GET path="/health/ready" status=200 response_bytes=79 duration_us=19422 request_id=294397e5-6b9f-4ac7-8fe2-794c569d72df
+euvieouvi  | 2026-08-05T23:32:04Z level=INFO component=alembic.runtime.migration request_id=89dcb99e-c98a-4017-83ec-2f356afae786 message=Context impl SQLiteImpl.
+euvieouvi  | 2026-08-05T23:32:04Z level=INFO component=alembic.runtime.migration request_id=89dcb99e-c98a-4017-83ec-2f356afae786 message=Will assume non-transactional DDL.
+euvieouvi  | [05/Aug/2026:23:32:04 +0000] method=GET path="/health/ready" status=200 response_bytes=79 duration_us=23026 request_id=89dcb99e-c98a-4017-83ec-2f356afae786
+euvieouvi  | 2026-08-05T23:32:37Z level=INFO component=alembic.runtime.migration request_id=fb49eea9-ebff-4a69-8a24-e6fe991dfeb1 message=Context impl SQLiteImpl.
+euvieouvi  | 2026-08-05T23:32:37Z level=INFO component=alembic.runtime.migration request_id=fb49eea9-ebff-4a69-8a24-e6fe991dfeb1 message=Will assume non-transactional DDL.
+euvieouvi  | [05/Aug/2026:23:32:37 +0000] method=GET path="/health/ready" status=200 response_bytes=79 duration_us=20036 request_id=fb49eea9-ebff-4a69-8a24-e6fe991dfeb1
+euvieouvi  | [05/Aug/2026:23:32:55 +0000] method=GET path="/health/live" status=200 response_bytes=19 duration_us=1347 request_id=62723ffa-d511-4404-9085-b7cda6d920be
+euvieouvi  | 2026-08-05T23:32:55Z level=INFO component=alembic.runtime.migration request_id=9388e9ae-65e5-479c-a67a-4f84be5c3838 message=Context impl SQLiteImpl.
+euvieouvi  | 2026-08-05T23:32:55Z level=INFO component=alembic.runtime.migration request_id=9388e9ae-65e5-479c-a67a-4f84be5c3838 message=Will assume non-transactional DDL.
+euvieouvi  | [05/Aug/2026:23:32:55 +0000] method=GET path="/health/ready" status=200 response_bytes=79 duration_us=23260 request_id=9388e9ae-65e5-479c-a67a-4f84be5c3838
+euvieouvi  | [05/Aug/2026:23:33:22 +0000] method=GET path="/" status=200 response_bytes=6601 duration_us=273333911 request_id=580592ef-04ba-4d6d-9350-ed1e163a4e67
+euvieouvi  | 2026-08-05T23:33:22Z level=INFO component=alembic.runtime.migration request_id=0bad76ae-ac76-46a8-9590-139cb4378804 message=Context impl SQLiteImpl.
+euvieouvi  | 2026-08-05T23:33:22Z level=INFO component=alembic.runtime.migration request_id=0bad76ae-ac76-46a8-9590-139cb4378804 message=Will assume non-transactional DDL.
+euvieouvi  | [05/Aug/2026:23:33:22 +0000] method=GET path="/health/ready" status=200 response_bytes=79 duration_us=20914 request_id=0bad76ae-ac76-46a8-9590-139cb4378804

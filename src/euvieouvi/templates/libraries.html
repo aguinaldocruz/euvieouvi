@@ -1,4 +1,19 @@
 {% extends 'base.html' %}{% block title %}Bibliotecas · euvieouvi{% endblock %}{% block content %}
-<div class="mb-4"><h1 class="h2">Bibliotecas</h1><p class="text-secondary">Escolha as bibliotecas coletadas em cada servidor.</p><div class="d-flex flex-wrap gap-2">{% for source in sources %}<form method="post" action="{{ url_for('web.libraries_discover', source_id=source.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-primary">Atualizar {{ source.name }}</button></form>{% endfor %}</div></div>
-{% if libraries %}<div class="table-responsive bg-white"><table class="table align-middle mb-0"><thead><tr><th>Fonte</th><th>Biblioteca</th><th>Tipo</th><th>Disponibilidade</th><th>Selecionada</th></tr></thead><tbody>{% for library in libraries %}<tr><td>{% for source in sources %}{% if source.id == library.source_id %}{{ source.name }}{% endif %}{% endfor %}</td><td>{{ library.name }}</td><td>{{ library.media_type.value }}</td><td>{{ 'Disponível' if library.available else 'Ausente' }}</td><td><form method="post" action="{{ url_for('web.library_selection', library_id=library.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="enabled" value="{{ 'false' if library.enabled else 'true' }}"><button class="btn btn-sm {{ 'btn-primary' if library.enabled else 'btn-outline-secondary' }}">{{ 'Sim' if library.enabled else 'Não' }}</button></form></td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="text-secondary">Nenhuma biblioteca descoberta.</p>{% endif %}
+<div class="mb-4"><h1 class="h2">Bibliotecas</h1><p class="text-secondary">Escolha as bibliotecas coletadas em cada servidor. Jellyfin e Plex aparecem separados abaixo.</p></div>
+{% for source in sources %}
+<div class="card mb-4"><div class="card-body">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h2 class="h5 mb-0 d-flex align-items-center gap-2"><img src="{{ url_for('static', filename='icons/euvieouvi-sync.svg') }}" alt="" width="18" height="18">{{ source.name }} <span class="badge text-bg-secondary">{{ source.connector_type.value }}</span>{% if not source.enabled %}<span class="badge text-bg-warning">desativado</span>{% endif %}</h2>
+    <form method="post" action="{{ url_for('web.libraries_discover', source_id=source.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-outline-primary d-inline-flex align-items-center gap-1">↻ Atualizar</button></form>
+  </div>
+  {% set libs = libraries | selectattr('source_id', 'equalto', source.id) | list %}
+  {% if libs %}
+  <div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Biblioteca</th><th>Tipo</th><th>Disponibilidade</th><th>Selecionada</th></tr></thead><tbody>{% for library in libs %}<tr><td>{{ library.name }}</td><td>{{ library.media_type.value }}</td><td>{{ 'Disponível' if library.available else 'Ausente' }}</td><td><form method="post" action="{{ url_for('web.library_selection', library_id=library.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="enabled" value="{{ 'false' if library.enabled else 'true' }}"><button class="btn btn-sm {{ 'btn-primary' if library.enabled else 'btn-outline-secondary' }}">{{ 'Sim' if library.enabled else 'Não' }}</button></form></td></tr>{% endfor %}</tbody></table></div>
+  {% else %}
+  <p class="text-secondary mb-0">Nenhuma biblioteca descoberta para {{ source.name }}. Clique em Atualizar após configurar URL/token e habilitar a fonte em Configurações.</p>
+  {% endif %}
+</div></div>
+{% else %}
+<p class="text-secondary">Cadastre Plex e/ou Jellyfin em Configurações para descobrir bibliotecas.</p>
+{% endfor %}
 {% endblock %}

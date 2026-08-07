@@ -32,9 +32,19 @@ class TmdbClient:
     def __init__(self, token: str, *, client: httpx.Client | None = None) -> None:
         if not token.strip():
             raise ValueError("TMDB token is required")
+        token = token.strip()
+        # Support both v3 api_key (32 hex) and v4 Bearer JWT (ey...)
+        if len(token) == 32 and all(c in "0123456789abcdefABCDEF" for c in token):
+            headers = {"Accept": "application/json"}
+            params_extra: dict[str, str] = {"api_key": token}
+        else:
+            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+            params_extra = {}
+        self._token = token
+        self._params_extra = params_extra
         self._client = client or httpx.Client(
             base_url="https://api.themoviedb.org",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            headers=headers,
             timeout=20,
             follow_redirects=False,
             trust_env=False,
@@ -44,7 +54,9 @@ class TmdbClient:
     def lookup(self, media_type: str, external_id: str, *, language: str) -> EnrichedMetadata:
         if media_type not in {"movie", "tv"} or not external_id.isdigit():
             raise ValueError("Invalid exact TMDB lookup")
-        response = self._client.get(f"/3/{media_type}/{external_id}", params={"language": language})
+        params: dict[str, str] = {"language": language}
+        params.update(self._params_extra)
+        response = self._client.get(f"/3/{media_type}/{external_id}", params=params)
         if response.status_code == 404:
             raise EnrichmentError("TMDB item was not found")
         try:

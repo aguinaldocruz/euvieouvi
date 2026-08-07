@@ -79,10 +79,10 @@ class PlexConnector:
         media_kind: ExternalMediaKind,
         page: PageRequest,
     ) -> Page[ExternalMediaItem]:
-        if (media_kind is ExternalMediaKind.MOVIE and library.media_type.value != "movie") or (
-            media_kind is ExternalMediaKind.EPISODE and library.media_type.value != "show"
-        ) or (
-            media_kind is ExternalMediaKind.TRACK and library.media_type.value != "artist"
+        if (
+            (media_kind is ExternalMediaKind.MOVIE and library.media_type.value != "movie")
+            or (media_kind is ExternalMediaKind.EPISODE and library.media_type.value != "show")
+            or (media_kind is ExternalMediaKind.TRACK and library.media_type.value != "artist")
         ):
             raise ConnectorConfigurationError("Plex media kind does not match the library type.")
         params = self._page_params(page)

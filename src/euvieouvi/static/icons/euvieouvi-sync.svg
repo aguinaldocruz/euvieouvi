@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="euvieouvi sync">
+  <title>euvieouvi sync — globo com setas circulares</title>
+  <!-- Globe -->
+  <circle cx="50" cy="50" r="28" fill="none" stroke="#2e7d32" stroke-width="4"/>
+  <!-- Meridians/parallels -->
+  <ellipse cx="50" cy="50" rx="14" ry="28" fill="none" stroke="#2e7d32" stroke-width="2.8" opacity="0.95"/>
+  <ellipse cx="50" cy="50" rx="28" ry="14" fill="none" stroke="#2e7d32" stroke-width="2.2" opacity="0.9"/>
+  <path d="M 28 34 Q 50 42 72 34" fill="none" stroke="#2e7d32" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M 26 58 Q 50 66 74 58" fill="none" stroke="#2e7d32" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M 50 22 L 50 78" fill="none" stroke="#2e7d32" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M 22 50 L 78 50" fill="none" stroke="#2e7d32" stroke-width="2" stroke-linecap="round" opacity="0.9"/>
+  <!-- Continents simplified -->
+  <path d="M 38 30 Q 42 28 44 32 Q 46 36 42 38 Q 38 40 36 36 Z" fill="#2e7d32"/>
+  <path d="M 58 36 Q 66 34 70 40 Q 72 48 66 54 Q 60 58 56 52 Q 54 44 58 36 Z" fill="#2e7d32"/>
+  <path d="M 36 52 Q 44 50 48 56 Q 50 64 44 72 Q 36 74 32 64 Q 30 56 36 52 Z" fill="#2e7d32"/>
+  <!-- Circular arrows -->
+  <path d="M 78 18 A 38 38 0 1 1 18 62" fill="none" stroke="#2e7d32" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 14 44 L 26 62 L 8 66 Z" fill="#2e7d32"/>
+  <path d="M 22 82 A 38 38 0 1 1 82 38" fill="none" stroke="#2e7d32" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 86 56 L 74 38 L 92 34 Z" fill="#2e7d32"/>
+</svg>

@@ -45,21 +45,36 @@ def enrich_catalog(
         musicbrainz = MusicBrainzClient(f"euvieouvi/{version('euvieouvi')}")
     counters = {"processed": 0, "updated": 0, "failed": 0}
     try:
-        candidates = db.session.execute(
-            select(MediaItem, MediaIdentifier)
-            .join(MediaIdentifier, MediaIdentifier.media_item_id == MediaItem.id)
-            .where(MediaIdentifier.provider.in_(["tmdb", "mbid"]))
-            .order_by(MediaItem.id)
-            .limit(limit * 3)
-        ).all()
-        for item, identifier in candidates:
+        # Fetch only IDs to avoid DetachedInstanceError after commit
+        # (holding ORM objects across commit expires them)
+        candidate_ids: list[int] = list(
+            db.session.scalars(
+                select(MediaIdentifier.id)
+                .join(MediaItem, MediaItem.id == MediaIdentifier.media_item_id)
+                .where(MediaIdentifier.provider.in_(["tmdb", "mbid"]))
+                .order_by(MediaItem.id, MediaIdentifier.id)
+                .limit(limit * 3)
+            ).all()
+        )
+        for identifier_id in candidate_ids:
             if counters["processed"] >= limit:
                 break
+            identifier = db.session.get(MediaIdentifier, identifier_id)
+            if identifier is None:
+                continue
+            item = db.session.get(MediaItem, identifier.media_item_id)
+            if item is None:
+                continue
             provider = identifier.provider
-            if provider == "tmdb" and tmdb is not None and item.kind in {
-                MediaKind.MOVIE,
-                MediaKind.SHOW,
-            }:
+            if (
+                provider == "tmdb"
+                and tmdb is not None
+                and item.kind
+                in {
+                    MediaKind.MOVIE,
+                    MediaKind.SHOW,
+                }
+            ):
                 lookup_kind = "tmdb"
             elif provider == "mbid" and musicbrainz is not None and item.kind is MediaKind.TRACK:
                 lookup_kind = "musicbrainz"

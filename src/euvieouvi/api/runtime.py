@@ -34,10 +34,12 @@ def connector_for(source: Source) -> MediaConnector:
             user_id = str(secret["user_id"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("Invalid persisted Jellyfin credentials") from error
-        return JellyfinConnector(
-            JellyfinHttpClient(source.base_url, api_key),
-            user_id,
-        )
+        jf_client = JellyfinHttpClient(source.base_url, api_key)
+        try:
+            resolved = jf_client.resolve_user_id(user_id)
+        except Exception:
+            resolved = user_id
+        return JellyfinConnector(jf_client, resolved)
     client = PlexHttpClient(
         source.base_url,
         source.secret,
@@ -83,9 +85,7 @@ class LocalSyncExecutor:
                 try:
                     auto_enrich = db.session.get(Setting, "metadata.auto_after_sync")
                     enrich_after_sync = auto_enrich is not None and auto_enrich.value == "true"
-                    orchestrator = SyncOrchestrator(
-                        lambda: db.session(), self._factory(source)
-                    )
+                    orchestrator = SyncOrchestrator(lambda: db.session(), self._factory(source))
                     result = orchestrator.run_queued(
                         run_id,
                         cancellation=token,
@@ -122,10 +122,15 @@ class LocalSyncExecutor:
                     self._app.logger.exception("background synchronization failed")
                     db.session.rollback()
                     run = db.session.get(SyncRun, run_id)
-                    if orchestrator is not None and run is not None and run.status in {
-                        SyncStatus.QUEUED,
-                        SyncStatus.RUNNING,
-                    }:
+                    if (
+                        orchestrator is not None
+                        and run is not None
+                        and run.status
+                        in {
+                            SyncStatus.QUEUED,
+                            SyncStatus.RUNNING,
+                        }
+                    ):
                         orchestrator.finish_failure(
                             run_id,
                             error,
