@@ -104,6 +104,10 @@ class FixtureConnector:
         self.history_calls.append((library.external_id, page.start))
         return _slice_page(self.history.get(library.external_id, ()), page)
 
+    def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]:
+        del source_path, width, height
+        return b"", "image/jpeg"
+
 
 def _slice_page[ItemT](items: tuple[ItemT, ...], request: PageRequest) -> Page[ItemT]:
     selected = items[request.start : request.start + request.size]
@@ -337,8 +341,12 @@ def test_catalog_watched_state_creates_one_known_completion_event(app: Flask) ->
         second_run = engine.run(source_id)
         assert first_run.status is SyncStatus.SUCCEEDED
         assert second_run.status is SyncStatus.SUCCEEDED
-        assert db.session.get(SyncRun, first_run.run_id).events_inserted == 1
-        assert db.session.get(SyncRun, second_run.run_id).events_inserted == 0
+        first_stored = db.session.get(SyncRun, first_run.run_id)
+        assert first_stored is not None
+        assert first_stored.events_inserted == 1
+        second_stored = db.session.get(SyncRun, second_run.run_id)
+        assert second_stored is not None
+        assert second_stored.events_inserted == 0
 
         events = db.session.scalars(select(WatchEvent)).all()
         assert len(events) == 1
@@ -358,9 +366,9 @@ def test_music_sync_persists_artist_album_track_and_history(app: Flask) -> None:
             completed=True,
             duration_ms=259000,
         )
-        result = orchestrator(
-            FixtureConnector({"music": (track(),)}, {"music": (event,)})
-        ).run(source_id)
+        result = orchestrator(FixtureConnector({"music": (track(),)}, {"music": (event,)})).run(
+            source_id
+        )
 
         assert result.status is SyncStatus.SUCCEEDED
         items = db.session.scalars(select(MediaItem).order_by(MediaItem.id)).all()
@@ -403,9 +411,7 @@ def test_plex_artwork_replaces_external_fallback(app: Flask) -> None:
         )
         db.session.commit()
         refreshed = orchestrator(
-            FixtureConnector(
-                {"movies": (movie("m1", thumb_path="/library/metadata/m1/thumb"),)}
-            )
+            FixtureConnector({"movies": (movie("m1", thumb_path="/library/metadata/m1/thumb"),)})
         ).run(source_id)
         assert refreshed.status is SyncStatus.SUCCEEDED
         image = db.session.scalar(select(MediaImage))

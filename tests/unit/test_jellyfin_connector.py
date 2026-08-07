@@ -128,6 +128,7 @@ def test_music_and_episode_mapping_with_fallbacks() -> None:
         "shows",
     )
     assert episode.show_title == "Show"
+    assert episode.originally_available_on is not None
     assert episode.originally_available_on.isoformat() == "2026-08-05"
     assert map_history_item({"Id": "m", "Type": "Movie", "Name": "M"}, "movies") is None
     assert map_libraries([None, {"CollectionType": "books"}]) == []

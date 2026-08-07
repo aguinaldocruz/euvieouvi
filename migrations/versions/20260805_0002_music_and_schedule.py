@@ -18,22 +18,43 @@ old_library_type = sa.Enum(
     "movie", "show", name="librarymediatype", native_enum=False, create_constraint=True
 )
 new_library_type = sa.Enum(
-    "movie", "show", "artist", name="librarymediatype", native_enum=False,
+    "movie",
+    "show",
+    "artist",
+    name="librarymediatype",
+    native_enum=False,
     create_constraint=True,
 )
 old_media_kind = sa.Enum(
-    "movie", "show", "season", "episode", name="mediakind", native_enum=False,
+    "movie",
+    "show",
+    "season",
+    "episode",
+    name="mediakind",
+    native_enum=False,
     create_constraint=True,
 )
 new_media_kind = sa.Enum(
-    "movie", "show", "season", "episode", "artist", "album", "track",
-    name="mediakind", native_enum=False, create_constraint=True,
+    "movie",
+    "show",
+    "season",
+    "episode",
+    "artist",
+    "album",
+    "track",
+    name="mediakind",
+    native_enum=False,
+    create_constraint=True,
 )
 old_sync_trigger = sa.Enum(
     "manual", "api", name="synctrigger", native_enum=False, create_constraint=True
 )
 new_sync_trigger = sa.Enum(
-    "manual", "api", "scheduled", name="synctrigger", native_enum=False,
+    "manual",
+    "api",
+    "scheduled",
+    name="synctrigger",
+    native_enum=False,
     create_constraint=True,
 )
 

@@ -3,6 +3,7 @@ services:
     build:
       context: .
     image: euvieouvi:2.0.0-dev
+    container_name: euvieouvi
     init: true
     restart: unless-stopped
     environment:

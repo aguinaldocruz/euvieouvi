@@ -8,9 +8,7 @@ from flask import Flask
 from euvieouvi.enrichment import runtime
 
 
-def test_enrichment_executor_allows_only_one_active_run(
-    app: Flask, monkeypatch: object
-) -> None:
+def test_enrichment_executor_allows_only_one_active_run(app: Flask, monkeypatch: object) -> None:
     started = Event()
     release = Event()
 

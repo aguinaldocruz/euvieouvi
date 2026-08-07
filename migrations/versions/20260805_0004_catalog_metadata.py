@@ -51,9 +51,7 @@ def upgrade() -> None:
         ),
         sa.UniqueConstraint("media_item_id", "genre_id", name="uq_media_genres_identity"),
     )
-    op.create_index(
-        "ix_media_genres_genre_media", "media_genres", ["genre_id", "media_item_id"]
-    )
+    op.create_index("ix_media_genres_genre_media", "media_genres", ["genre_id", "media_item_id"])
 
 
 def downgrade() -> None:

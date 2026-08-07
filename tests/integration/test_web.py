@@ -74,6 +74,10 @@ class WebConnector:
         del library, checkpoint
         return Page((), page.start, 0)
 
+    def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]:
+        del source_path, width, height
+        return b"", "image/jpeg"
+
 
 def csrf(client: object, path: str = "/") -> str:
     response = client.get(path)  # type: ignore[attr-defined]
@@ -857,7 +861,7 @@ def test_webhooks_accept_only_completed_events_and_deduplicate(app: Flask) -> No
         },
     )
     assert plex.status_code == 204
-    jellyfin = client.post(
+    jellyfin_resp = client.post(
         "/webhooks/jellyfin/jf-secret",
         json={
             "NotificationType": "PlaybackStop",
@@ -869,7 +873,7 @@ def test_webhooks_accept_only_completed_events_and_deduplicate(app: Flask) -> No
             "NotificationId": "notification-1",
         },
     )
-    assert jellyfin.status_code == 204
+    assert jellyfin_resp.status_code == 204
     assert client.post("/webhooks/plex/wrong", data={}).status_code == 404
     with app.app_context():
         assert db.session.query(WatchEvent).count() == original_count + 2

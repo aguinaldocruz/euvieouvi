@@ -49,9 +49,7 @@ def test_due_schedule_queues_once_per_local_date(app: Flask, monkeypatch: object
         assert db.session.get(Setting, "sync.schedule.last_date").value == "2026-08-05"  # type: ignore[union-attr]
 
 
-def test_schedule_disabled_early_or_invalid_is_not_started(
-    app: Flask, monkeypatch: object
-) -> None:
+def test_schedule_disabled_early_or_invalid_is_not_started(app: Flask, monkeypatch: object) -> None:
     with app.app_context():
         _seed_schedule(enabled=False)
         monkeypatch.setattr(  # type: ignore[attr-defined]

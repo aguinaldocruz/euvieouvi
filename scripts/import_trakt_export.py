@@ -708,9 +708,7 @@ def _validate_database(connection: sqlite3.Connection) -> None:
     if revision is None or str(revision[0]) not in SUPPORTED_DATABASE_REVISIONS:
         supported = ", ".join(sorted(SUPPORTED_DATABASE_REVISIONS))
         current = str(revision[0]) if revision is not None else "ausente"
-        raise ImportFailure(
-            f"Revisão do banco incompatível: {current}; esperada: {supported}."
-        )
+        raise ImportFailure(f"Revisão do banco incompatível: {current}; esperada: {supported}.")
 
 
 def _select_source(connection: sqlite3.Connection, requested: int | None) -> int:

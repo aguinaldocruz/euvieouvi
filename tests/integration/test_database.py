@@ -47,9 +47,7 @@ def test_initial_migration_creates_expected_schema(app: Flask) -> None:
 
 def test_history_indexes_support_large_playback_collections(app: Flask) -> None:
     with app.app_context():
-        indexes = {
-            index["name"] for index in inspect(db.engine).get_indexes("watch_events")
-        }
+        indexes = {index["name"] for index in inspect(db.engine).get_indexes("watch_events")}
 
     assert {
         "ix_watch_events_completed_id",

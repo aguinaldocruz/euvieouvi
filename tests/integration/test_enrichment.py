@@ -84,9 +84,7 @@ def test_enrichment_only_fills_missing_fields_and_is_idempotent(
         assert image is not None and image.provider == "tmdb" and image.source_id is None
 
 
-def test_musicbrainz_enrichment_and_failure_are_audited(
-    app: Flask, monkeypatch: object
-) -> None:
+def test_musicbrainz_enrichment_and_failure_are_audited(app: Flask, monkeypatch: object) -> None:
     monkeypatch.setattr(  # type: ignore[attr-defined]
         service, "MusicBrainzClient", FakeMusicBrainz
     )

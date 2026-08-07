@@ -69,9 +69,7 @@ def test_musicbrainz_exact_lookup_respects_one_request_per_second() -> None:
             request=request,
         )
 
-    http = httpx.Client(
-        base_url="https://musicbrainz.org", transport=httpx.MockTransport(handler)
-    )
+    http = httpx.Client(base_url="https://musicbrainz.org", transport=httpx.MockTransport(handler))
     client = MusicBrainzClient("euvieouvi/test", client=http, sleep=delays.append)
     value = client.lookup_recording(MBID)
     assert value.genres == ("Pop", "Rock")

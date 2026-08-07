@@ -15,12 +15,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.create_index(
-        "ix_watch_events_completed_id", "watch_events", ["completed", "id"]
-    )
-    op.create_index(
-        "ix_watch_events_watched_id", "watch_events", ["watched_at", "id"]
-    )
+    op.create_index("ix_watch_events_completed_id", "watch_events", ["completed", "id"])
+    op.create_index("ix_watch_events_watched_id", "watch_events", ["watched_at", "id"])
 
 
 def downgrade() -> None:
