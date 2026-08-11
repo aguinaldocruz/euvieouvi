@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from importlib.metadata import version
 
 from flask import Flask
-from sqlalchemy import select
+from sqlalchemy import and_, case, or_, select
 
 from euvieouvi.database.enums import MediaKind
 from euvieouvi.database.models import (
@@ -47,13 +47,51 @@ def enrich_catalog(
     try:
         # Fetch only IDs to avoid DetachedInstanceError after commit
         # (holding ORM objects across commit expires them)
+        enabled_candidates = []
+        if tmdb is not None:
+            enabled_candidates.append(
+                and_(
+                    MediaIdentifier.provider == "tmdb",
+                    MediaItem.kind.in_([MediaKind.MOVIE, MediaKind.SHOW]),
+                )
+            )
+        if musicbrainz is not None:
+            enabled_candidates.append(
+                and_(
+                    MediaIdentifier.provider == "mbid",
+                    MediaItem.kind == MediaKind.TRACK,
+                )
+            )
+        if not enabled_candidates:
+            _save_summary(counters)
+            db.session.commit()
+            return counters
+
         candidate_ids: list[int] = list(
             db.session.scalars(
                 select(MediaIdentifier.id)
                 .join(MediaItem, MediaItem.id == MediaIdentifier.media_item_id)
-                .where(MediaIdentifier.provider.in_(["tmdb", "mbid"]))
-                .order_by(MediaItem.id, MediaIdentifier.id)
-                .limit(limit * 3)
+                .outerjoin(
+                    EnrichmentRecord,
+                    and_(
+                        EnrichmentRecord.media_item_id == MediaIdentifier.media_item_id,
+                        EnrichmentRecord.provider == MediaIdentifier.provider,
+                    ),
+                )
+                .where(
+                    or_(*enabled_candidates),
+                    or_(
+                        EnrichmentRecord.id.is_(None),
+                        EnrichmentRecord.status != "succeeded",
+                    ),
+                )
+                .order_by(
+                    case((EnrichmentRecord.id.is_(None), 0), else_=1),
+                    EnrichmentRecord.checked_at,
+                    MediaItem.id,
+                    MediaIdentifier.id,
+                )
+                .limit(limit)
             ).all()
         )
         for identifier_id in candidate_ids:

@@ -22,7 +22,7 @@ from flask import (
     send_file,
     url_for,
 )
-from sqlalchemy import case, delete, exists, func, or_, select
+from sqlalchemy import and_, case, delete, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
@@ -1283,43 +1283,43 @@ def catalog() -> Any:
         SourceMediaRef.media_item_id == MediaItem.id,
         SourceMediaRef.available.is_(True),
     )
-    completion_count, last_completed, completed_known = _completion_expressions(MediaItem.id)
-    current_identifier = aliased(MediaIdentifier)
-    matching_identifier = aliased(MediaIdentifier)
-    matching_item = aliased(MediaItem)
-    matching_ref = aliased(SourceMediaRef)
-    matching_source = aliased(Source)
-
-    def available_on(connector_type: ConnectorType) -> Any:
-        direct = exists().where(
-            SourceMediaRef.media_item_id == MediaItem.id,
-            SourceMediaRef.available.is_(True),
-            SourceMediaRef.source_id == Source.id,
-            Source.connector_type == connector_type,
+    event_stats = (
+        select(
+            WatchEvent.media_item_id.label("media_item_id"),
+            func.count(WatchEvent.id).label("event_count"),
+            func.min(WatchEvent.watched_at).label("event_first"),
+            func.max(WatchEvent.watched_at).label("event_last"),
         )
-        shared_identity = exists().where(
-            matching_ref.media_item_id == matching_identifier.media_item_id,
-            matching_identifier.media_item_id == matching_item.id,
-            matching_item.kind == MediaItem.kind,
-            matching_ref.available.is_(True),
-            matching_ref.source_id == matching_source.id,
-            matching_source.connector_type == connector_type,
-            exists().where(
-                current_identifier.media_item_id == MediaItem.id,
-                current_identifier.provider == matching_identifier.provider,
-                current_identifier.external_id == matching_identifier.external_id,
-            ),
+        .where(WatchEvent.completed.is_(True))
+        .group_by(WatchEvent.media_item_id)
+        .subquery()
+    )
+    state_stats = (
+        select(
+            WatchState.media_item_id.label("media_item_id"),
+            func.max(WatchState.view_count).label("state_count"),
+            func.max(WatchState.last_watched_at).label("state_last"),
         )
-        return or_(direct, shared_identity)
-
-    plex_available = available_on(ConnectorType.PLEX)
-    jellyfin_available = available_on(ConnectorType.JELLYFIN)
+        .where(WatchState.completed.is_(True))
+        .group_by(WatchState.media_item_id)
+        .subquery()
+    )
+    event_count = func.coalesce(event_stats.c.event_count, 0)
+    state_count = func.coalesce(state_stats.c.state_count, 0)
+    completion_count = case((event_count >= state_count, event_count), else_=state_count)
+    last_completed = case(
+        (event_stats.c.event_last.is_(None), state_stats.c.state_last),
+        (state_stats.c.state_last.is_(None), event_stats.c.event_last),
+        (event_stats.c.event_last >= state_stats.c.state_last, event_stats.c.event_last),
+        else_=state_stats.c.state_last,
+    )
+    completed_known = completion_count > 0
     statement = select(
         MediaItem,
         completion_count.label("completion_count"),
         last_completed.label("last_completed"),
-        plex_available.label("plex_available"),
-        jellyfin_available.label("jellyfin_available"),
+    ).outerjoin(event_stats, event_stats.c.media_item_id == MediaItem.id).outerjoin(
+        state_stats, state_stats.c.media_item_id == MediaItem.id
     )
     if kind in {item.value for item in allowed_kinds}:
         statement = statement.where(MediaItem.kind == MediaKind(kind))
@@ -1364,12 +1364,7 @@ def catalog() -> Any:
         "original_title": func.coalesce(MediaItem.original_title, MediaItem.title),
         "year": MediaItem.year,
         "last_played": last_completed,
-        "first_played": select(func.min(WatchEvent.watched_at))
-        .where(
-            WatchEvent.media_item_id == MediaItem.id,
-            WatchEvent.completed.is_(True),
-        )
-        .scalar_subquery(),
+        "first_played": event_stats.c.event_first,
         "play_count": completion_count,
         "added": func.coalesce(MediaItem.source_added_at, MediaItem.created_at),
         "updated": MediaItem.updated_at,
@@ -1388,6 +1383,50 @@ def catalog() -> Any:
         .limit(80)
         .offset((page - 1) * 40)
     ).all()
+    candidate_ids = [row[0].id for row in rows]
+    availability_by_item: dict[int, set[ConnectorType]] = {
+        media_id: set() for media_id in candidate_ids
+    }
+    if candidate_ids:
+        direct_rows = db.session.execute(
+            select(SourceMediaRef.media_item_id, Source.connector_type)
+            .join(Source, Source.id == SourceMediaRef.source_id)
+            .where(
+                SourceMediaRef.media_item_id.in_(candidate_ids),
+                SourceMediaRef.available.is_(True),
+            )
+            .distinct()
+        )
+        for media_id, connector_type in direct_rows:
+            availability_by_item[int(media_id)].add(connector_type)
+
+        current_identifier = aliased(MediaIdentifier)
+        matching_identifier = aliased(MediaIdentifier)
+        matching_item = aliased(MediaItem)
+        current_item = aliased(MediaItem)
+        shared_rows = db.session.execute(
+            select(current_identifier.media_item_id, Source.connector_type)
+            .join(current_item, current_item.id == current_identifier.media_item_id)
+            .join(
+                matching_identifier,
+                and_(
+                    matching_identifier.provider == current_identifier.provider,
+                    matching_identifier.external_id == current_identifier.external_id,
+                ),
+            )
+            .join(matching_item, matching_item.id == matching_identifier.media_item_id)
+            .join(SourceMediaRef, SourceMediaRef.media_item_id == matching_item.id)
+            .join(Source, Source.id == SourceMediaRef.source_id)
+            .where(
+                current_identifier.media_item_id.in_(candidate_ids),
+                matching_item.kind == current_item.kind,
+                SourceMediaRef.available.is_(True),
+            )
+            .distinct()
+        )
+        for media_id, connector_type in shared_rows:
+            availability_by_item[int(media_id)].add(connector_type)
+
     # Deduplicate by title/year/kind merging Plex/Jellyfin badges.
     # When same media exists in both sources as separate rows (e.g., Plex
     # without identifiers), show single card with both badges.
@@ -1396,15 +1435,23 @@ def catalog() -> Any:
     ordered_keys: list[tuple[str, int | None, str]] = []
     for row in rows:
         item = row[0]
+        availability = availability_by_item[item.id]
+        display_row = (
+            item,
+            row[1],
+            row[2],
+            ConnectorType.PLEX in availability,
+            ConnectorType.JELLYFIN in availability,
+        )
         key = (item.title.strip().casefold(), item.year, item.kind.value)
         if key not in deduped:
-            deduped[key] = row
+            deduped[key] = display_row
             ordered_keys.append(key)
         else:
             prev = deduped[key]
-            merged_plex = bool(prev[3] or row[3])
-            merged_jelly = bool(prev[4] or row[4])
-            keep = prev if prev[0].id < item.id else row
+            merged_plex = bool(prev[3] or display_row[3])
+            merged_jelly = bool(prev[4] or display_row[4])
+            keep = prev if prev[0].id < item.id else display_row
             deduped[key] = (keep[0], keep[1], keep[2], merged_plex, merged_jelly)
     merged_rows = [deduped[k] for k in ordered_keys]
     has_more = len(merged_rows) > 40

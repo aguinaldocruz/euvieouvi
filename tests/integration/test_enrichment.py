@@ -110,3 +110,48 @@ def test_musicbrainz_enrichment_and_failure_are_audited(app: Flask, monkeypatch:
         records = db.session.scalars(select(EnrichmentRecord).order_by(EnrichmentRecord.id)).all()
         assert [record.status for record in records] == ["succeeded", "failed"]
         assert records[1].message == "fixture failure"
+
+
+def test_succeeded_records_do_not_starve_later_enrichment_candidates(
+    app: Flask, monkeypatch: object
+) -> None:
+    monkeypatch.setattr(service, "TmdbClient", FakeTmdb)  # type: ignore[attr-defined]
+    with app.app_context():
+        db.session.add_all(
+            [
+                Setting(key="metadata.tmdb.enabled", value="true"),
+                Setting(key="metadata.tmdb.token", value="tmdb-token"),
+                Setting(key="metadata.language", value="pt-BR"),
+            ]
+        )
+        for index in range(3):
+            item = MediaItem(kind=MediaKind.MOVIE, title=f"Already enriched {index}")
+            db.session.add(item)
+            db.session.flush()
+            db.session.add_all(
+                [
+                    MediaIdentifier(
+                        media_item_id=item.id, provider="tmdb", external_id=str(index)
+                    ),
+                    EnrichmentRecord(
+                        media_item_id=item.id,
+                        provider="tmdb",
+                        status="succeeded",
+                        attempts=1,
+                    ),
+                ]
+            )
+        target = MediaItem(kind=MediaKind.MOVIE, title="Arrival")
+        db.session.add(target)
+        db.session.flush()
+        db.session.add(
+            MediaIdentifier(media_item_id=target.id, provider="tmdb", external_id="329865")
+        )
+        db.session.commit()
+
+        result = service.enrich_catalog(app, limit=1)
+
+        assert result == {"processed": 1, "updated": 1, "failed": 0}
+        assert db.session.scalar(
+            select(MediaImage).where(MediaImage.media_item_id == target.id)
+        ) is not None
