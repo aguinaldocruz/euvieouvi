@@ -107,6 +107,24 @@ def test_daily_schedule_settings_are_persisted(app: Flask) -> None:
         assert scheduled_time is not None and scheduled_time.value == "04:30"
 
 
+def test_watched_state_propagation_is_disabled_by_default_and_configurable(app: Flask) -> None:
+    client = app.test_client()
+    page = client.get("/settings/sync").get_data(as_text=True)
+    assert 'id="watch_sync_enabled"' in page
+    assert 'id="watch_sync_enabled" name="watch_sync_enabled" type="checkbox" checked' not in page
+
+    token = csrf(client, "/settings/sync")
+    response = client.post(
+        "/settings/sync",
+        data={"csrf_token": token, "mode": "shared", "watch_sync_enabled": "on"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    with app.app_context():
+        setting = db.session.get(Setting, "watch_sync.enabled")
+        assert setting is not None and setting.value == "true"
+
+
 def test_appearance_setting_is_persisted_and_used_as_page_default(app: Flask) -> None:
     client = app.test_client()
     token = csrf(client, "/settings/appearance")
@@ -443,6 +461,13 @@ def test_dashboard_history_media_and_sync_detail(app: Flask) -> None:
         and "reprodução 2" in detail
         and "Principal · Filmes" in detail
     )
+    with app.app_context():
+        detail_row = db.session.query(SyncRunLibrary).filter_by(sync_run_id=run_id).one()
+        detail_row.status = SyncStatus.RUNNING
+        detail_row.finished_at = None
+        detail_row.items_scanned = 50
+        detail_row.items_total = 200
+        db.session.commit()
     sync = client.get(f"/sync/{run_id}").get_data(as_text=True)
     assert (
         "Sincronização #" in sync
@@ -450,6 +475,7 @@ def test_dashboard_history_media_and_sync_detail(app: Flask) -> None:
         and "Bibliotecas" in sync
         and "Filmes" in sync
         and "Mensagem segura" in sync
+        and "(25%)" in sync
     )
     sync_list = client.get("/sync").get_data(as_text=True)
     assert "· Plex" in sync_list
@@ -483,6 +509,7 @@ def test_partial_event_is_hidden_from_completion_views(app: Flask) -> None:
 def test_sync_start_cancel_and_polling_fragment(
     app: Flask, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    watch_calls: list[int] = []
     with app.app_context():
         source_id, _, _, finished_id = seed_web()
 
@@ -496,6 +523,14 @@ def test_sync_start_cancel_and_polling_fragment(
 
         def cancel(self, run_id: int) -> bool:
             return True
+
+        def submit_watch_sync(self, run_id: int) -> bool:
+            watch_calls.append(run_id)
+            return True
+
+    with app.app_context():
+        db.session.add(Setting(key="watch_sync.enabled", value="true"))
+        db.session.commit()
 
     executor = Executor()
     monkeypatch.setattr("euvieouvi.web.routes.get_executor", lambda app: executor)
@@ -515,6 +550,15 @@ def test_sync_start_cancel_and_polling_fragment(
         ).status_code
         == 200
     )
+    token = csrf(client, f"/sync/{finished_id}")
+    response = client.post(
+        f"/sync/{finished_id}/watch-sync",
+        data={"csrf_token": token},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert watch_calls == [finished_id]
+    assert "Propagação de conclusões iniciada" in response.get_data(as_text=True)
 
 
 def test_formatters(app: Flask) -> None:
@@ -557,29 +601,41 @@ def test_catalog_badges_follow_shared_provider_identity_across_localized_titles(
         plex_movie = db.session.get(MediaItem, media_id)
         assert plex_movie is not None
         jellyfin = Source(
-            connector_type=ConnectorType.JELLYFIN, name="Jellyfin",
-            base_url="http://jellyfin", secret="{}", enabled=True,
+            connector_type=ConnectorType.JELLYFIN,
+            name="Jellyfin",
+            base_url="http://jellyfin",
+            secret="{}",
+            enabled=True,
         )
         db.session.add(jellyfin)
         db.session.flush()
         library = Library(
-            source_id=jellyfin.id, external_id="jf-movies", name="Filmes Jellyfin",
-            media_type=LibraryMediaType.MOVIE, enabled=True, available=True,
-            discovered_at=NOW, last_seen_at=NOW,
+            source_id=jellyfin.id,
+            external_id="jf-movies",
+            name="Filmes Jellyfin",
+            media_type=LibraryMediaType.MOVIE,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
         )
-        localized = MediaItem(
-            kind=MediaKind.MOVIE, title="A Chegada", year=plex_movie.year
-        )
+        localized = MediaItem(kind=MediaKind.MOVIE, title="A Chegada", year=plex_movie.year)
         db.session.add_all([library, localized])
         db.session.flush()
-        db.session.add_all([
-            MediaIdentifier(media_item_id=plex_movie.id, provider="tmdb", external_id="329865"),
-            MediaIdentifier(media_item_id=localized.id, provider="tmdb", external_id="329865"),
-            SourceMediaRef(
-                source_id=jellyfin.id, library_id=library.id, media_item_id=localized.id,
-                external_id="jf-arrival", last_seen_at=NOW, available=True,
-            ),
-        ])
+        db.session.add_all(
+            [
+                MediaIdentifier(media_item_id=plex_movie.id, provider="tmdb", external_id="329865"),
+                MediaIdentifier(media_item_id=localized.id, provider="tmdb", external_id="329865"),
+                SourceMediaRef(
+                    source_id=jellyfin.id,
+                    library_id=library.id,
+                    media_item_id=localized.id,
+                    external_id="jf-arrival",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+            ]
+        )
         db.session.commit()
 
     text = app.test_client().get("/catalog?query=Arrival&kind=movie").get_data(as_text=True)
@@ -609,6 +665,7 @@ def test_auto_enrichment_remains_part_of_active_sync(
     with app.app_context():
         source_id, _, _, _ = seed_web()
         db.session.add(Setting(key="metadata.auto_after_sync", value="true"))
+        db.session.add(Setting(key="watch_sync.enabled", value="true"))
         db.session.commit()
 
         def enrich(
@@ -640,6 +697,7 @@ def test_auto_enrichment_remains_part_of_active_sync(
         assert run is not None
         assert run.finished_at is not None
         assert run.summary is not None and "enriquecimento concluídos" in run.summary
+        assert run.watch_sync_summary is not None
         fragment = app.test_client().get(f"/sync/{run_id}/fragment")
         assert fragment.status_code == 200
         assert "Etapa atual" in fragment.get_data(as_text=True)
@@ -948,6 +1006,8 @@ def test_webhooks_accept_only_completed_events_and_deduplicate(app: Flask) -> No
         } == {"webhook"}
         assert db.session.get(Source, plex_source_id) is not None
         assert db.session.get(Library, plex_library_id) is not None
+        pending = db.session.get(Setting, "watch_sync.pending")
+        assert pending is not None and pending.value == "true"
 
 
 def test_webhook_settings_generate_secret_urls(app: Flask) -> None:
@@ -969,9 +1029,12 @@ def test_webhook_page_shows_current_activity_and_respects_retention(app: Flask) 
         "event": "media.play",
         "Metadata": {"ratingKey": "m1", "librarySectionID": "1", "title": "Arrival"},
     }
-    assert client.post(
-        "/webhooks/plex/plex-secret", data={"payload": json.dumps(play_payload)}
-    ).status_code == 204
+    assert (
+        client.post(
+            "/webhooks/plex/plex-secret", data={"payload": json.dumps(play_payload)}
+        ).status_code
+        == 204
+    )
     page = client.get("/settings/webhooks").get_data(as_text=True)
     assert "Em reprodução no Plex" in page and "Arrival" in page
     assert 'hx-trigger="every 2s"' in page
@@ -979,18 +1042,24 @@ def test_webhook_page_shows_current_activity_and_respects_retention(app: Flask) 
     assert fragment.status_code == 200 and "Arrival" in fragment.get_data(as_text=True)
 
     token = csrf(client, "/settings/webhooks")
-    assert client.post(
-        "/settings/webhooks", data={"csrf_token": token, "history_limit": "1"}
-    ).status_code == 302
+    assert (
+        client.post(
+            "/settings/webhooks", data={"csrf_token": token, "history_limit": "1"}
+        ).status_code
+        == 302
+    )
     for event_id in ("one", "two"):
         payload = {
             "event": "media.scrobble",
             "event_id": event_id,
             "Metadata": {"ratingKey": "m1", "librarySectionID": "1", "title": event_id},
         }
-        assert client.post(
-            "/webhooks/plex/plex-secret", data={"payload": json.dumps(payload)}
-        ).status_code == 204
+        assert (
+            client.post(
+                "/webhooks/plex/plex-secret", data={"payload": json.dumps(payload)}
+            ).status_code
+            == 204
+        )
     with app.app_context():
         assert db.session.query(WebhookEvent).filter_by(completed=True).count() == 1
 

@@ -84,8 +84,8 @@ class JellyfinConnector:
             page.start,
             len(mapped),
             total_size=raw["total"],
-            next_start=page.start + len(mapped)
-            if page.start + len(mapped) < raw["total"]
+            next_start=page.start + len(raw["items"])
+            if page.start + len(raw["items"]) < raw["total"]
             else None,
         )
 
@@ -112,6 +112,11 @@ class JellyfinConnector:
             if page.start + len(raw["items"]) < raw["total"]
             else None,
         )
+
+    def mark_watched(self, external_id: str) -> None:
+        if not external_id.strip():
+            raise ValueError("Jellyfin media id must not be empty")
+        self._client.post_empty(f"/Users/{self._user_id}/PlayedItems/{external_id}")
 
     def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]:
         return self._client.get_image(source_path, width=width, height=height)
@@ -156,7 +161,7 @@ class JellyfinConnector:
         for value in items:
             try:
                 yield map_item(value, library_id)
-            except ConnectorResponseError:
+            except (ConnectorResponseError, ValueError):
                 continue
 
     @staticmethod
@@ -166,7 +171,7 @@ class JellyfinConnector:
         for value in items:
             try:
                 event = map_history_item(value, library_id)
-            except ConnectorResponseError:
+            except (ConnectorResponseError, ValueError):
                 continue
             if event is not None:
                 yield event

@@ -111,6 +111,16 @@ def sync_run(value: SyncRun) -> dict[str, Any]:
         "items_failed": value.items_failed,
         "events_inserted": value.events_inserted,
         "summary": value.summary,
+        "watch_sync_status": (
+            value.watch_sync_status.value if value.watch_sync_status is not None else None
+        ),
+        "watch_sync_started_at": timestamp(value.watch_sync_started_at),
+        "watch_sync_finished_at": timestamp(value.watch_sync_finished_at),
+        "watch_sync_scanned": value.watch_sync_scanned,
+        "watch_sync_updated": value.watch_sync_updated,
+        "watch_sync_skipped": value.watch_sync_skipped,
+        "watch_sync_failed": value.watch_sync_failed,
+        "watch_sync_summary": value.watch_sync_summary,
         "created_at": timestamp(value.created_at),
         "updated_at": timestamp(value.updated_at),
     }

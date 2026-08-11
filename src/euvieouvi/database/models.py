@@ -343,6 +343,11 @@ class SyncRun(TimestampMixin, Base):
             name="ck_sync_runs_counters",
         ),
         CheckConstraint(
+            "watch_sync_scanned >= 0 AND watch_sync_updated >= 0 AND "
+            "watch_sync_skipped >= 0 AND watch_sync_failed >= 0",
+            name="ck_sync_runs_watch_sync_counters",
+        ),
+        CheckConstraint(
             "status != 'succeeded' OR finished_at IS NOT NULL",
             name="ck_sync_runs_succeeded_finished",
         ),
@@ -381,6 +386,21 @@ class SyncRun(TimestampMixin, Base):
     items_failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     events_inserted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     summary: Mapped[str | None] = mapped_column(Text)
+    watch_sync_status: Mapped[SyncStatus | None] = mapped_column(
+        Enum(
+            SyncStatus,
+            native_enum=False,
+            create_constraint=False,
+            values_callable=lambda enum: [item.value for item in enum],
+        )
+    )
+    watch_sync_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    watch_sync_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    watch_sync_scanned: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    watch_sync_updated: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    watch_sync_skipped: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    watch_sync_failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    watch_sync_summary: Mapped[str | None] = mapped_column(Text)
 
 
 class SyncRunLibrary(Base):
@@ -389,6 +409,10 @@ class SyncRunLibrary(Base):
         CheckConstraint(
             "items_read >= 0 AND items_inserted >= 0 AND items_updated >= 0 AND items_failed >= 0",
             name="ck_sync_run_libraries_counters",
+        ),
+        CheckConstraint(
+            "items_scanned >= 0 AND (items_total IS NULL OR items_total >= 0)",
+            name="ck_sync_run_libraries_progress",
         ),
         CheckConstraint(
             "status != 'succeeded' OR finished_at IS NOT NULL",
@@ -419,7 +443,15 @@ class SyncRunLibrary(Base):
     items_inserted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     items_updated: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     items_failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    items_scanned: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    items_total: Mapped[int | None] = mapped_column(Integer)
     message: Mapped[str | None] = mapped_column(Text)
+
+    @property
+    def progress_percent(self) -> int | None:
+        if self.items_total is None or self.items_total <= 0:
+            return None
+        return min(100, self.items_scanned * 100 // self.items_total)
 
 
 class SyncCheckpoint(Base):

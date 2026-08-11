@@ -597,17 +597,27 @@ def test_same_source_duplicate_episode_identifier_keeps_both_hierarchies(app: Fl
         movie_library.enabled = False
         shared = (ExternalIdentifier("tvdb", "360134"),)
         first = ExternalMediaItem(
-            external_id="special-sg1", library_external_id="shows",
-            kind=ExternalMediaKind.EPISODE, title="Sci-Fi Lowdown",
-            show_external_id="sg1", show_title="Stargate SG-1",
-            season_external_id="sg1-specials", season_number=0, episode_number=2,
+            external_id="special-sg1",
+            library_external_id="shows",
+            kind=ExternalMediaKind.EPISODE,
+            title="Sci-Fi Lowdown",
+            show_external_id="sg1",
+            show_title="Stargate SG-1",
+            season_external_id="sg1-specials",
+            season_number=0,
+            episode_number=2,
             identifiers=shared,
         )
         second = ExternalMediaItem(
-            external_id="special-atlantis", library_external_id="shows",
-            kind=ExternalMediaKind.EPISODE, title="Sci-Fi Lowdown",
-            show_external_id="atlantis", show_title="Stargate Atlantis",
-            season_external_id="atlantis-specials", season_number=0, episode_number=1,
+            external_id="special-atlantis",
+            library_external_id="shows",
+            kind=ExternalMediaKind.EPISODE,
+            title="Sci-Fi Lowdown",
+            show_external_id="atlantis",
+            show_title="Stargate Atlantis",
+            season_external_id="atlantis-specials",
+            season_number=0,
+            episode_number=1,
             identifiers=shared,
         )
         result = orchestrator(FixtureConnector({"shows": (first, second)})).run(source_id)
@@ -630,14 +640,19 @@ def test_provider_match_with_incompatible_episode_season_keeps_both(app: Flask) 
         db.session.add(historical_show)
         db.session.flush()
         historical_season = MediaItem(
-            kind=MediaKind.SEASON, title="Season 1", parent_id=historical_show.id,
+            kind=MediaKind.SEASON,
+            title="Season 1",
+            parent_id=historical_show.id,
             season_number=1,
         )
         db.session.add(historical_season)
         db.session.flush()
         historical_episode = MediaItem(
-            kind=MediaKind.EPISODE, title="Part 2", parent_id=historical_season.id,
-            season_number=1, episode_number=2,
+            kind=MediaKind.EPISODE,
+            title="Part 2",
+            parent_id=historical_season.id,
+            season_number=1,
+            episode_number=2,
         )
         db.session.add(historical_episode)
         db.session.flush()
@@ -648,10 +663,15 @@ def test_provider_match_with_incompatible_episode_season_keeps_both(app: Flask) 
         )
         db.session.commit()
         special = ExternalMediaItem(
-            external_id="jf-part-2", library_external_id="shows",
-            kind=ExternalMediaKind.EPISODE, title="The Original Miniseries (2)",
-            show_external_id="jf-v", show_title="V: The Original Miniseries",
-            season_external_id="jf-v-specials", season_number=0, episode_number=2,
+            external_id="jf-part-2",
+            library_external_id="shows",
+            kind=ExternalMediaKind.EPISODE,
+            title="The Original Miniseries (2)",
+            show_external_id="jf-v",
+            show_title="V: The Original Miniseries",
+            season_external_id="jf-v-specials",
+            season_number=0,
+            episode_number=2,
             identifiers=(ExternalIdentifier("tvdb", "190756"),),
         )
 
@@ -944,13 +964,24 @@ def test_startup_reconciliation_interrupts_run_and_snapshot(app: Flask) -> None:
             started_at=NOW,
         )
         db.session.add(detail)
+        watch_run = SyncRun(
+            source_id=source_id,
+            trigger=SyncTrigger.MANUAL,
+            status=SyncStatus.SUCCEEDED,
+            started_at=NOW,
+            finished_at=NOW,
+            watch_sync_status=SyncStatus.RUNNING,
+            watch_sync_started_at=NOW,
+        )
+        db.session.add(watch_run)
         db.session.commit()
 
-        assert reconcile_orphaned_runs() == 1
+        assert reconcile_orphaned_runs() == 2
 
         db.session.expire_all()
         assert db.session.get(SyncRun, run.id).status is SyncStatus.INTERRUPTED  # type: ignore[union-attr]
         assert db.session.get(SyncRunLibrary, detail.id).status is SyncStatus.INTERRUPTED  # type: ignore[union-attr]
+        assert db.session.get(SyncRun, watch_run.id).watch_sync_status is SyncStatus.INTERRUPTED  # type: ignore[union-attr]
 
 
 def test_discovery_preserves_selection_and_marks_absence_only_after_success(app: Flask) -> None:
@@ -1025,14 +1056,20 @@ def test_ambiguous_episode_identifier_keeps_source_specific_item(app: Flask) -> 
                 db.session.add_all(
                     [
                         SourceMediaRef(
-                            source_id=source_id, library_id=library_ids[1],
-                            media_item_id=show.id, external_id="jf-fairly-oddparents",
-                            last_seen_at=NOW, available=True,
+                            source_id=source_id,
+                            library_id=library_ids[1],
+                            media_item_id=show.id,
+                            external_id="jf-fairly-oddparents",
+                            last_seen_at=NOW,
+                            available=True,
                         ),
                         SourceMediaRef(
-                            source_id=source_id, library_id=library_ids[1],
-                            media_item_id=season.id, external_id="jf-specials",
-                            last_seen_at=NOW, available=True,
+                            source_id=source_id,
+                            library_id=library_ids[1],
+                            media_item_id=season.id,
+                            external_id="jf-specials",
+                            last_seen_at=NOW,
+                            available=True,
                         ),
                     ]
                 )
@@ -1069,12 +1106,20 @@ def test_ambiguous_episode_identifier_keeps_source_specific_item(app: Flask) -> 
         result = orchestrator(FixtureConnector({"shows": (jellyfin_item,)})).run(source_id)
 
         assert result.status is SyncStatus.SUCCEEDED
-        assert db.session.scalar(
-            select(func.count()).select_from(MediaItem).where(MediaItem.kind == MediaKind.EPISODE)
-        ) == 3
-        assert db.session.scalar(
-            select(SourceMediaRef).where(
-                SourceMediaRef.source_id == source_id,
-                SourceMediaRef.external_id == "jf-wishmas",
+        assert (
+            db.session.scalar(
+                select(func.count())
+                .select_from(MediaItem)
+                .where(MediaItem.kind == MediaKind.EPISODE)
             )
-        ) is not None
+            == 3
+        )
+        assert (
+            db.session.scalar(
+                select(SourceMediaRef).where(
+                    SourceMediaRef.source_id == source_id,
+                    SourceMediaRef.external_id == "jf-wishmas",
+                )
+            )
+            is not None
+        )

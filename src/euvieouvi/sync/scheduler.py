@@ -44,12 +44,21 @@ def _scheduler_loop(app: Flask, stop: threading.Event) -> None:
                 db.session.rollback()
                 app.logger.exception("scheduled synchronization check failed")
             try:
+                _run_watch_sync_if_pending(app)
+            except SQLAlchemyError:
+                db.session.rollback()
+                app.logger.exception("pending watched-state propagation check failed")
+            try:
                 _backup_if_due(app)
             except SQLAlchemyError:
                 db.session.rollback()
                 app.logger.exception("scheduled backup check failed")
             except Exception:
                 app.logger.exception("scheduled backup failed")
+
+
+def _run_watch_sync_if_pending(app: Flask) -> bool:
+    return get_executor(app).submit_pending_watch_sync()
 
 
 def _run_if_due(app: Flask, *, now: datetime | None = None) -> bool:

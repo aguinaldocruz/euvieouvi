@@ -356,6 +356,9 @@ def sync_runs_get(run_id: int) -> Response:
             "items_inserted": x.items_inserted,
             "items_updated": x.items_updated,
             "items_failed": x.items_failed,
+            "items_scanned": x.items_scanned,
+            "items_total": x.items_total,
+            "progress_percent": x.progress_percent,
             "message": x.message,
         }
         for x in details

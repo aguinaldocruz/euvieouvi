@@ -28,7 +28,7 @@ REQUIRED_TABLES = {
     "watch_events",
     "watch_states",
 }
-SUPPORTED_DATABASE_REVISIONS = {"20260811_0010"}
+SUPPORTED_DATABASE_REVISIONS = {"4ac542335f9b"}
 Progress = Callable[[str], None]
 
 
@@ -76,9 +76,10 @@ class HistoryEvent:
 @dataclass(slots=True)
 class MediaIndex:
     by_identifier: defaultdict[tuple[str, str, str], set[int]]
+    preferred_media_ids: set[int]
 
     @classmethod
-    def load(cls, connection: sqlite3.Connection) -> MediaIndex:
+    def load(cls, connection: sqlite3.Connection, *, source_id: int) -> MediaIndex:
         values: defaultdict[tuple[str, str, str], set[int]] = defaultdict(set)
         rows = connection.execute(
             """
@@ -89,7 +90,14 @@ class MediaIndex:
         )
         for row in rows:
             values[(str(row[0]), str(row[1]), str(row[2]))].add(int(row[3]))
-        return cls(values)
+        preferred = {
+            int(row[0])
+            for row in connection.execute(
+                "SELECT DISTINCT media_item_id FROM source_media_refs WHERE source_id = ?",
+                (source_id,),
+            )
+        }
+        return cls(values, preferred)
 
     def add(
         self,
@@ -109,6 +117,9 @@ class MediaIndex:
             return None
         best_score = max(scores.values())
         best = [media_id for media_id, score in scores.items() if score == best_score]
+        preferred = [media_id for media_id in best if media_id in self.preferred_media_ids]
+        if len(preferred) == 1:
+            return preferred[0]
         return best[0] if len(best) == 1 else -1
 
 
@@ -262,7 +273,7 @@ def import_archive(
     connection.execute("BEGIN IMMEDIATE")
     try:
         _emit(progress, "Fase 2/4 — indexando e associando mídias existentes")
-        media_index = MediaIndex.load(connection)
+        media_index = MediaIndex.load(connection, source_id=source_id)
         matched: dict[int, int] = {}
         ambiguous: set[int] = set()
 
@@ -350,6 +361,17 @@ def import_archive(
         for processed, media_id in enumerate(touched, start=1):
             _batch_progress(progress, "estados", processed, len(touched), progress_every)
             _refresh_watch_state(connection, media_id, source_id)
+
+        if touched:
+            now = _utc_now()
+            connection.execute(
+                """
+                INSERT INTO settings (key, value, updated_at)
+                VALUES ('watch_sync.pending', 'true', ?)
+                ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = excluded.updated_at
+                """,
+                (now,),
+            )
 
         if apply:
             connection.commit()

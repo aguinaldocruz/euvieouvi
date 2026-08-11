@@ -39,6 +39,16 @@ def make_connector(handler: httpx.MockTransport) -> PlexConnector:
     return PlexConnector(http_client)
 
 
+def test_mark_watched_uses_scrobble_endpoint() -> None:
+    def route(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/:/scrobble"
+        assert request.url.params["key"] == "101"
+        assert request.url.params["identifier"] == "com.plexapp.plugins.library"
+        return httpx.Response(200, content=b"", request=request)
+
+    make_connector(httpx.MockTransport(route)).mark_watched("101")
+
+
 def test_connection_and_library_discovery_map_neutral_values() -> None:
     def route(request: httpx.Request) -> httpx.Response:
         name = "connection.xml" if request.url.path == "/" else "libraries.xml"

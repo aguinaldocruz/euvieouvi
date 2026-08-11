@@ -62,5 +62,9 @@ def test_trakt_import_runs_against_current_schema(app: Flask, tmp_path: Path) ->
             "SELECT completed, origin FROM watch_events WHERE source_event_id = 'trakt:101'"
         ).fetchone()
         assert event is not None and tuple(event) == (1, "trakt_import")
+        pending = connection.execute(
+            "SELECT value FROM settings WHERE key = 'watch_sync.pending'"
+        ).fetchone()
+        assert pending is not None and pending[0] == "true"
     finally:
         connection.close()

@@ -49,6 +49,20 @@ def test_due_schedule_queues_once_per_local_date(app: Flask, monkeypatch: object
         assert db.session.get(Setting, "sync.schedule.last_date").value == "2026-08-05"  # type: ignore[union-attr]
 
 
+def test_pending_watch_propagation_delegates_to_executor(app: Flask, monkeypatch: object) -> None:
+    calls: list[bool] = []
+
+    class Executor:
+        def submit_pending_watch_sync(self) -> bool:
+            calls.append(True)
+            return True
+
+    with app.app_context():
+        monkeypatch.setattr(scheduler, "get_executor", lambda application: Executor())  # type: ignore[attr-defined]
+        assert scheduler._run_watch_sync_if_pending(app) is True
+        assert calls == [True]
+
+
 def test_schedule_disabled_early_or_invalid_is_not_started(app: Flask, monkeypatch: object) -> None:
     with app.app_context():
         _seed_schedule(enabled=False)

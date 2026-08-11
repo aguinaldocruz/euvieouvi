@@ -95,6 +95,16 @@ def test_connector_discovers_reads_history_and_images() -> None:
     connector.close()
 
 
+def test_mark_watched_posts_played_item_for_configured_user() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path.endswith("/Users/user-1/PlayedItems/movie-1")
+        return httpx.Response(204, request=request)
+
+    connector = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1")
+    connector.mark_watched("movie-1")
+
+
 def test_music_and_episode_mapping_with_fallbacks() -> None:
     track = map_item(
         {
@@ -136,6 +146,31 @@ def test_music_and_episode_mapping_with_fallbacks() -> None:
         map_item({"Id": "x", "Type": "BoxSet", "Name": "X"}, "lib")
     with pytest.raises(ConnectorResponseError):
         map_item({"Id": "x", "Type": "Movie", "Name": " "}, "lib")
+
+
+def test_media_pagination_advances_past_invalid_items() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "TotalRecordCount": 3,
+                "Items": [
+                    {"Id": "bad", "Type": "Episode", "Name": "Missing numbers"},
+                    {"Id": "movie-1", "Type": "Movie", "Name": "Arrival"},
+                ],
+            },
+            request=request,
+        )
+
+    connector = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1")
+    page = connector.get_media_page(
+        ExternalLibraryRef("lib-1", ExternalLibraryType.MOVIE),
+        ExternalMediaKind.MOVIE,
+        PageRequest(size=2),
+    )
+
+    assert [item.external_id for item in page.items] == ["movie-1"]
+    assert page.next_start == 2
 
 
 @pytest.mark.parametrize(

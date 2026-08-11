@@ -60,6 +60,23 @@ class JellyfinHttpClient:
             raise ConnectorResponseError("Jellyfin returned an unexpected JSON value.")
         return value
 
+    def post_empty(self, path: str) -> None:
+        if not path.startswith("/") or path.startswith("//"):
+            raise ConnectorConfigurationError("Jellyfin path must be server-local.")
+        url = urljoin(self.base_url, path.lstrip("/"))
+        try:
+            response = self._client.post(url, headers=self._headers, timeout=self._timeout)
+        except httpx.TimeoutException as error:
+            raise ConnectorTimeoutError("Jellyfin request timed out.") from error
+        except httpx.RequestError as error:
+            raise ConnectorConnectionError("Jellyfin request failed.") from error
+        if response.status_code in {401, 403}:
+            raise ConnectorAuthenticationError("Jellyfin rejected the API key.")
+        if response.status_code == 404:
+            raise ConnectorNotFoundError("Jellyfin resource was not found.")
+        if response.status_code >= 400:
+            raise ConnectorResponseError("Jellyfin returned an unsuccessful response.")
+
     def get_image(
         self,
         path: str,

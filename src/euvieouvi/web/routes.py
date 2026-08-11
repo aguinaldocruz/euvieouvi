@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import secrets
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -278,6 +279,7 @@ def settings_sync() -> Any:
         "sync.schedule.last_date",
         "sync.schedule.last_date.plex",
         "sync.schedule.last_date.jellyfin",
+        "watch_sync.enabled",
     )
     # Compat: legacy single enabled/time -> migrate view defaults
     legacy_enabled = values.get("sync.schedule.enabled", "false") == "true"
@@ -318,6 +320,7 @@ def settings_sync() -> Any:
                 mode = "shared"
             enabled_plex = request.form.get("enabled_plex") == "on"
             enabled_jellyfin = request.form.get("enabled_jellyfin") == "on"
+            watch_sync_enabled = request.form.get("watch_sync_enabled") == "on"
             time_shared = request.form.get("time_shared", "").strip() or legacy_time
             time_plex = request.form.get("time_plex", "").strip() or values.get(
                 "sync.schedule.time.plex", legacy_time
@@ -363,6 +366,7 @@ def settings_sync() -> Any:
                 _save_setting(
                     "sync.schedule.enabled.jellyfin", "true" if enabled_jellyfin else "false"
                 )
+                _save_setting("watch_sync.enabled", "true" if watch_sync_enabled else "false")
                 # keep legacy keys for compat
                 _save_setting(
                     "sync.schedule.enabled",
@@ -381,6 +385,9 @@ def settings_sync() -> Any:
                     if parsed_shared is not None:
                         _save_setting("sync.schedule.time", parsed_shared.strftime("%H:%M"))
                 db.session.commit()
+                if watch_sync_enabled:
+                    with contextlib.suppress(Exception):
+                        get_executor(current_app).submit_pending_watch_sync()
                 flash("Agendamento diário atualizado.", "success")
                 return redirect(url_for("web.settings_sync"))
     # GET defaults
@@ -403,6 +410,7 @@ def settings_sync() -> Any:
         mode=mode_val,
         enabled_plex=enabled_plex_val,
         enabled_jellyfin=enabled_jelly_val,
+        watch_sync_enabled=values.get("watch_sync.enabled", "false") == "true",
         time_shared=values.get("sync.schedule.time", legacy_time),
         time_plex=values.get("sync.schedule.time.plex", values.get("sync.schedule.time", "03:00")),
         time_jellyfin=values.get(
@@ -799,7 +807,7 @@ def webhook_activity_fragment() -> Any:
     )
 
 
-def _webhook_activity(history_limit: int) -> tuple[list[Any], list[Any]]:
+def _webhook_activity(history_limit: int) -> tuple[Sequence[Any], Sequence[Any]]:
     recent_events = db.session.execute(
         select(WebhookEvent, Source)
         .join(Source, Source.id == WebhookEvent.source_id)
@@ -839,7 +847,11 @@ def plex_webhook(token: str) -> Any:
         return Response("Payload inválido.", 400)
     event_type = str(payload.get("event") or "").casefold()
     if event_type not in {
-        "media.play", "media.resume", "media.pause", "media.stop", "media.scrobble"
+        "media.play",
+        "media.resume",
+        "media.pause",
+        "media.stop",
+        "media.scrobble",
     }:
         return Response(status=204)
     metadata = payload.get("Metadata")
@@ -856,8 +868,14 @@ def plex_webhook(token: str) -> Any:
     active = event_type in {"media.play", "media.resume"}
     completed = event_type == "media.scrobble"
     _record_webhook_activity(
-        source, external_id=external_id, title=title, media_kind=metadata.get("type"),
-        event_type=event_type, occurred_at=watched_at, completed=completed, active=active,
+        source,
+        external_id=external_id,
+        title=title,
+        media_kind=metadata.get("type"),
+        event_type=event_type,
+        occurred_at=watched_at,
+        completed=completed,
+        active=active,
         event_key=str(payload.get("event_id") or "").strip() or None,
     )
     if not completed:
@@ -875,6 +893,7 @@ def plex_webhook(token: str) -> Any:
         duration_ms=_safe_integer(metadata.get("duration")),
     )
     db.session.commit()
+    _request_watch_propagation()
     return Response(status=204)
 
 
@@ -907,12 +926,15 @@ def jellyfin_webhook(token: str) -> Any:
         return Response("Identidade ou data ausente.", 400)
     completed = notification_type == "playbackstop" and _truthy(payload.get("PlayedToCompletion"))
     _record_webhook_activity(
-        source, external_id=external_id,
+        source,
+        external_id=external_id,
         title=str(
             payload.get("Name") or payload.get("ItemName") or raw_item.get("Name") or external_id
         ),
         media_kind=str(payload.get("ItemType") or raw_item.get("Type") or "") or None,
-        event_type=notification_type, occurred_at=watched_at, completed=completed,
+        event_type=notification_type,
+        occurred_at=watched_at,
+        completed=completed,
         active=notification_type == "playbackstart",
         event_key=str(payload.get("NotificationId") or "").strip() or None,
     )
@@ -944,6 +966,7 @@ def jellyfin_webhook(token: str) -> Any:
         with contextlib.suppress(Exception):
             _queue_source_sync(source.id)
         db.session.commit()
+        _request_watch_propagation()
         return Response(status=204)
     library = db.session.get(Library, reference.library_id)
     if library is None:
@@ -957,6 +980,7 @@ def jellyfin_webhook(token: str) -> Any:
         duration_ms=_ticks_to_ms(payload.get("RunTimeTicks")),
     )
     db.session.commit()
+    _request_watch_propagation()
     return Response(status=204)
 
 
@@ -1119,6 +1143,8 @@ def _sync_detail_context(run_id: int) -> dict[str, Any] | None:
         "source": db.session.get(Source, run.source_id),
         "libraries": libraries,
         "errors": errors,
+        "watch_sync_enabled": _settings("watch_sync.enabled").get("watch_sync.enabled", "false")
+        == "true",
     }
 
 
@@ -1132,6 +1158,21 @@ def sync_cancel(run_id: int) -> Any:
     else:
         get_executor(current_app).cancel(run_id)
         flash("Cancelamento solicitado. Os dados já confirmados serão preservados.", "warning")
+    return redirect(url_for("web.sync_detail", run_id=run_id))
+
+
+@blueprint.post("/sync/<int:run_id>/watch-sync")
+def sync_watch_sync(run_id: int) -> Any:
+    run = db.session.get(SyncRun, run_id)
+    if run is None:
+        return Response("Sincronização não encontrada.", 404)
+    enabled = _settings("watch_sync.enabled").get("watch_sync.enabled", "false") == "true"
+    if not enabled:
+        flash("Ative a propagação Plex ↔ Jellyfin nas configurações de sincronização.", "warning")
+    elif get_executor(current_app).submit_watch_sync(run_id):
+        flash("Propagação de conclusões iniciada.", "success")
+    else:
+        flash("A propagação não pode ser iniciada para esta sincronização.", "warning")
     return redirect(url_for("web.sync_detail", run_id=run_id))
 
 
@@ -1751,6 +1792,13 @@ def _persist_webhook_event(
     return inserted
 
 
+def _request_watch_propagation() -> None:
+    _save_setting("watch_sync.pending", "true")
+    db.session.commit()
+    with contextlib.suppress(Exception):
+        get_executor(current_app).submit_pending_watch_sync()
+
+
 def _queue_source_sync(source_id: int) -> None:
     try:
         get_executor(current_app).submit(source_id)
@@ -1764,8 +1812,15 @@ def _webhook_history_limit(values: dict[str, str] | None = None) -> int:
 
 
 def _record_webhook_activity(
-    source: Source, *, external_id: str, title: str, media_kind: Any,
-    event_type: str, occurred_at: datetime, completed: bool, active: bool,
+    source: Source,
+    *,
+    external_id: str,
+    title: str,
+    media_kind: Any,
+    event_type: str,
+    occurred_at: datetime,
+    completed: bool,
+    active: bool,
     event_key: str | None,
 ) -> None:
     # Any terminal event closes prior playback rows for the same item.
@@ -1780,24 +1835,36 @@ def _record_webhook_activity(
         row.active = False
     if not active and not completed:
         return
-    db.session.add(WebhookEvent(
-        source_id=source.id, external_id=external_id, event_key=event_key,
-        title=title[:500], media_kind=str(media_kind)[:32] if media_kind else None,
-        event_type=event_type[:32], occurred_at=occurred_at,
-        completed=completed, active=active,
-    ))
+    db.session.add(
+        WebhookEvent(
+            source_id=source.id,
+            external_id=external_id,
+            event_key=event_key,
+            title=title[:500],
+            media_kind=str(media_kind)[:32] if media_kind else None,
+            event_type=event_type[:32],
+            occurred_at=occurred_at,
+            completed=completed,
+            active=active,
+        )
+    )
     if completed:
         db.session.flush()
         _prune_webhook_events(_webhook_history_limit())
 
 
 def _prune_webhook_events(limit: int) -> None:
-    retained = select(WebhookEvent.id).where(WebhookEvent.completed.is_(True)).order_by(
-        WebhookEvent.occurred_at.desc(), WebhookEvent.id.desc()
-    ).limit(limit)
-    db.session.execute(delete(WebhookEvent).where(
-        WebhookEvent.completed.is_(True), WebhookEvent.id.not_in(retained)
-    ))
+    retained = (
+        select(WebhookEvent.id)
+        .where(WebhookEvent.completed.is_(True))
+        .order_by(WebhookEvent.occurred_at.desc(), WebhookEvent.id.desc())
+        .limit(limit)
+    )
+    db.session.execute(
+        delete(WebhookEvent).where(
+            WebhookEvent.completed.is_(True), WebhookEvent.id.not_in(retained)
+        )
+    )
 
 
 def _safe_integer(value: Any) -> int | None:

@@ -238,6 +238,12 @@ class SyncOrchestrator:
                     source_id,
                     library_id,
                     media_page.items,
+                    items_scanned=(
+                        media_page.next_start
+                        or media_page.total_size
+                        or start + media_page.size
+                    ),
+                    items_total=media_page.total_size,
                     next_stage=next_stage,
                     next_start=next_start,
                 )
@@ -285,6 +291,8 @@ class SyncOrchestrator:
         library_id: int,
         items: tuple[ExternalMediaItem, ...],
         *,
+        items_scanned: int,
+        items_total: int | None,
         next_stage: str,
         next_start: int,
     ) -> None:
@@ -319,6 +327,8 @@ class SyncOrchestrator:
                     run.events_inserted += 1
                 if result.view_count_regression:
                     self._add_reconciliation_warning(work, run_id, library_id, item.external_id)
+            detail.items_scanned = items_scanned
+            detail.items_total = items_total
             run.heartbeat_at = self._clock()
             if failures == 0:
                 self._set_checkpoint(work, library_id, run_id, next_stage, next_start)

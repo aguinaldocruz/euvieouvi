@@ -54,6 +54,14 @@ class PlexConnector:
         self.last_unsupported_libraries = rejected
         return libraries
 
+    def mark_watched(self, external_id: str) -> None:
+        if not external_id.strip():
+            raise ConnectorConfigurationError("Plex media id must not be empty.")
+        self._client.get(
+            "/:/scrobble",
+            params={"key": external_id, "identifier": "com.plexapp.plugins.library"},
+        )
+
     def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]:
         """Fetch a bounded, Plex-resized image without exposing the server token."""
         if not source_path.startswith("/") or source_path.startswith("//"):
