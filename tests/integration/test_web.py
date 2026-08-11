@@ -106,6 +106,24 @@ def test_daily_schedule_settings_are_persisted(app: Flask) -> None:
         assert scheduled_time is not None and scheduled_time.value == "04:30"
 
 
+def test_appearance_setting_is_persisted_and_used_as_page_default(app: Flask) -> None:
+    client = app.test_client()
+    token = csrf(client, "/settings/appearance")
+    response = client.post(
+        "/settings/appearance",
+        data={"csrf_token": token, "theme": "dark"},
+        follow_redirects=True,
+    )
+    text = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "Preferência de aparência atualizada" in text
+    assert 'data-default-theme="dark"' in text
+    assert 'value="dark" checked' in text
+    with app.app_context():
+        setting = db.session.get(Setting, "ui.theme")
+        assert setting is not None and setting.value == "dark"
+
+
 def test_daily_schedule_rejects_invalid_time(app: Flask) -> None:
     client = app.test_client()
     token = csrf(client, "/settings/sync")
@@ -275,6 +293,7 @@ def test_first_access_navigation_and_local_assets(app: Flask) -> None:
     assert client.get("/setup").status_code == 302
     for path, title in (
         ("/settings/plex", "Configurações do Plex"),
+        ("/settings/appearance", "Aparência"),
         ("/libraries", "Bibliotecas"),
         ("/sync", "Sincronizações"),
         ("/history", "Histórico"),

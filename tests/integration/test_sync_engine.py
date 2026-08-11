@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -390,6 +391,37 @@ def test_music_sync_persists_artist_album_track_and_history(app: Flask) -> None:
         refs = db.session.scalars(select(SourceMediaRef)).all()
         assert all(reference.available for reference in refs)
         assert db.session.scalar(select(func.count()).select_from(MediaGenre)) == 3
+
+
+def test_music_sync_keeps_existing_album_parent_when_track_artist_varies(app: Flask) -> None:
+    with app.app_context():
+        source_id, _ = seed_music_source()
+        compilation_track = replace(
+            track("track-2"),
+            artist_external_id="artist-2",
+            artist_title="John Barry",
+            title="Bobsled Chase",
+        )
+        result = orchestrator(FixtureConnector({"music": (track(), compilation_track)})).run(
+            source_id
+        )
+
+        assert result.status is SyncStatus.SUCCEEDED
+        album = db.session.scalar(select(MediaItem).where(MediaItem.kind == MediaKind.ALBUM))
+        tracks = db.session.scalars(
+            select(MediaItem).where(MediaItem.kind == MediaKind.TRACK).order_by(MediaItem.id)
+        ).all()
+        assert album is not None
+        assert len(tracks) == 2
+        assert all(item.parent_id == album.id for item in tracks)
+        assert (
+            db.session.scalar(
+                select(func.count())
+                .select_from(MediaItem)
+                .where(MediaItem.kind == MediaKind.ARTIST)
+            )
+            == 1
+        )
 
 
 def test_plex_artwork_replaces_external_fallback(app: Flask) -> None:

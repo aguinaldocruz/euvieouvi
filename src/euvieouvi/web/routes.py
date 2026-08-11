@@ -70,6 +70,7 @@ def template_helpers() -> dict[str, Any]:
         "active_sync": active,
         "format_datetime": local_datetime,
         "format_duration": duration_ms,
+        "ui_theme": _settings("ui.theme").get("ui.theme", "system"),
     }
 
 
@@ -243,6 +244,23 @@ def settings_jellyfin() -> Any:
         errors=errors,
         persisted=persisted,
     )
+
+
+@blueprint.route("/settings/appearance", methods=["GET", "POST"])
+def settings_appearance() -> Any:
+    theme = _settings("ui.theme").get("ui.theme", "system")
+    if theme not in {"system", "light", "dark"}:
+        theme = "system"
+    if request.method == "POST":
+        selected = request.form.get("theme", "system").strip()
+        if selected not in {"system", "light", "dark"}:
+            flash("Selecione uma preferência de tema válida.", "danger")
+        else:
+            _save_setting("ui.theme", selected)
+            db.session.commit()
+            flash("Preferência de aparência atualizada.", "success")
+            return redirect(url_for("web.settings_appearance"))
+    return render_template("settings_appearance.html", theme=theme)
 
 
 @blueprint.route("/settings/sync", methods=["GET", "POST"])

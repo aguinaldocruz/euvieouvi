@@ -303,6 +303,23 @@ class MediaPersistenceService:
             assert item.artist_title is not None
             assert item.album_external_id is not None
             assert item.album_title is not None
+            # Jellyfin can report different album artists for tracks in the same
+            # compilation. Once the album identity is known, keep its canonical
+            # parent instead of failing the whole page or moving the album.
+            album_reference = self.work.source_media_refs.by_external_identity(
+                self.source_id, item.album_external_id
+            )
+            if album_reference is not None:
+                album_reference.last_seen_at = observed_at
+                album_reference.available = True
+                album_reference.unavailable_since = None
+                album = self._required_media(album_reference.media_item_id)
+                if album.kind is not MediaKind.ALBUM:
+                    raise ValueError("External album identity conflicts with existing media.")
+                album.title = item.album_title
+                self._sync_image(album.id, "poster", item.album_thumb_path)
+                self._merge_genres(album.id, item.genres)
+                return album.id
             artist = self._ensure_container(
                 external_id=item.artist_external_id,
                 kind=MediaKind.ARTIST,

@@ -6,4 +6,6 @@ document.body.addEventListener("htmx:configRequest", function (event) {
   var btn=document.getElementById("themeToggle"),key="euvieouvi.theme";
   function apply(t){document.documentElement.setAttribute("data-theme",t);document.documentElement.style.colorScheme=t;try{localStorage.setItem(key,t)}catch(e){} if(btn) btn.textContent=t==="dark"?"◑":"◐";}
   if(btn){btn.addEventListener("click",function(){var cur=document.documentElement.getAttribute("data-theme")==="dark"?"dark":"light";apply(cur==="dark"?"light":"dark");}); var cur=document.documentElement.getAttribute("data-theme"); if(cur) apply(cur);}
+  var form=document.getElementById("appearanceForm");
+  if(form) form.addEventListener("submit",function(){var selected=form.querySelector('input[name="theme"]:checked');try{if(selected&&selected.value==="system")localStorage.removeItem(key);else if(selected)localStorage.setItem(key,selected.value);}catch(e){}});
 })();
