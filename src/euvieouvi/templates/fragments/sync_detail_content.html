@@ -7,7 +7,7 @@
   aria-live="polite">
   <div class="d-flex justify-content-between">
     <div>
-      <h1 class="h2">Sincronização #{{ run.id }}</h1>
+      <h1 class="h2">Sincronização #{{ run.id }}{% if source %} · {{ source.connector_type.value|capitalize }}{% endif %}</h1>
       <p><span class="status-dot status-{{ run.status.value }}"></span>{{ run.status.value }}</p>
     </div>
     {% if run.status.value in ['queued','running'] %}
@@ -38,10 +38,10 @@
   <h2 class="h4">Bibliotecas</h2>
   <div class="table-responsive bg-white mb-4">
     <table class="table">
-      <thead><tr><th>ID</th><th>Status</th><th>Lidos</th><th>Inseridos</th><th>Atualizados</th><th>Erros</th></tr></thead>
+      <thead><tr><th>Biblioteca</th><th>Status</th><th>Lidos</th><th>Inseridos</th><th>Atualizados</th><th>Erros</th></tr></thead>
       <tbody>
-        {% for item in libraries %}
-          <tr><td>{{ item.library_id }}</td><td>{{ item.status.value }}</td><td>{{ item.items_read }}</td><td>{{ item.items_inserted }}</td><td>{{ item.items_updated }}</td><td>{{ item.items_failed }}</td></tr>
+        {% for item,library in libraries %}
+          <tr><td>{{ library.name }}</td><td>{{ item.status.value }}</td><td>{{ item.items_read }}</td><td>{{ item.items_inserted }}</td><td>{{ item.items_updated }}</td><td>{{ item.items_failed }}</td></tr>
         {% else %}
           <tr><td colspan="6">Ainda sem resultados por biblioteca.</td></tr>
         {% endfor %}

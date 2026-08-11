@@ -1001,3 +1001,80 @@ def test_failed_discovery_does_not_mark_existing_library_unavailable(app: Flask)
         source = db.session.get(Source, source_id)
         assert library is not None and library.available is True
         assert source is not None and source.last_connection_status == "failed"
+
+
+def test_ambiguous_episode_identifier_keeps_source_specific_item(app: Flask) -> None:
+    with app.app_context():
+        source_id, library_ids = seed_source(second_library=True)
+        movie_library = db.session.get(Library, library_ids[0])
+        assert movie_library is not None
+        movie_library.enabled = False
+        for copy_index in range(2):
+            show = MediaItem(kind=MediaKind.SHOW, title="Os Padrinhos Mágicos")
+            db.session.add(show)
+            db.session.flush()
+            season = MediaItem(
+                kind=MediaKind.SEASON,
+                title="Specials",
+                parent_id=show.id,
+                season_number=0,
+            )
+            db.session.add(season)
+            db.session.flush()
+            if copy_index == 0:
+                db.session.add_all(
+                    [
+                        SourceMediaRef(
+                            source_id=source_id, library_id=library_ids[1],
+                            media_item_id=show.id, external_id="jf-fairly-oddparents",
+                            last_seen_at=NOW, available=True,
+                        ),
+                        SourceMediaRef(
+                            source_id=source_id, library_id=library_ids[1],
+                            media_item_id=season.id, external_id="jf-specials",
+                            last_seen_at=NOW, available=True,
+                        ),
+                    ]
+                )
+            existing = MediaItem(
+                kind=MediaKind.EPISODE,
+                title="Merry Wishmas",
+                parent_id=season.id,
+                season_number=0,
+                episode_number=11,
+            )
+            db.session.add(existing)
+            db.session.flush()
+            db.session.add(
+                MediaIdentifier(
+                    media_item_id=existing.id,
+                    provider="tvdb",
+                    external_id="1492111",
+                )
+            )
+        db.session.commit()
+        jellyfin_item = ExternalMediaItem(
+            external_id="jf-wishmas",
+            library_external_id="shows",
+            kind=ExternalMediaKind.EPISODE,
+            title="Feliz Desejo de Natal",
+            show_external_id="jf-fairly-oddparents",
+            show_title="Os Padrinhos Mágicos",
+            season_external_id="jf-specials",
+            season_number=0,
+            episode_number=11,
+            identifiers=(ExternalIdentifier("tvdb", "1492111"),),
+        )
+
+        result = orchestrator(FixtureConnector({"shows": (jellyfin_item,)})).run(source_id)
+
+        assert result.status is SyncStatus.SUCCEEDED
+        assert db.session.scalar(
+            select(func.count()).select_from(MediaItem).where(MediaItem.kind == MediaKind.EPISODE)
+        ) == 3
+        assert db.session.scalar(
+            select(SourceMediaRef).where(
+                SourceMediaRef.source_id == source_id,
+                SourceMediaRef.external_id == "jf-wishmas",
+            )
+        ) is not None

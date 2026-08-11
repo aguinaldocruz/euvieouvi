@@ -774,6 +774,32 @@ def settings_webhooks() -> Any:
         flash("Quantidade de eventos recentes atualizada.", "success")
         return redirect(url_for("web.settings_webhooks"))
     history_limit = _webhook_history_limit(tokens)
+    recent_events, current_events = _webhook_activity(history_limit)
+    return render_template(
+        "settings_webhooks.html",
+        plex_url=url_for("web.plex_webhook", token=tokens["webhook.plex.token"], _external=True),
+        jellyfin_url=url_for(
+            "web.jellyfin_webhook", token=tokens["webhook.jellyfin.token"], _external=True
+        ),
+        history_limit=history_limit,
+        recent_events=recent_events,
+        current_events=current_events,
+    )
+
+
+@blueprint.get("/settings/webhooks/activity-fragment")
+def webhook_activity_fragment() -> Any:
+    history_limit = _webhook_history_limit()
+    recent_events, current_events = _webhook_activity(history_limit)
+    return render_template(
+        "fragments/webhook_activity.html",
+        history_limit=history_limit,
+        recent_events=recent_events,
+        current_events=current_events,
+    )
+
+
+def _webhook_activity(history_limit: int) -> tuple[list[Any], list[Any]]:
     recent_events = db.session.execute(
         select(WebhookEvent, Source)
         .join(Source, Source.id == WebhookEvent.source_id)
@@ -787,16 +813,7 @@ def settings_webhooks() -> Any:
         .where(WebhookEvent.active.is_(True))
         .order_by(WebhookEvent.occurred_at.desc(), WebhookEvent.id.desc())
     ).all()
-    return render_template(
-        "settings_webhooks.html",
-        plex_url=url_for("web.plex_webhook", token=tokens["webhook.plex.token"], _external=True),
-        jellyfin_url=url_for(
-            "web.jellyfin_webhook", token=tokens["webhook.jellyfin.token"], _external=True
-        ),
-        history_limit=history_limit,
-        recent_events=recent_events,
-        current_events=current_events,
-    )
+    return recent_events, current_events
 
 
 @blueprint.post("/webhooks/plex/<token>")
@@ -1033,20 +1050,39 @@ def sync_list() -> Any:
             return redirect(url_for("web.sync_list"))
         flash("Sincronização das fontes iniciada em segundo plano.", "success")
         return redirect(url_for("web.sync_detail", run_id=run_id))
-    runs = db.session.scalars(
-        select(SyncRun).order_by(SyncRun.created_at.desc(), SyncRun.id.desc()).limit(50)
+    runs = db.session.execute(
+        select(SyncRun, Source)
+        .join(Source, Source.id == SyncRun.source_id)
+        .order_by(SyncRun.created_at.desc(), SyncRun.id.desc())
+        .limit(50)
     ).all()
-    return render_template("sync_list.html", runs=runs)
+    active = db.session.execute(
+        select(SyncRun, Source)
+        .join(Source, Source.id == SyncRun.source_id)
+        .where(SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]))
+        .order_by(SyncRun.id.desc())
+    ).first()
+    return render_template(
+        "sync_list.html",
+        runs=runs,
+        active_run=active[0] if active else None,
+        active_source=active[1] if active else None,
+    )
 
 
 @blueprint.get("/sync/active-fragment")
 def sync_active_fragment() -> Any:
-    active = db.session.scalar(
-        select(SyncRun)
+    active = db.session.execute(
+        select(SyncRun, Source)
+        .join(Source, Source.id == SyncRun.source_id)
         .where(SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]))
         .order_by(SyncRun.id.desc())
+    ).first()
+    return render_template(
+        "fragments/sync_active.html",
+        run=active[0] if active else None,
+        source=active[1] if active else None,
     )
-    return render_template("fragments/sync_active.html", run=active)
 
 
 @blueprint.get("/sync/<int:run_id>")
@@ -1069,15 +1105,21 @@ def _sync_detail_context(run_id: int) -> dict[str, Any] | None:
     run = db.session.get(SyncRun, run_id)
     if run is None:
         return None
-    libraries = db.session.scalars(
-        select(SyncRunLibrary)
+    libraries = db.session.execute(
+        select(SyncRunLibrary, Library)
+        .join(Library, Library.id == SyncRunLibrary.library_id)
         .where(SyncRunLibrary.sync_run_id == run_id)
         .order_by(SyncRunLibrary.id)
     ).all()
     errors = db.session.scalars(
         select(SyncError).where(SyncError.sync_run_id == run_id).order_by(SyncError.id).limit(100)
     ).all()
-    return {"run": run, "libraries": libraries, "errors": errors}
+    return {
+        "run": run,
+        "source": db.session.get(Source, run.source_id),
+        "libraries": libraries,
+        "errors": errors,
+    }
 
 
 @blueprint.post("/sync/<int:run_id>/cancel")

@@ -392,6 +392,11 @@ class MediaPersistenceService:
                 ).all()
             )
             matches.difference_update(same_source_ids)
+        # Provider ids are not guaranteed to identify a single episode. If
+        # cross-source reconciliation is ambiguous, retain a source-specific
+        # episode instead of failing the entire synchronization page.
+        if len(matches) > 1 and item.kind is ExternalMediaKind.EPISODE:
+            return None
         if len(matches) > 1:
             raise ValueError("External identifiers match more than one catalog item.")
         if not matches:

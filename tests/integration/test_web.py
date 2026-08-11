@@ -444,7 +444,15 @@ def test_dashboard_history_media_and_sync_detail(app: Flask) -> None:
         and "Principal · Filmes" in detail
     )
     sync = client.get(f"/sync/{run_id}").get_data(as_text=True)
-    assert "Mensagem segura" in sync and "Bibliotecas" in sync
+    assert (
+        "Sincronização #" in sync
+        and "Plex" in sync
+        and "Bibliotecas" in sync
+        and "Filmes" in sync
+        and "Mensagem segura" in sync
+    )
+    sync_list = client.get("/sync").get_data(as_text=True)
+    assert "· Plex" in sync_list
     assert client.get("/sync/active-fragment").status_code == 200
     assert (
         client.get("/media/999").status_code == 404 and client.get("/sync/999").status_code == 404
@@ -966,6 +974,9 @@ def test_webhook_page_shows_current_activity_and_respects_retention(app: Flask) 
     ).status_code == 204
     page = client.get("/settings/webhooks").get_data(as_text=True)
     assert "Em reprodução no Plex" in page and "Arrival" in page
+    assert 'hx-trigger="every 2s"' in page
+    fragment = client.get("/settings/webhooks/activity-fragment")
+    assert fragment.status_code == 200 and "Arrival" in fragment.get_data(as_text=True)
 
     token = csrf(client, "/settings/webhooks")
     assert client.post(

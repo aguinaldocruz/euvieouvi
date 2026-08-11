@@ -4,7 +4,7 @@
       <div class="card-body">
         <div class="d-flex justify-content-between">
           <div>
-            <h2 class="h5">Execução ativa #{{ run.id }}</h2>
+            <h2 class="h5">Execução ativa #{{ run.id }}{% if source %} · {{ source.connector_type.value|capitalize }}{% endif %}</h2>
             <p class="mb-1"><span class="status-dot status-{{ run.status.value }}"></span>{{ run.status.value }} · atualizada {{ format_datetime(run.heartbeat_at or run.updated_at) }}</p>
             <p class="small text-secondary">{{ run.summary or 'Preparando sincronização.' }}</p>
           </div>
