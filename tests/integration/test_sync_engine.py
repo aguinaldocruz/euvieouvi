@@ -589,6 +589,82 @@ def test_plex_sync_reuses_trakt_episode_hierarchy(app: Flask) -> None:
         }
 
 
+def test_same_source_duplicate_episode_identifier_keeps_both_hierarchies(app: Flask) -> None:
+    with app.app_context():
+        source_id, library_ids = seed_source(second_library=True)
+        movie_library = db.session.get(Library, library_ids[0])
+        assert movie_library is not None
+        movie_library.enabled = False
+        shared = (ExternalIdentifier("tvdb", "360134"),)
+        first = ExternalMediaItem(
+            external_id="special-sg1", library_external_id="shows",
+            kind=ExternalMediaKind.EPISODE, title="Sci-Fi Lowdown",
+            show_external_id="sg1", show_title="Stargate SG-1",
+            season_external_id="sg1-specials", season_number=0, episode_number=2,
+            identifiers=shared,
+        )
+        second = ExternalMediaItem(
+            external_id="special-atlantis", library_external_id="shows",
+            kind=ExternalMediaKind.EPISODE, title="Sci-Fi Lowdown",
+            show_external_id="atlantis", show_title="Stargate Atlantis",
+            season_external_id="atlantis-specials", season_number=0, episode_number=1,
+            identifiers=shared,
+        )
+        result = orchestrator(FixtureConnector({"shows": (first, second)})).run(source_id)
+
+        assert result.status is SyncStatus.SUCCEEDED
+        episodes = db.session.scalars(
+            select(MediaItem).where(MediaItem.kind == MediaKind.EPISODE)
+        ).all()
+        assert len(episodes) == 2
+        assert len({episode.parent_id for episode in episodes}) == 2
+
+
+def test_provider_match_with_incompatible_episode_season_keeps_both(app: Flask) -> None:
+    with app.app_context():
+        source_id, library_ids = seed_source(second_library=True)
+        movie_library = db.session.get(Library, library_ids[0])
+        assert movie_library is not None
+        movie_library.enabled = False
+        historical_show = MediaItem(kind=MediaKind.SHOW, title="V")
+        db.session.add(historical_show)
+        db.session.flush()
+        historical_season = MediaItem(
+            kind=MediaKind.SEASON, title="Season 1", parent_id=historical_show.id,
+            season_number=1,
+        )
+        db.session.add(historical_season)
+        db.session.flush()
+        historical_episode = MediaItem(
+            kind=MediaKind.EPISODE, title="Part 2", parent_id=historical_season.id,
+            season_number=1, episode_number=2,
+        )
+        db.session.add(historical_episode)
+        db.session.flush()
+        db.session.add(
+            MediaIdentifier(
+                media_item_id=historical_episode.id, provider="tvdb", external_id="190756"
+            )
+        )
+        db.session.commit()
+        special = ExternalMediaItem(
+            external_id="jf-part-2", library_external_id="shows",
+            kind=ExternalMediaKind.EPISODE, title="The Original Miniseries (2)",
+            show_external_id="jf-v", show_title="V: The Original Miniseries",
+            season_external_id="jf-v-specials", season_number=0, episode_number=2,
+            identifiers=(ExternalIdentifier("tvdb", "190756"),),
+        )
+
+        result = orchestrator(FixtureConnector({"shows": (special,)})).run(source_id)
+
+        assert result.status is SyncStatus.SUCCEEDED
+        episodes = db.session.scalars(
+            select(MediaItem).where(MediaItem.kind == MediaKind.EPISODE)
+        ).all()
+        assert len(episodes) == 2
+        assert {episode.season_number for episode in episodes} == {0, 1}
+
+
 def test_partial_series_enumerates_all_episodes_and_preserves_144_watched(app: Flask) -> None:
     with app.app_context():
         source_id, library_ids = seed_source(second_library=True)

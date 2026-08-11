@@ -28,7 +28,7 @@ REQUIRED_TABLES = {
     "watch_events",
     "watch_states",
 }
-SUPPORTED_DATABASE_REVISIONS = {"20260805_0009", "20260811_0010"}
+SUPPORTED_DATABASE_REVISIONS = {"20260811_0010"}
 Progress = Callable[[str], None]
 
 
@@ -329,8 +329,8 @@ def import_archive(
                 """
                 INSERT INTO watch_events (
                     media_item_id, source_id, source_event_id, dedup_key, watched_at,
-                    completed, progress_ms, duration_ms, view_number, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?)
+                    completed, progress_ms, duration_ms, view_number, created_at, updated_at, origin
+                ) VALUES (?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, 'trakt_import')
                 """,
                 (
                     media_id,

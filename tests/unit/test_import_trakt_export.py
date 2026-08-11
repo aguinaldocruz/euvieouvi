@@ -16,7 +16,7 @@ def database_at_revision(revision: str) -> sqlite3.Connection:
 
 
 def test_importer_accepts_current_database_revision() -> None:
-    connection = database_at_revision("20260805_0009")
+    connection = database_at_revision("20260811_0010")
     try:
         importer._validate_database(connection)
     finally:

@@ -38,6 +38,7 @@ from euvieouvi.database.models import (
     Genre,
     Library,
     MediaGenre,
+    MediaIdentifier,
     MediaImage,
     MediaItem,
     Setting,
@@ -540,6 +541,42 @@ def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     assert client.get("/catalog?sort=original_title").status_code == 200
     assert client.get("/catalog?sort=updated&direction=desc").status_code == 200
     assert client.get("/catalog?sort=removed&direction=desc").status_code == 200
+
+
+def test_catalog_badges_follow_shared_provider_identity_across_localized_titles(app: Flask) -> None:
+    with app.app_context():
+        _, _, media_id, _ = seed_web()
+        plex_movie = db.session.get(MediaItem, media_id)
+        assert plex_movie is not None
+        jellyfin = Source(
+            connector_type=ConnectorType.JELLYFIN, name="Jellyfin",
+            base_url="http://jellyfin", secret="{}", enabled=True,
+        )
+        db.session.add(jellyfin)
+        db.session.flush()
+        library = Library(
+            source_id=jellyfin.id, external_id="jf-movies", name="Filmes Jellyfin",
+            media_type=LibraryMediaType.MOVIE, enabled=True, available=True,
+            discovered_at=NOW, last_seen_at=NOW,
+        )
+        localized = MediaItem(
+            kind=MediaKind.MOVIE, title="A Chegada", year=plex_movie.year
+        )
+        db.session.add_all([library, localized])
+        db.session.flush()
+        db.session.add_all([
+            MediaIdentifier(media_item_id=plex_movie.id, provider="tmdb", external_id="329865"),
+            MediaIdentifier(media_item_id=localized.id, provider="tmdb", external_id="329865"),
+            SourceMediaRef(
+                source_id=jellyfin.id, library_id=library.id, media_item_id=localized.id,
+                external_id="jf-arrival", last_seen_at=NOW, available=True,
+            ),
+        ])
+        db.session.commit()
+
+    text = app.test_client().get("/catalog?query=Arrival&kind=movie").get_data(as_text=True)
+    assert "Disponível no Plex" in text
+    assert "Disponível no Jellyfin" in text
 
 
 def test_state_without_history_still_marks_media_as_watched(app: Flask) -> None:

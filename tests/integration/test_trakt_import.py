@@ -59,8 +59,8 @@ def test_trakt_import_runs_against_current_schema(app: Flask, tmp_path: Path) ->
         assert report.events_inserted == 1
         assert report.media_created == 1
         event = connection.execute(
-            "SELECT completed FROM watch_events WHERE source_event_id = 'trakt:101'"
+            "SELECT completed, origin FROM watch_events WHERE source_event_id = 'trakt:101'"
         ).fetchone()
-        assert event is not None and event[0] == 1
+        assert event is not None and tuple(event) == (1, "trakt_import")
     finally:
         connection.close()

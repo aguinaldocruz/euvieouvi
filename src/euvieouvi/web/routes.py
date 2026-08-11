@@ -23,6 +23,7 @@ from flask import (
 )
 from sqlalchemy import case, delete, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 
 from euvieouvi.api.runtime import connector_for, get_executor
 from euvieouvi.api.validation import http_url
@@ -33,6 +34,7 @@ from euvieouvi.database.models import (
     Genre,
     Library,
     MediaGenre,
+    MediaIdentifier,
     MediaImage,
     MediaItem,
     Setting,
@@ -1199,18 +1201,36 @@ def catalog() -> Any:
         SourceMediaRef.available.is_(True),
     )
     completion_count, last_completed, completed_known = _completion_expressions(MediaItem.id)
-    plex_available = exists().where(
-        SourceMediaRef.media_item_id == MediaItem.id,
-        SourceMediaRef.available.is_(True),
-        SourceMediaRef.source_id == Source.id,
-        Source.connector_type == ConnectorType.PLEX,
-    )
-    jellyfin_available = exists().where(
-        SourceMediaRef.media_item_id == MediaItem.id,
-        SourceMediaRef.available.is_(True),
-        SourceMediaRef.source_id == Source.id,
-        Source.connector_type == ConnectorType.JELLYFIN,
-    )
+    current_identifier = aliased(MediaIdentifier)
+    matching_identifier = aliased(MediaIdentifier)
+    matching_item = aliased(MediaItem)
+    matching_ref = aliased(SourceMediaRef)
+    matching_source = aliased(Source)
+
+    def available_on(connector_type: ConnectorType) -> Any:
+        direct = exists().where(
+            SourceMediaRef.media_item_id == MediaItem.id,
+            SourceMediaRef.available.is_(True),
+            SourceMediaRef.source_id == Source.id,
+            Source.connector_type == connector_type,
+        )
+        shared_identity = exists().where(
+            matching_ref.media_item_id == matching_identifier.media_item_id,
+            matching_identifier.media_item_id == matching_item.id,
+            matching_item.kind == MediaItem.kind,
+            matching_ref.available.is_(True),
+            matching_ref.source_id == matching_source.id,
+            matching_source.connector_type == connector_type,
+            exists().where(
+                current_identifier.media_item_id == MediaItem.id,
+                current_identifier.provider == matching_identifier.provider,
+                current_identifier.external_id == matching_identifier.external_id,
+            ),
+        )
+        return or_(direct, shared_identity)
+
+    plex_available = available_on(ConnectorType.PLEX)
+    jellyfin_available = available_on(ConnectorType.JELLYFIN)
     statement = select(
         MediaItem,
         completion_count.label("completion_count"),

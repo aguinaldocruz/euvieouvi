@@ -86,6 +86,10 @@ class PlexConnector:
         ):
             raise ConnectorConfigurationError("Plex media kind does not match the library type.")
         params = self._page_params(page)
+        # Plex does not consistently include the nested Guid elements on
+        # library listings unless they are explicitly requested. Those ids
+        # let persistence reconcile localized titles across media servers.
+        params["includeGuids"] = 1
         if media_kind is ExternalMediaKind.EPISODE:
             params["type"] = 4
         elif media_kind is ExternalMediaKind.TRACK:

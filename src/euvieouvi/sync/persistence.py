@@ -378,6 +378,20 @@ class MediaPersistenceService:
             (identifier.provider, identifier.external_id) for identifier in item.identifiers
         )
         matches = self.work.media_identifiers.media_ids_for_kind(item.kind.value, identities)
+        # Providers occasionally reuse an episode id for two entries on the
+        # same server (usually a special listed under different shows). Such
+        # an item is not safe to move into a new hierarchy. Cross-source and
+        # history-only matches remain eligible for reconciliation.
+        if matches and item.kind is ExternalMediaKind.EPISODE:
+            same_source_ids = set(
+                self.work.session.scalars(
+                    select(SourceMediaRef.media_item_id).where(
+                        SourceMediaRef.source_id == self.source_id,
+                        SourceMediaRef.media_item_id.in_(matches),
+                    )
+                ).all()
+            )
+            matches.difference_update(same_source_ids)
         if len(matches) > 1:
             raise ValueError("External identifiers match more than one catalog item.")
         if not matches:
@@ -398,7 +412,42 @@ class MediaPersistenceService:
                 .distinct()
             ).all()
             return candidates[0] if len(candidates) == 1 else None
-        return self._required_media(matches.pop())
+        matched = self._required_media(matches.pop())
+        if (
+            item.kind is ExternalMediaKind.EPISODE
+            and not self._episode_hierarchy_is_compatible(item, matched)
+        ):
+            return None
+        return matched
+
+    def _episode_hierarchy_is_compatible(
+        self, item: ExternalMediaItem, episode: MediaItem
+    ) -> bool:
+        """Return whether a provider-id match can safely share this hierarchy."""
+        season = self.work.media_items.get(episode.parent_id or 0)
+        show = self.work.media_items.get(season.parent_id or 0) if season is not None else None
+        if (
+            episode.kind is not MediaKind.EPISODE
+            or season is None
+            or season.kind is not MediaKind.SEASON
+            or show is None
+            or show.kind is not MediaKind.SHOW
+            or season.season_number != item.season_number
+        ):
+            return False
+        assert item.show_external_id is not None
+        show_reference = self.work.source_media_refs.by_external_identity(
+            self.source_id, item.show_external_id
+        )
+        if show_reference is not None and show_reference.media_item_id != show.id:
+            return False
+        season_external_id = item.season_external_id or (
+            f"{item.show_external_id}:season:{item.season_number}"
+        )
+        season_reference = self.work.source_media_refs.by_external_identity(
+            self.source_id, season_external_id
+        )
+        return season_reference is None or season_reference.media_item_id == season.id
 
     def _bind_existing_episode_hierarchy(
         self,

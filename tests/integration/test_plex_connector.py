@@ -65,6 +65,7 @@ def test_movie_page_maps_ids_state_and_defensive_pagination() -> None:
     def route(request: httpx.Request) -> httpx.Response:
         assert request.url.params["X-Plex-Container-Start"] == "0"
         assert request.url.params["X-Plex-Container-Size"] == "2"
+        assert request.url.params["includeGuids"] == "1"
         return httpx.Response(200, content=fixture("movies.xml"), request=request)
 
     connector = make_connector(httpx.MockTransport(route))
