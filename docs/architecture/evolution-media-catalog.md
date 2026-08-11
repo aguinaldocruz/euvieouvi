@@ -1,5 +1,8 @@
 # Projeto de evolução: catálogo completo de mídia
 
+> **Registro histórico:** este plano foi implementado e permanece apenas como histórico. Consulte
+> [`docs/README.pt-BR.md`](../README.pt-BR.md) para o comportamento atual.
+
 ## Objetivo
 
 Evoluir o euvieouvi para manter o inventário e o histórico de filmes, séries e músicas do

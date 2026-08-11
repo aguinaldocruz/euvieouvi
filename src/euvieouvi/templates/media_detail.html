@@ -93,7 +93,7 @@
     {% for event, event_item, evt_src in event_rows %}
       <a class="list-group-item list-group-item-action" href="{{ url_for('web.media_detail', media_id=event_item.id) }}">
         {% if event_item.id != item.id %}<strong>{{ event_item.title }}</strong> · {% endif %}
-        {{ format_datetime(event.watched_at) }} · {{ evt_src.name }} ({{ evt_src.connector_type.value }}) · Concluído
+        {{ format_datetime(event.watched_at) }} · {{ evt_src.name }} ({{ evt_src.connector_type.value }}) · {{ 'webhook' if event.origin == 'webhook' else 'sincronização' }} · Concluído
         {% if event.view_number %} · reprodução {{ event.view_number }}{% endif %}
       </a>
     {% endfor %}

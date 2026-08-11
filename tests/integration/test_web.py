@@ -48,6 +48,7 @@ from euvieouvi.database.models import (
     SyncRunLibrary,
     WatchEvent,
     WatchState,
+    WebhookEvent,
 )
 from euvieouvi.extensions import db
 from euvieouvi.web.formatting import duration_ms, local_datetime
@@ -877,6 +878,10 @@ def test_webhooks_accept_only_completed_events_and_deduplicate(app: Flask) -> No
     assert client.post("/webhooks/plex/wrong", data={}).status_code == 404
     with app.app_context():
         assert db.session.query(WatchEvent).count() == original_count + 2
+        assert {
+            event.origin
+            for event in db.session.query(WatchEvent).order_by(WatchEvent.id.desc()).limit(2)
+        } == {"webhook"}
         assert db.session.get(Source, plex_source_id) is not None
         assert db.session.get(Library, plex_library_id) is not None
 
@@ -888,6 +893,39 @@ def test_webhook_settings_generate_secret_urls(app: Flask) -> None:
     assert "/webhooks/plex/" in text and "/webhooks/jellyfin/" in text
     with app.app_context():
         assert db.session.get(Setting, "webhook.plex.token") is not None
+
+
+def test_webhook_page_shows_current_activity_and_respects_retention(app: Flask) -> None:
+    with app.app_context():
+        seed_web()
+        db.session.add(Setting(key="webhook.plex.token", value="plex-secret"))
+        db.session.commit()
+    client = app.test_client()
+    play_payload = {
+        "event": "media.play",
+        "Metadata": {"ratingKey": "m1", "librarySectionID": "1", "title": "Arrival"},
+    }
+    assert client.post(
+        "/webhooks/plex/plex-secret", data={"payload": json.dumps(play_payload)}
+    ).status_code == 204
+    page = client.get("/settings/webhooks").get_data(as_text=True)
+    assert "Em reprodução no Plex" in page and "Arrival" in page
+
+    token = csrf(client, "/settings/webhooks")
+    assert client.post(
+        "/settings/webhooks", data={"csrf_token": token, "history_limit": "1"}
+    ).status_code == 302
+    for event_id in ("one", "two"):
+        payload = {
+            "event": "media.scrobble",
+            "event_id": event_id,
+            "Metadata": {"ratingKey": "m1", "librarySectionID": "1", "title": event_id},
+        }
+        assert client.post(
+            "/webhooks/plex/plex-secret", data={"payload": json.dumps(payload)}
+        ).status_code == 204
+    with app.app_context():
+        assert db.session.query(WebhookEvent).filter_by(completed=True).count() == 1
 
 
 def test_jellyfin_settings_validation_save_update_and_test(

@@ -1,45 +1,25 @@
-# Operação do euvieouvi v2
+# Operations guide
 
-Este guia cobre instalação, validação, atualização, backup, restauração e os portões
-externos da primeira versão. A aplicação não possui autenticação interna: publique-a
-somente em rede confiável ou atrás de proxy reverso com controle de acesso.
+[Português do Brasil](operations.pt-BR.md) · English
 
-## 1. Instalação com Docker Compose
+## Deployment
 
-Requisitos: Docker Engine e Docker Compose v2.
-
-```bash
-cp .env.example .env
-```
-
-Edite `.env` e substitua `EUVIEOUVI_SECRET_KEY` por um valor longo e aleatório. Não
-configure o token Plex no arquivo: ele será salvo pela interface.
+Use Docker Engine and Docker Compose v2. Copy `.env.example` to `.env` and
+`compose.yaml.sample` to `compose.yaml`. Set a long random `EUVIEOUVI_SECRET_KEY`.
 
 ```bash
 docker compose build --pull
 docker compose up -d
 docker compose ps
 docker compose logs --tail=100 euvieouvi
-```
-
-Abra `http://IP_DO_SERVIDOR:8000`. O primeiro acesso orientará a configuração do Plex e
-das bibliotecas.
-
-Validação automatizada da implantação:
-
-```bash
 ./scripts/validate-deployment.sh
 ```
 
-O script confirma processo não root, volume gravável, liveness, readiness e ausência de
-falha no healthcheck. A indisponibilidade do Plex não deve derrubar consultas locais.
+The sample publishes port 8000, uses the named `euvieouvi_data` volume at `/app/instance`, runs as
+UID/GID 10001, drops Linux capabilities, prevents privilege escalation, and mounts the root
+filesystem read-only except for the persistent volume and `/tmp`.
 
-## 2. Volume persistente
-
-O Compose padrão usa o volume nomeado `euvieouvi_data` em `/app/instance`. Recriar o
-contêiner não remove esse volume.
-
-Para usar bind mount, crie `compose.override.yaml`:
+For a bind mount, create `compose.override.yaml` and make the host directory writable by 10001:
 
 ```yaml
 services:
@@ -48,114 +28,99 @@ services:
       - ./instance:/app/instance
 ```
 
-Garanta que o diretório seja gravável pelo UID/GID `10001`. Não versione seu conteúdo.
+## Initial setup
 
-## 3. Backup consistente
+1. Open the web UI and configure Plex and/or Jellyfin.
+2. Test each connection.
+3. Discover libraries and enable the desired ones.
+4. Run the first synchronization.
+5. Optionally configure schedules, metadata enrichment, backups, and webhooks.
 
-O backup usa a API oficial do SQLite e pode ser criado com a aplicação em execução:
+Jellyfin needs an administrative API key and the tracked user's ID or name. Webhook user events
+are ignored when they do not match the configured user.
+
+## Reverse proxy and network security
+
+The service has no authentication. Restrict port 8000 to a trusted network or place it behind an
+authenticated HTTPS reverse proxy. Preserve the original host/scheme when generating webhook URLs.
+Apply request-size and rate limits at the proxy, especially for webhook and restore-upload routes.
+Do not cache authenticated pages or API responses containing private catalog data.
+
+## Upgrade
+
+1. Create a backup and copy it outside the Docker volume.
+2. Fetch the new code/image.
+3. Rebuild and recreate only the application container.
+4. Validate readiness, migrations, logs, catalog, history, and sync.
 
 ```bash
 docker compose exec -T euvieouvi python -m euvieouvi.database.backup \
-  backup /app/instance/euvieouvi.db /app/instance/backups/euvieouvi-antes-update.db
-```
-
-Copie o resultado para fora do volume:
-
-```bash
-docker compose cp \
-  euvieouvi:/app/instance/backups/euvieouvi-antes-update.db \
-  ./euvieouvi-antes-update.db
-```
-
-O backup contém histórico e token Plex e deve receber a mesma proteção do banco.
-
-## 4. Restauração
-
-A restauração exige o serviço parado:
-
-```bash
-docker compose stop euvieouvi
-docker compose run --rm --no-deps euvieouvi python -m euvieouvi.database.backup \
-  restore /app/instance/backups/euvieouvi-antes-update.db \
-  /app/instance/euvieouvi.db
-docker compose up -d
-./scripts/validate-deployment.sh
-```
-
-Mantenha o backup anterior até confirmar catálogo, histórico e sincronização.
-
-## 5. Atualização preservando dados
-
-1. Crie e retire do volume um backup consistente.
-2. Obtenha o novo código ou imagem.
-3. Construa a imagem atualizada.
-4. Recrie apenas o contêiner, preservando o volume.
-5. Verifique healthchecks e logs.
-
-```bash
+  backup /app/instance/euvieouvi.db /app/instance/backups/pre-upgrade.db
+docker compose cp euvieouvi:/app/instance/backups/pre-upgrade.db ./pre-upgrade.db
 docker compose build --pull
 docker compose up -d --force-recreate
 ./scripts/validate-deployment.sh
 docker compose logs --tail=100 euvieouvi
 ```
 
-O entrypoint valida configuração, aplica migrações e reconcilia execuções órfãs antes do
-Gunicorn. Uma execução perdida durante reinício fica `interrupted`; dados já confirmados e
-checkpoints permanecem preservados.
+Startup applies Alembic migrations. An active sync lost during restart is marked `interrupted`;
+committed pages and checkpoints remain available.
 
-## 6. Teste controlado com Plex real
+## Backup and restore
 
-Use uma biblioteca pequena e explícita. As variáveis existem apenas no processo do teste;
-não as salve no repositório nem no relatório.
+The web UI can create, download, delete, schedule, retain, and restore SQLite backups. Backups can
+be created while the service runs. Avoid restoring during active requests; for the safest manual
+restore, stop the main service:
 
 ```bash
-export EUVIEOUVI_RUN_REAL_PLEX=1
-export EUVIEOUVI_TEST_PLEX_URL=http://IP_DO_PLEX:32400
-export EUVIEOUVI_TEST_PLEX_TOKEN=seu-token
-export EUVIEOUVI_TEST_PLEX_LIBRARY_ID=id-da-biblioteca-pequena
-pytest -m real_plex tests/integration/test_real_plex.py
-unset EUVIEOUVI_TEST_PLEX_TOKEN
+docker compose stop euvieouvi
+docker compose run --rm --no-deps euvieouvi python -m euvieouvi.database.backup \
+  restore /app/instance/backups/pre-upgrade.db /app/instance/euvieouvi.db
+docker compose up -d
+./scripts/validate-deployment.sh
 ```
 
-O teste valida autenticação, descoberta, sincronização inicial e repetição idempotente. A
-validação operacional final deve ainda interromper um contêiner durante uma sincronização,
-reiniciá-lo e confirmar `interrupted` e o último checkpoint confirmado.
+Keep an external copy until catalog, history, credentials, images, and synchronization are checked.
+Backups contain secrets and require the same access controls as the live database.
 
-## 7. Teste de volume e dependências
-
-O teste automatizado cria 3.000 filmes locais e confirma paginação e consultas:
+## Monitoring and logs
 
 ```bash
-pytest -m volume tests/integration/test_hardening.py
-```
-
-Auditoria reproduzível das versões fixadas:
-
-```bash
-uvx pip-audit --requirement requirements.lock
-```
-
-Na validação de 4 de agosto de 2026, nenhuma vulnerabilidade conhecida foi encontrada.
-Repita a auditoria antes de cada release e atualização de dependências.
-
-## 8. Logs e diagnóstico
-
-```bash
+curl --fail http://localhost:8000/health/live
+curl --fail http://localhost:8000/health/ready
 docker compose logs -f --tail=200 euvieouvi
 ```
 
-Os logs vão para stdout/stderr e incluem horário UTC, nível, componente e request ID. O
-filtro defensivo remove token, segredo e Authorization de mensagens. Não envie banco,
-backup ou logs completos a terceiros sem revisão.
+Logs use UTC timestamps and request IDs. Token-like values are redacted defensively, but review logs
+before sharing. Readiness fails when SQLite is unavailable or the migration revision is not current;
+connector downtime does not make the local catalog unavailable.
 
-## 9. Encerramento e remoção
+## Troubleshooting
 
-Parar preservando dados:
+- **Readiness fails after upgrade:** inspect startup logs and run
+  `docker compose exec euvieouvi flask --app euvieouvi.wsgi db current`.
+- **Sync dependency failure:** test the source, rediscover libraries, verify the tracked Jellyfin
+  user, and inspect the run's per-library errors. A malformed Jellyfin item is skipped safely.
+- **Missing both catalog badges:** synchronize both enabled libraries. Exact provider IDs merge
+  records; movies without IDs use a unique exact title/year fallback.
+- **Webhook does not mark completion:** verify the secret URL, event type, configured Jellyfin user,
+  and item availability. Pre-catalog completions reconcile on the next sync.
+- **No current-playing item:** enable Plex play/resume or Jellyfin playback-start notifications.
+- **SQLite busy errors:** avoid network filesystems, keep one application container, and increase
+  `EUVIEOUVI_SQLITE_BUSY_TIMEOUT_MS` within its documented limit.
+- **Artwork unavailable:** verify source connectivity and instance-directory permissions; external
+  artwork requires the relevant enrichment provider.
+
+## Validation and shutdown
 
 ```bash
-docker compose down
+ruff format --check .
+ruff check .
+mypy src tests
+pytest
+uvx pip-audit --requirement requirements.lock
 ```
 
-Não use `docker compose down -v` a menos que queira remover definitivamente o volume após
-confirmar um backup externo válido.
-
+Real Plex validation is opt-in; see `tests/integration/test_real_plex.py`. Stop without deleting
+data using `docker compose down`. Do not run `docker compose down -v` unless permanent volume
+deletion is intended and a verified external backup exists.

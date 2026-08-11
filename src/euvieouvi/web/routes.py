@@ -21,7 +21,7 @@ from flask import (
     send_file,
     url_for,
 )
-from sqlalchemy import case, exists, func, or_, select
+from sqlalchemy import case, delete, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from euvieouvi.api.runtime import connector_for, get_executor
@@ -43,6 +43,7 @@ from euvieouvi.database.models import (
     SyncRunLibrary,
     WatchEvent,
     WatchState,
+    WebhookEvent,
 )
 from euvieouvi.database.unit_of_work import UnitOfWork
 from euvieouvi.enrichment.runtime import get_enrichment_executor
@@ -732,9 +733,9 @@ def backup_restore_upload() -> Any:
     return redirect(url_for("web.settings_backup"))
 
 
-@blueprint.get("/settings/webhooks")
+@blueprint.route("/settings/webhooks", methods=["GET", "POST"])
 def settings_webhooks() -> Any:
-    tokens = _settings("webhook.plex.token", "webhook.jellyfin.token")
+    tokens = _settings("webhook.plex.token", "webhook.jellyfin.token", "webhook.history_limit")
     changed = False
     for provider in ("plex", "jellyfin"):
         key = f"webhook.{provider}.token"
@@ -744,12 +745,37 @@ def settings_webhooks() -> Any:
             changed = True
     if changed:
         db.session.commit()
+    if request.method == "POST":
+        raw_limit = (request.form.get("history_limit") or "20").strip()
+        history_limit = min(max(int(raw_limit) if raw_limit.isdigit() else 20, 1), 200)
+        _save_setting("webhook.history_limit", str(history_limit))
+        _prune_webhook_events(history_limit)
+        db.session.commit()
+        flash("Quantidade de eventos recentes atualizada.", "success")
+        return redirect(url_for("web.settings_webhooks"))
+    history_limit = _webhook_history_limit(tokens)
+    recent_events = db.session.execute(
+        select(WebhookEvent, Source)
+        .join(Source, Source.id == WebhookEvent.source_id)
+        .where(WebhookEvent.completed.is_(True))
+        .order_by(WebhookEvent.occurred_at.desc(), WebhookEvent.id.desc())
+        .limit(history_limit)
+    ).all()
+    current_events = db.session.execute(
+        select(WebhookEvent, Source)
+        .join(Source, Source.id == WebhookEvent.source_id)
+        .where(WebhookEvent.active.is_(True))
+        .order_by(WebhookEvent.occurred_at.desc(), WebhookEvent.id.desc())
+    ).all()
     return render_template(
         "settings_webhooks.html",
         plex_url=url_for("web.plex_webhook", token=tokens["webhook.plex.token"], _external=True),
         jellyfin_url=url_for(
             "web.jellyfin_webhook", token=tokens["webhook.jellyfin.token"], _external=True
         ),
+        history_limit=history_limit,
+        recent_events=recent_events,
+        current_events=current_events,
     )
 
 
@@ -759,6 +785,9 @@ def plex_webhook(token: str) -> Any:
         return Response(status=404)
     source = _source(ConnectorType.PLEX)
     payload_text = request.form.get("payload")
+    if not payload_text and request.is_json:
+        raw_payload = request.get_json(silent=True)
+        payload_text = json.dumps(raw_payload) if isinstance(raw_payload, dict) else None
     # Webhook is processed even if source is disabled/missing sync config — independent of sync
     if source is None or not payload_text:
         # if no source configured, store minimal to avoid losing event? just acknowledge
@@ -769,24 +798,46 @@ def plex_webhook(token: str) -> Any:
         payload = json.loads(payload_text)
     except (TypeError, ValueError, json.JSONDecodeError):
         return Response("Payload inválido.", 400)
-    if not isinstance(payload, dict) or payload.get("event") != "media.scrobble":
+    if not isinstance(payload, dict):
+        return Response("Payload inválido.", 400)
+    event_type = str(payload.get("event") or "").casefold()
+    if event_type not in {
+        "media.play", "media.resume", "media.pause", "media.stop", "media.scrobble"
+    }:
         return Response(status=204)
     metadata = payload.get("Metadata")
     if not isinstance(metadata, dict):
-        return Response("Metadata ausente.", 400)
+        if event_type == "media.scrobble":
+            return Response("Metadata ausente.", 400)
+        return Response(status=204)
     external_id = str(metadata.get("ratingKey") or "").strip()
     library_external_id = str(metadata.get("librarySectionID") or "").strip()
-    if not external_id or not library_external_id:
+    if not external_id:
         return Response("Identidade da mídia ausente.", 400)
+    watched_at = _parse_webhook_datetime(payload.get("eventTime")) or datetime.now(UTC)
+    title = str(metadata.get("title") or metadata.get("grandparentTitle") or external_id)
+    active = event_type in {"media.play", "media.resume"}
+    completed = event_type == "media.scrobble"
+    _record_webhook_activity(
+        source, external_id=external_id, title=title, media_kind=metadata.get("type"),
+        event_type=event_type, occurred_at=watched_at, completed=completed, active=active,
+        event_key=str(payload.get("event_id") or "").strip() or None,
+    )
+    if not completed:
+        db.session.commit()
+        return Response(status=204)
+    if not library_external_id:
+        return Response("Biblioteca da mídia ausente.", 400)
     # process even if source.enabled is False
     _persist_webhook_event(
         source,
         external_id=external_id,
         library_external_id=library_external_id,
-        watched_at=datetime.now(UTC),
+        watched_at=watched_at,
         source_event_id=None,
         duration_ms=_safe_integer(metadata.get("duration")),
     )
+    db.session.commit()
     return Response(status=204)
 
 
@@ -798,18 +849,39 @@ def jellyfin_webhook(token: str) -> Any:
     payload = request.get_json(silent=True)
     if source is None or not isinstance(payload, dict):
         return Response(status=204)
-    if payload.get("NotificationType") != "PlaybackStop" or not _truthy(
-        payload.get("PlayedToCompletion")
-    ):
+    notification_type = "".join(
+        char for char in str(payload.get("NotificationType") or "").casefold() if char.isalnum()
+    )
+    if notification_type not in {"playbackstart", "playbackstop"}:
         return Response(status=204)
     credentials = _jellyfin_credentials(source)
     user_id = str(payload.get("UserId") or "").strip()
     if credentials.get("user_id") and user_id != credentials["user_id"]:
         return Response(status=204)
-    external_id = str(payload.get("ItemId") or "").strip()
-    watched_at = _parse_webhook_datetime(payload.get("UtcTimestamp"))
-    if not external_id or watched_at is None:
+    payload_item = payload.get("Item")
+    raw_item: dict[str, Any] = payload_item if isinstance(payload_item, dict) else {}
+    external_id = str(payload.get("ItemId") or raw_item.get("Id") or "").strip()
+    timestamp_value = payload.get("UtcTimestamp")
+    watched_at = _parse_webhook_datetime(timestamp_value)
+    if timestamp_value and watched_at is None:
         return Response("Identidade ou data ausente.", 400)
+    watched_at = watched_at or datetime.now(UTC)
+    if not external_id:
+        return Response("Identidade ou data ausente.", 400)
+    completed = notification_type == "playbackstop" and _truthy(payload.get("PlayedToCompletion"))
+    _record_webhook_activity(
+        source, external_id=external_id,
+        title=str(
+            payload.get("Name") or payload.get("ItemName") or raw_item.get("Name") or external_id
+        ),
+        media_kind=str(payload.get("ItemType") or raw_item.get("Type") or "") or None,
+        event_type=notification_type, occurred_at=watched_at, completed=completed,
+        active=notification_type == "playbackstart",
+        event_key=str(payload.get("NotificationId") or "").strip() or None,
+    )
+    if not completed:
+        db.session.commit()
+        return Response(status=204)
     reference = db.session.scalar(
         select(SourceMediaRef).where(
             SourceMediaRef.source_id == source.id,
@@ -834,6 +906,7 @@ def jellyfin_webhook(token: str) -> Any:
         # also queue a sync to enrich metadata, but don't block webhook response
         with contextlib.suppress(Exception):
             _queue_source_sync(source.id)
+        db.session.commit()
         return Response(status=204)
     library = db.session.get(Library, reference.library_id)
     if library is None:
@@ -846,6 +919,7 @@ def jellyfin_webhook(token: str) -> Any:
         source_event_id=str(payload.get("NotificationId") or "").strip() or None,
         duration_ms=_ticks_to_ms(payload.get("RunTimeTicks")),
     )
+    db.session.commit()
     return Response(status=204)
 
 
@@ -1057,9 +1131,23 @@ def history() -> Any:
         .offset((page - 1) * 50)
     ).all()
     has_more = len(values) > 50
+    visible = values[:50]
+    history_details: dict[int, list[tuple[WatchEvent, Source]]] = {}
+    if visible:
+        for event, event_source in db.session.execute(
+            select(WatchEvent, Source)
+            .join(Source, Source.id == WatchEvent.source_id)
+            .where(
+                WatchEvent.media_item_id.in_([item.id for item in visible]),
+                WatchEvent.completed.is_(True),
+            )
+            .order_by(WatchEvent.watched_at.desc(), WatchEvent.id.desc())
+        ):
+            history_details.setdefault(event.media_item_id, []).append((event, event_source))
     return render_template(
         "history.html",
-        items=values[:50],
+        items=visible,
+        history_details=history_details,
         page=page,
         has_more=has_more,
         query=query,
@@ -1578,7 +1666,7 @@ def _persist_webhook_event(
     with UnitOfWork(db.session()) as work:
         inserted = MediaPersistenceService(
             work, source_id=source.id, library_id=reference.library_id
-        ).persist_event(event)
+        ).persist_event(event, origin="webhook")
         work.commit()
     return inserted
 
@@ -1588,6 +1676,48 @@ def _queue_source_sync(source_id: int) -> None:
         get_executor(current_app).submit(source_id)
     except (LookupError, SyncAlreadyRunningError, SyncSourceUnavailableError):
         current_app.logger.info("webhook media will be reconciled by an existing sync")
+
+
+def _webhook_history_limit(values: dict[str, str] | None = None) -> int:
+    raw = (values or _settings("webhook.history_limit")).get("webhook.history_limit", "20")
+    return min(max(int(raw) if raw.isdigit() else 20, 1), 200)
+
+
+def _record_webhook_activity(
+    source: Source, *, external_id: str, title: str, media_kind: Any,
+    event_type: str, occurred_at: datetime, completed: bool, active: bool,
+    event_key: str | None,
+) -> None:
+    # Any terminal event closes prior playback rows for the same item.
+    prior = db.session.scalars(
+        select(WebhookEvent).where(
+            WebhookEvent.source_id == source.id,
+            WebhookEvent.external_id == external_id,
+            WebhookEvent.active.is_(True),
+        )
+    ).all()
+    for row in prior:
+        row.active = False
+    if not active and not completed:
+        return
+    db.session.add(WebhookEvent(
+        source_id=source.id, external_id=external_id, event_key=event_key,
+        title=title[:500], media_kind=str(media_kind)[:32] if media_kind else None,
+        event_type=event_type[:32], occurred_at=occurred_at,
+        completed=completed, active=active,
+    ))
+    if completed:
+        db.session.flush()
+        _prune_webhook_events(_webhook_history_limit())
+
+
+def _prune_webhook_events(limit: int) -> None:
+    retained = select(WebhookEvent.id).where(WebhookEvent.completed.is_(True)).order_by(
+        WebhookEvent.occurred_at.desc(), WebhookEvent.id.desc()
+    ).limit(limit)
+    db.session.execute(delete(WebhookEvent).where(
+        WebhookEvent.completed.is_(True), WebhookEvent.id.not_in(retained)
+    ))
 
 
 def _safe_integer(value: Any) -> int | None:

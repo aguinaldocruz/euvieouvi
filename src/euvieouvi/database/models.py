@@ -285,6 +285,30 @@ class WatchEvent(TimestampMixin, Base):
     progress_ms: Mapped[int | None] = mapped_column(Integer)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     view_number: Mapped[int | None] = mapped_column(Integer)
+    origin: Mapped[str] = mapped_column(String(32), default="synchronization", nullable=False)
+
+
+class WebhookEvent(TimestampMixin, Base):
+    """Recent webhook playback activity, including items not synchronized yet."""
+
+    __tablename__ = "webhook_events"
+    __table_args__ = (
+        Index("ix_webhook_events_completed_occurred", "completed", "occurred_at"),
+        Index("ix_webhook_events_active_source", "active", "source_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"), nullable=False
+    )
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_key: Mapped[str | None] = mapped_column(String(255))
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    media_kind: Mapped[str | None] = mapped_column(String(32))
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class WatchState(TimestampMixin, Base):

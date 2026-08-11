@@ -1,5 +1,9 @@
 # euvieouvi v2 — Índice da Documentação Aprovada
 
+> **Registro histórico:** este índice descreve o plano original da v2 e não representa o estado
+> atual do produto. Consulte [`docs/README.pt-BR.md`](../README.pt-BR.md) para a documentação
+> mantida. O código, migrações, testes e OpenAPI prevalecem em caso de divergência.
+
 **Status:** Documentação-base encerrada  
 **Data de aprovação final:** 4 de agosto de 2026  
 **Próxima etapa:** Fase 1 — Fundação do projeto.

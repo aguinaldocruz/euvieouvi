@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 from euvieouvi.connectors.dtos import (
@@ -77,7 +78,7 @@ class JellyfinConnector:
         page: PageRequest,
     ) -> Page[ExternalMediaItem]:
         raw = self._items(library, media_kind, page, played_only=False)
-        mapped = tuple(map_item(value, library.external_id) for value in raw["items"])
+        mapped = tuple(self._map_valid_items(raw["items"], library.external_id))
         return Page(
             mapped,
             page.start,
@@ -101,11 +102,7 @@ class JellyfinConnector:
             "artist": ExternalMediaKind.TRACK,
         }[library.media_type.value]
         raw = self._items(library, kind, page, played_only=True)
-        mapped = tuple(
-            event
-            for value in raw["items"]
-            if (event := map_history_item(value, library.external_id)) is not None
-        )
+        mapped = tuple(self._map_valid_history(raw["items"], library.external_id))
         return Page(
             mapped,
             page.start,
@@ -151,3 +148,25 @@ class JellyfinConnector:
         items = [value for value in raw["Items"] if isinstance(value, dict)]
         total = raw.get("TotalRecordCount")
         return {"items": items, "total": total if isinstance(total, int) else len(items)}
+
+    @staticmethod
+    def _map_valid_items(
+        items: list[dict[str, Any]], library_id: str
+    ) -> Iterator[ExternalMediaItem]:
+        for value in items:
+            try:
+                yield map_item(value, library_id)
+            except ConnectorResponseError:
+                continue
+
+    @staticmethod
+    def _map_valid_history(
+        items: list[dict[str, Any]], library_id: str
+    ) -> Iterator[ExternalWatchEvent]:
+        for value in items:
+            try:
+                event = map_history_item(value, library_id)
+            except ConnectorResponseError:
+                continue
+            if event is not None:
+                yield event

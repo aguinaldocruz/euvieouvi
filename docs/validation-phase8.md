@@ -1,5 +1,8 @@
 # Relatório de validação — Fase 8
 
+> **Registro histórico:** resultados abaixo pertencem à execução datada e não descrevem a suíte ou
+> versão atual. Consulte [`docs/README.pt-BR.md`](README.pt-BR.md) para a documentação mantida.
+
 Data: 4 de agosto de 2026.
 
 ## Resultado automatizado
@@ -38,4 +41,3 @@ issue, log ou conversa; configure-o somente no ambiente do comando.
 O código automatizável da Fase 8 está aprovado. O portão integral da fase permanece
 condicionado aos dois testes externos acima no host de implantação. Nenhuma mudança de
 escopo foi introduzida.
-

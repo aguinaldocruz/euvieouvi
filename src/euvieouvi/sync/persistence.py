@@ -18,9 +18,11 @@ from euvieouvi.database.models import (
     MediaIdentifier,
     MediaImage,
     MediaItem,
+    Source,
     SourceMediaRef,
     WatchEvent,
     WatchState,
+    WebhookEvent,
 )
 from euvieouvi.database.unit_of_work import UnitOfWork
 
@@ -99,6 +101,7 @@ class MediaPersistenceService:
         self._sync_genres(media.id, item.genres)
         self._sync_image(media.id, "poster", item.thumb_path)
         self._sync_image(media.id, "backdrop", item.art_path)
+        self._reconcile_webhook_events(item)
         regression = self._sync_watch_state(media.id, item, observed_at)
         event_inserted = False
         if item.view_count and item.last_viewed_at is not None:
@@ -115,7 +118,28 @@ class MediaPersistenceService:
             )
         return PersistResult(classification, media.id, regression, event_inserted)
 
-    def persist_event(self, event: ExternalWatchEvent) -> bool:
+    def _reconcile_webhook_events(self, item: ExternalMediaItem) -> None:
+        pending = self.work.session.scalars(
+            select(WebhookEvent).where(
+                WebhookEvent.source_id == self.source_id,
+                WebhookEvent.external_id == item.external_id,
+                WebhookEvent.completed.is_(True),
+            )
+        ).all()
+        for webhook_event in pending:
+            self.persist_event(
+                ExternalWatchEvent(
+                    media_external_id=item.external_id,
+                    library_external_id=item.library_external_id,
+                    watched_at=webhook_event.occurred_at,
+                    completed=True,
+                    source_event_id=f"webhook:{webhook_event.id}",
+                    duration_ms=item.duration_ms,
+                ),
+                origin="webhook",
+            )
+
+    def persist_event(self, event: ExternalWatchEvent, *, origin: str = "synchronization") -> bool:
         if not event.completed:
             return False
         reference = self.work.source_media_refs.by_external_identity(
@@ -137,6 +161,7 @@ class MediaPersistenceService:
                 existing.progress_ms = event.progress_ms
                 existing.duration_ms = event.duration_ms
                 existing.view_number = event.view_number
+                existing.origin = origin
                 return False
         if self.work.watch_events.by_dedup_key(self.source_id, dedup_key) is not None:
             return False
@@ -165,6 +190,7 @@ class MediaPersistenceService:
                 progress_ms=event.progress_ms,
                 duration_ms=event.duration_ms,
                 view_number=event.view_number,
+                origin=origin,
             )
         )
         return True
@@ -338,7 +364,23 @@ class MediaPersistenceService:
         if len(matches) > 1:
             raise ValueError("External identifiers match more than one catalog item.")
         if not matches:
-            return None
+            if item.kind is not ExternalMediaKind.MOVIE:
+                return None
+            # Some Plex/Jellyfin installations omit provider ids. Exact movie
+            # identity is a safe fallback and lets both source refs share one card.
+            candidates = self.work.session.scalars(
+                select(MediaItem)
+                .join(SourceMediaRef, SourceMediaRef.media_item_id == MediaItem.id)
+                .join(Source, Source.id == SourceMediaRef.source_id)
+                .where(
+                    MediaItem.kind == MediaKind.MOVIE,
+                    func.lower(MediaItem.title) == item.title.casefold(),
+                    MediaItem.year == item.year,
+                    Source.id != self.source_id,
+                )
+                .distinct()
+            ).all()
+            return candidates[0] if len(candidates) == 1 else None
         return self._required_media(matches.pop())
 
     def _bind_existing_episode_hierarchy(
