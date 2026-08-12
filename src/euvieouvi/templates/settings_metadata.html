@@ -8,5 +8,5 @@
 <div class="form-check form-switch mb-3"><input class="form-check-input" id="auto_after_sync" name="auto_after_sync" type="checkbox" {% if values.get('metadata.auto_after_sync')=='true' %}checked{% endif %}><label class="form-check-label" for="auto_after_sync">Executar após sincronizações concluídas</label></div>
 <div class="mb-3"><label class="form-label" for="language">Idioma TMDB</label><select class="form-select" id="language" name="language"><option value="pt-BR" {% if values.get('metadata.language','pt-BR')=='pt-BR' %}selected{% endif %}>Português (Brasil)</option><option value="en-US" {% if values.get('metadata.language')=='en-US' %}selected{% endif %}>English (US)</option></select></div>
 <button class="btn btn-primary">Salvar configuração</button></form></div></div>
-<div class="card"><div class="card-body d-flex flex-wrap gap-3 align-items-center"><div><strong>Último resultado:</strong> {{ values.get('metadata.last_summary','ainda não executado') }}</div><form class="ms-lg-auto" method="post" action="{{ url_for('web.metadata_enrich') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-primary" {% if enrichment_active %}disabled{% endif %}>{{ 'Em execução…' if enrichment_active else 'Enriquecer agora' }}</button></form></div></div>
+{% include 'fragments/enrichment_status.html' %}
 {% endblock %}

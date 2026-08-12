@@ -106,12 +106,14 @@ class LocalSyncExecutor:
 
                         def report(counters: dict[str, int]) -> None:
                             token.raise_if_cancelled()
-                            if counters["processed"] % 5 != 0:
+                            percent = counters.get("percent", 0)
+                            if counters["processed"] % 5 != 0 and percent != 100:
                                 return
+                            total = counters.get("total", counters["processed"])
                             orchestrator.update_progress(
                                 run_id,
                                 "Enriquecendo metadados externos · "
-                                f"{counters['processed']} processados, "
+                                f"{percent}% · {counters['processed']} de {total} processados, "
                                 f"{counters['updated']} atualizados e "
                                 f"{counters['failed']} falhas.",
                             )

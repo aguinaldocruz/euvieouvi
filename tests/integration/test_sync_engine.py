@@ -47,6 +47,7 @@ from euvieouvi.database.models import (
     SyncRunLibrary,
     WatchEvent,
     WatchState,
+    WebhookEvent,
 )
 from euvieouvi.extensions import db
 from euvieouvi.sync.cancellation import CancellationToken
@@ -225,6 +226,42 @@ def episode(number: int, *, watched: bool) -> ExternalMediaItem:
         view_count=1 if watched else 0,
         last_viewed_at=NOW if watched else None,
     )
+
+
+def test_committed_webhook_timestamp_is_reconciled_during_media_sync(app: Flask) -> None:
+    with app.app_context():
+        source_id, library_ids = seed_source(second_library=True)
+        movie_library = db.session.get(Library, library_ids[0])
+        assert movie_library is not None
+        movie_library.enabled = False
+        first = orchestrator(FixtureConnector({"shows": (episode(1, watched=False),)})).run(
+            source_id
+        )
+        assert first.status is SyncStatus.SUCCEEDED
+        db.session.add(
+            WebhookEvent(
+                source_id=source_id,
+                external_id="episode-1",
+                title="Episode 1",
+                media_kind="episode",
+                event_type="media.scrobble",
+                occurred_at=NOW,
+                completed=True,
+                active=False,
+            )
+        )
+        db.session.commit()
+
+        second = orchestrator(FixtureConnector({"shows": (episode(1, watched=True),)})).run(
+            source_id
+        )
+
+        assert second.status is SyncStatus.SUCCEEDED
+        event = db.session.scalar(
+            select(WatchEvent).where(WatchEvent.source_event_id.like("webhook:%"))
+        )
+        assert event is not None
+        assert event.watched_at == NOW.replace(tzinfo=None)
 
 
 def track(external_id: str = "track-1") -> ExternalMediaItem:

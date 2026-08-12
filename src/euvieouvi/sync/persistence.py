@@ -127,11 +127,16 @@ class MediaPersistenceService:
             )
         ).all()
         for webhook_event in pending:
+            occurred_at = webhook_event.occurred_at
+            if occurred_at.tzinfo is None:
+                # SQLite stores timezone-aware values as naive text. Restore the
+                # UTC contract required by connector DTOs after loading a row.
+                occurred_at = occurred_at.replace(tzinfo=UTC)
             self.persist_event(
                 ExternalWatchEvent(
                     media_external_id=item.external_id,
                     library_external_id=item.library_external_id,
-                    watched_at=webhook_event.occurred_at,
+                    watched_at=occurred_at,
                     completed=True,
                     source_event_id=f"webhook:{webhook_event.id}",
                     duration_ms=item.duration_ms,

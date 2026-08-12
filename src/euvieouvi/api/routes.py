@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from flask import Blueprint, Response, current_app, jsonify, request
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 
 from euvieouvi.api.runtime import connector_for, get_executor
@@ -343,7 +343,13 @@ def sync_runs_get(run_id: int) -> Response:
         .order_by(SyncRunLibrary.id)
     ).all()
     errors = db.session.scalars(
-        select(SyncError).where(SyncError.sync_run_id == run_id).order_by(SyncError.id).limit(100)
+        select(SyncError)
+        .where(SyncError.sync_run_id == run_id)
+        .order_by(
+            case((SyncError.category == "view_count_regression", 1), else_=0),
+            SyncError.id,
+        )
+        .limit(100)
     ).all()
     result["libraries"] = [
         {

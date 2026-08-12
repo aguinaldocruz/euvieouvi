@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from importlib.metadata import version
 
 from flask import Flask
-from sqlalchemy import and_, case, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 
 from euvieouvi.database.enums import MediaKind
 from euvieouvi.database.models import (
@@ -31,10 +31,10 @@ from euvieouvi.extensions import db
 def enrich_catalog(
     app: Flask,
     *,
-    limit: int = 100,
+    limit: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
 ) -> dict[str, int]:
-    """Enrich a bounded batch selected only by exact external identifiers."""
+    """Enrich all eligible exact identifiers, or a bounded batch when requested."""
     settings = {item.key: item.value for item in db.session.scalars(select(Setting))}
     language = settings.get("metadata.language", "pt-BR")
     tmdb = None
@@ -63,39 +63,59 @@ def enrich_catalog(
                 )
             )
         if not enabled_candidates:
+            if progress is not None:
+                progress({**counters, "total": 0, "percent": 100})
             _save_summary(counters)
             db.session.commit()
             return counters
 
-        candidate_ids: list[int] = list(
-            db.session.scalars(
-                select(MediaIdentifier.id)
-                .join(MediaItem, MediaItem.id == MediaIdentifier.media_item_id)
-                .outerjoin(
-                    EnrichmentRecord,
-                    and_(
-                        EnrichmentRecord.media_item_id == MediaIdentifier.media_item_id,
-                        EnrichmentRecord.provider == MediaIdentifier.provider,
-                    ),
-                )
-                .where(
-                    or_(*enabled_candidates),
-                    or_(
-                        EnrichmentRecord.id.is_(None),
-                        EnrichmentRecord.status != "succeeded",
-                    ),
-                )
-                .order_by(
-                    case((EnrichmentRecord.id.is_(None), 0), else_=1),
-                    EnrichmentRecord.checked_at,
-                    MediaItem.id,
-                    MediaIdentifier.id,
-                )
-                .limit(limit)
-            ).all()
+        missing_metadata = or_(
+            MediaItem.summary.is_(None),
+            MediaItem.tagline.is_(None),
+            MediaItem.studio.is_(None),
+            MediaItem.audience_rating.is_(None),
         )
+        has_poster = exists(
+            select(MediaImage.id).where(
+                MediaImage.media_item_id == MediaItem.id,
+                MediaImage.image_type == "poster",
+            )
+        )
+        candidate_query = (
+            select(MediaIdentifier.id)
+            .join(MediaItem, MediaItem.id == MediaIdentifier.media_item_id)
+            .outerjoin(
+                EnrichmentRecord,
+                and_(
+                    EnrichmentRecord.media_item_id == MediaIdentifier.media_item_id,
+                    EnrichmentRecord.provider == MediaIdentifier.provider,
+                ),
+            )
+            .where(
+                or_(*enabled_candidates),
+                or_(missing_metadata, ~has_poster),
+                or_(
+                    EnrichmentRecord.id.is_(None),
+                    EnrichmentRecord.status != "succeeded",
+                ),
+            )
+            .order_by(
+                case((EnrichmentRecord.id.is_(None), 0), else_=1),
+                EnrichmentRecord.checked_at,
+                MediaItem.id,
+                MediaIdentifier.id,
+            )
+        )
+        if limit is not None:
+            candidate_query = candidate_query.limit(limit)
+        total = db.session.scalar(
+            select(func.count()).select_from(candidate_query.order_by(None).subquery())
+        ) or 0
+        if progress is not None:
+            progress({**counters, "total": total, "percent": 100 if total == 0 else 0})
+        candidate_ids: list[int] = list(db.session.scalars(candidate_query).all())
         for identifier_id in candidate_ids:
-            if counters["processed"] >= limit:
+            if limit is not None and counters["processed"] >= limit:
                 break
             identifier = db.session.get(MediaIdentifier, identifier_id)
             if identifier is None:
@@ -158,7 +178,13 @@ def enrich_catalog(
                 counters["failed"] += 1
             db.session.commit()
             if progress is not None:
-                progress(dict(counters))
+                progress(
+                    {
+                        **counters,
+                        "total": total,
+                        "percent": min(100, counters["processed"] * 100 // total),
+                    }
+                )
     finally:
         if tmdb is not None:
             tmdb.close()

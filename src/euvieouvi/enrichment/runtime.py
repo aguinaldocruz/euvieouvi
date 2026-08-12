@@ -15,22 +15,45 @@ class LocalEnrichmentExecutor:
         self._app = app
         self._lock = threading.Lock()
         self._active = False
+        self._progress: dict[str, int] = {
+            "processed": 0,
+            "updated": 0,
+            "failed": 0,
+            "total": 0,
+            "percent": 0,
+        }
 
     @property
     def active(self) -> bool:
         with self._lock:
             return self._active
 
+    @property
+    def snapshot(self) -> dict[str, int | bool]:
+        with self._lock:
+            return {"active": self._active, **self._progress}
+
     def submit(self) -> bool:
         with self._lock:
             if self._active:
                 return False
             self._active = True
+            self._progress = {
+                "processed": 0,
+                "updated": 0,
+                "failed": 0,
+                "total": 0,
+                "percent": 0,
+            }
 
         def execute() -> None:
+            def report(counters: dict[str, int]) -> None:
+                with self._lock:
+                    self._progress.update(counters)
+
             try:
                 with self._app.app_context():
-                    enrich_catalog(self._app)
+                    enrich_catalog(self._app, progress=report)
             finally:
                 with self._lock:
                     self._active = False

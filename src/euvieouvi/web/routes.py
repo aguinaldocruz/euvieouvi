@@ -459,10 +459,22 @@ def settings_metadata() -> Any:
             db.session.commit()
             flash("Configuração de metadados atualizada.", "success")
             return redirect(url_for("web.settings_metadata"))
+    executor = get_enrichment_executor(current_app)
     return render_template(
         "settings_metadata.html",
         values=values,
-        enrichment_active=get_enrichment_executor(current_app).active,
+        enrichment_active=executor.active,
+        enrichment=executor.snapshot,
+    )
+
+
+@blueprint.get("/metadata/enrichment-status")
+def metadata_enrichment_status() -> Any:
+    values = _settings("metadata.last_summary")
+    return render_template(
+        "fragments/enrichment_status.html",
+        enrichment=get_enrichment_executor(current_app).snapshot,
+        last_summary=values.get("metadata.last_summary", "ainda não executado"),
     )
 
 
@@ -1136,7 +1148,13 @@ def _sync_detail_context(run_id: int) -> dict[str, Any] | None:
         .order_by(SyncRunLibrary.id)
     ).all()
     errors = db.session.scalars(
-        select(SyncError).where(SyncError.sync_run_id == run_id).order_by(SyncError.id).limit(100)
+        select(SyncError)
+        .where(SyncError.sync_run_id == run_id)
+        .order_by(
+            case((SyncError.category == "view_count_regression", 1), else_=0),
+            SyncError.id,
+        )
+        .limit(100)
     ).all()
     return {
         "run": run,

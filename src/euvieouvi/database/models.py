@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -105,6 +106,17 @@ class MediaItem(TimestampMixin, Base):
         Index("ix_media_items_source_added", "source_added_at"),
         Index("ix_media_items_hierarchy", "parent_id", "season_number", "episode_number"),
         Index("ix_media_items_music_hierarchy", "parent_id", "disc_number", "track_number"),
+        Index(
+            "ix_media_items_enrichment_missing",
+            "kind",
+            "id",
+            sqlite_where=text(
+                "summary IS NULL OR tagline IS NULL OR studio IS NULL OR audience_rating IS NULL"
+            ),
+            postgresql_where=text(
+                "summary IS NULL OR tagline IS NULL OR studio IS NULL OR audience_rating IS NULL"
+            ),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -214,6 +226,7 @@ class MediaImage(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("media_item_id", "image_type", name="uq_media_images_item_type"),
         Index("ix_media_images_cache_status", "cache_status"),
+        Index("ix_media_images_type_item", "image_type", "media_item_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

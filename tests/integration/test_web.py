@@ -184,13 +184,29 @@ def test_metadata_settings_and_manual_enrichment(
     class Executor:
         active = False
 
+        def __init__(self) -> None:
+            self.snapshot = {
+                "active": False, "processed": 0, "updated": 0, "failed": 0,
+                "total": 0, "percent": 0,
+            }
+
         def submit(self) -> bool:
             return True
 
-    monkeypatch.setattr("euvieouvi.web.routes.get_enrichment_executor", lambda app: Executor())
+    executor = Executor()
+    monkeypatch.setattr(
+        "euvieouvi.web.routes.get_enrichment_executor", lambda app: executor
+    )
     token = csrf(client, "/settings/metadata")
     started = client.post("/metadata/enrich", data={"csrf_token": token}, follow_redirects=True)
     assert "Enriquecimento iniciado" in started.get_data(as_text=True)
+
+    executor.snapshot = {
+        "active": True, "processed": 50, "updated": 20, "failed": 1,
+        "total": 100, "percent": 50,
+    }
+    progress = client.get("/metadata/enrichment-status").get_data(as_text=True)
+    assert "50%" in progress and "50 de 100 processados" in progress
 
 
 def seed_web() -> tuple[int, int, int, int]:

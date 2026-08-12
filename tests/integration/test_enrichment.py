@@ -155,3 +155,52 @@ def test_succeeded_records_do_not_starve_later_enrichment_candidates(
         assert db.session.scalar(
             select(MediaImage).where(MediaImage.media_item_id == target.id)
         ) is not None
+
+
+def test_default_enrichment_processes_more_than_one_hundred_candidates(
+    app: Flask, monkeypatch: object
+) -> None:
+    class AnyTmdb:
+        def __init__(self, token: str) -> None:
+            assert token == "tmdb-token"
+
+        def lookup(
+            self, media_type: str, external_id: str, *, language: str
+        ) -> EnrichedMetadata:
+            assert media_type == "movie"
+            return EnrichedMetadata(summary=f"Summary {external_id}")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(service, "TmdbClient", AnyTmdb)  # type: ignore[attr-defined]
+    with app.app_context():
+        db.session.add_all(
+            [
+                Setting(key="metadata.tmdb.enabled", value="true"),
+                Setting(key="metadata.tmdb.token", value="tmdb-token"),
+            ]
+        )
+        for index in range(105):
+            item = MediaItem(kind=MediaKind.MOVIE, title=f"Movie {index}")
+            db.session.add(item)
+            db.session.flush()
+            db.session.add(
+                MediaIdentifier(
+                    media_item_id=item.id,
+                    provider="tmdb",
+                    external_id=str(index),
+                )
+            )
+        db.session.commit()
+        progress_updates: list[dict[str, int]] = []
+
+        result = service.enrich_catalog(app, progress=progress_updates.append)
+
+        assert result == {"processed": 105, "updated": 105, "failed": 0}
+        assert len(db.session.scalars(select(EnrichmentRecord)).all()) == 105
+        assert progress_updates[0] == {
+            "processed": 0, "updated": 0, "failed": 0,
+            "total": 105, "percent": 0,
+        }
+        assert progress_updates[-1]["percent"] == 100

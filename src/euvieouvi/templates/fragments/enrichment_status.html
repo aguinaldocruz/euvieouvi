@@ -1,0 +1,22 @@
+<div id="enrichment-status"
+     {% if enrichment.active %}hx-get="{{ url_for('web.metadata_enrichment_status') }}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}
+     aria-live="polite">
+  <div class="card">
+    <div class="card-body">
+      {% if enrichment.active %}
+        <div class="d-flex justify-content-between mb-2">
+          <strong>Enriquecimento em execução</strong>
+          <span>{{ enrichment.percent }}%</span>
+        </div>
+        <div class="progress mb-2" role="progressbar" aria-valuenow="{{ enrichment.percent }}" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-bar" style="width: {{ enrichment.percent }}%"></div>
+        </div>
+        <div class="small text-secondary">{{ enrichment.processed }} de {{ enrichment.total }} processados · {{ enrichment.updated }} atualizados · {{ enrichment.failed }} falhas</div>
+      {% else %}
+        <div><strong>Último resultado:</strong> {{ last_summary if last_summary is defined else values.get('metadata.last_summary', 'ainda não executado') }}</div>
+      {% endif %}
+      <form class="mt-3" method="post" action="{{ url_for('web.metadata_enrich') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-outline-primary" {% if enrichment.active %}disabled{% endif %}>{{ 'Em execução…' if enrichment.active else 'Enriquecer agora' }}</button>
+      </form>
+    </div>
