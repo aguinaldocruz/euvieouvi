@@ -858,6 +858,7 @@ def test_series_detail_groups_episodes_by_season(app: Flask) -> None:
         )
         db.session.commit()
         show_id = show.id
+        episode_id = episode.id
     text = app.test_client().get(f"/media/{show_id}").get_data(as_text=True)
     assert "Temporada 1" in text
     assert "E01" in text
@@ -866,6 +867,17 @@ def test_series_detail_groups_episodes_by_season(app: Flask) -> None:
     assert "Space Pilot 3000</strong>" in text
     assert "reprodução 1" in text
     assert "Disponível no Plex" in text
+
+    client = app.test_client()
+    episode_detail = client.get(f"/media/{episode_id}").get_data(as_text=True)
+    dashboard = client.get("/").get_data(as_text=True)
+    history = client.get("/history?kind=episode").get_data(as_text=True)
+    catalog = client.get("/catalog?kind=episode").get_data(as_text=True)
+    assert "Futurama" in episode_detail and "Space Pilot 3000" in episode_detail
+    assert 'aria-label="Episódio"' in dashboard and "Futurama" in dashboard
+    assert 'aria-label="Episódio"' in history and "Futurama" in history
+    assert 'class="media-type-tab is-episode">Episódio' in catalog
+    assert "Futurama" in catalog and "Space Pilot 3000" in catalog
 
 
 def test_artist_detail_rolls_up_track_history_with_pagination(app: Flask) -> None:

@@ -89,6 +89,36 @@ def _htmx() -> bool:
     return request.headers.get("HX-Request") == "true"
 
 
+def _series_titles(items: Sequence[MediaItem]) -> dict[int, str]:
+    """Return series titles for episodes without issuing per-item queries."""
+    episodes = [item for item in items if item.kind == MediaKind.EPISODE]
+    parent_ids = {item.parent_id for item in episodes if item.parent_id is not None}
+    if not parent_ids:
+        return {}
+    parents = {
+        parent.id: parent
+        for parent in db.session.scalars(select(MediaItem).where(MediaItem.id.in_(parent_ids)))
+    }
+    show_ids = {
+        parent.parent_id
+        for parent in parents.values()
+        if parent.kind == MediaKind.SEASON and parent.parent_id is not None
+    }
+    shows = {
+        show.id: show
+        for show in db.session.scalars(select(MediaItem).where(MediaItem.id.in_(show_ids)))
+    }
+    result: dict[int, str] = {}
+    for episode in episodes:
+        parent = parents.get(episode.parent_id)
+        show = parent if parent is not None and parent.kind == MediaKind.SHOW else None
+        if parent is not None and parent.kind == MediaKind.SEASON:
+            show = shows.get(parent.parent_id)
+        if show is not None:
+            result[episode.id] = show.title
+    return result
+
+
 @blueprint.get("/")
 def dashboard() -> Any:
     source = _source()
@@ -133,6 +163,7 @@ def dashboard() -> Any:
         next_step=next_step,
         last_run=last_run,
         recent=recent,
+        series_titles=_series_titles([row[1] for row in recent]),
     )
 
 
@@ -1281,6 +1312,7 @@ def history() -> Any:
         "history.html",
         items=visible,
         history_details=history_details,
+        series_titles=_series_titles(visible),
         page=page,
         has_more=has_more,
         query=query,
@@ -1305,6 +1337,7 @@ def catalog() -> Any:
     allowed_kinds = {
         MediaKind.MOVIE,
         MediaKind.SHOW,
+        MediaKind.EPISODE,
         MediaKind.ARTIST,
         MediaKind.ALBUM,
         MediaKind.TRACK,
@@ -1533,6 +1566,7 @@ def catalog() -> Any:
         decade=decade,
         libraries=db.session.scalars(select(Library).order_by(Library.name)).all(),
         genres=db.session.scalars(select(Genre).order_by(Genre.name)).all(),
+        series_titles=_series_titles([row[0] for row in merged_rows]),
     )
 
 
@@ -1754,6 +1788,7 @@ def media_detail(media_id: int) -> Any:
         child_completions=child_completions,
         child_availability=child_availability,
         availability_rows=availability_rows,
+        series_title=_series_titles([item]).get(item.id),
     )
 
 

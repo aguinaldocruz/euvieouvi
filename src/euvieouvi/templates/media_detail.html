@@ -7,6 +7,7 @@
     <img class="img-fluid rounded shadow-sm" src="{{ url_for('web.media_image', media_id=item.id) }}" alt="Capa de {{ item.title }}">
   </div>
   <div class="col">
+    {% if series_title %}<p class="text-secondary mb-1">{{ series_title }}</p>{% endif %}
     <h1 class="h2">{{ item.title }}{% if item.year %} <span class="text-secondary">({{ item.year }})</span>{% endif %}</h1>
     {% if item.tagline %}<p class="lead fst-italic">{{ item.tagline }}</p>{% endif %}
     <p class="text-secondary">

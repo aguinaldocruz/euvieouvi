@@ -1,0 +1,15 @@
+{% macro list_badge(item) -%}
+  {% if item.kind.value in ['artist', 'album', 'track'] %}{% set type_class, symbol, label = 'music', '♫', 'Música' %}
+  {% elif item.kind.value == 'episode' %}{% set type_class, symbol, label = 'episode', 'E', 'Episódio' %}
+  {% elif item.kind.value in ['show', 'season'] %}{% set type_class, symbol, label = 'series', 'S', 'Série' %}
+  {% else %}{% set type_class, symbol, label = 'movie', 'F', 'Filme' %}{% endif %}
+  <span class="media-type-badge is-{{ type_class }}" title="{{ label }}" aria-label="{{ label }}">{{ symbol }}</span>
+{%- endmacro %}
+
+{% macro poster_tab(item) -%}
+  {% if item.kind.value in ['artist', 'album', 'track'] %}{% set type_class, label = 'music', 'Música' %}
+  {% elif item.kind.value == 'episode' %}{% set type_class, label = 'episode', 'Episódio' %}
+  {% elif item.kind.value in ['show', 'season'] %}{% set type_class, label = 'series', 'Série' %}
+  {% else %}{% set type_class, label = 'movie', 'Filme' %}{% endif %}
+  <span class="media-type-tab is-{{ type_class }}">{{ label }}</span>
+{%- endmacro %}

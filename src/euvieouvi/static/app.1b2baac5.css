@@ -34,6 +34,13 @@ footer { color:var(--evo-muted); }
 .media-badges { position:absolute; right:.45rem; top:.45rem; display:flex; gap:.3rem; }
 .media-badge { display:grid; place-items:center; width:1.65rem; height:1.65rem; border-radius:50%; color:#fff; font-size:.75rem; font-weight:800; box-shadow:0 1px 4px rgb(0 0 0 / 30%); }
 .is-available { background:#d67a00; }.is-jellyfin { background:#7b3ff2; }.is-played { background:#198754; }
+.media-type-badge { display:grid; place-items:center; flex:0 0 1.8rem; width:1.8rem; height:1.8rem; margin-top:.1rem; border-radius:.4rem; color:#fff; font-size:.78rem; font-weight:800; box-shadow:0 1px 3px rgb(0 0 0 / 20%); }
+.media-type-tab { position:absolute; top:.45rem; left:0; padding:.22rem .48rem .22rem .4rem; border-radius:0 .3rem .3rem 0; color:#fff; font-size:.67rem; font-weight:800; line-height:1.2; letter-spacing:.025em; text-transform:uppercase; box-shadow:0 1px 3px rgb(0 0 0 / 28%); }
+.media-type-badge.is-movie,.media-type-tab.is-movie { background:#2367a8; }
+.media-type-badge.is-series,.media-type-tab.is-series { background:#7b4ab4; }
+.media-type-badge.is-episode,.media-type-tab.is-episode { background:#b44b65; }
+.media-type-badge.is-music,.media-type-tab.is-music { background:#087f6d; }
+.min-w-0 { min-width:0; }
 @media (max-width: 767.98px) { .desktop-only { display:none; } .metric-value { font-size:1.5rem; } }
 html[data-theme="dark"] .navbar { --bs-navbar-color: var(--evo-muted); --bs-navbar-hover-color: var(--evo-ink); --bs-navbar-active-color: var(--evo-ink); --bs-navbar-brand-color: var(--evo-ink); --bs-navbar-toggler-border-color: var(--evo-border); background: var(--evo-surface); border-color: var(--evo-border); }
 html[data-theme="dark"] .navbar .nav-link { color: var(--evo-muted); }
