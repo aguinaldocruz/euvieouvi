@@ -17,6 +17,10 @@ class EnrichmentError(Exception):
     pass
 
 
+class EnrichmentNotFoundError(EnrichmentError):
+    """The exact external identifier is permanently absent at the provider."""
+
+
 @dataclass(frozen=True, slots=True)
 class EnrichedMetadata:
     summary: str | None = None
@@ -58,7 +62,7 @@ class TmdbClient:
         params.update(self._params_extra)
         response = self._client.get(f"/3/{media_type}/{external_id}", params=params)
         if response.status_code == 404:
-            raise EnrichmentError("TMDB item was not found")
+            raise EnrichmentNotFoundError("TMDB item was not found")
         try:
             response.raise_for_status()
             data = response.json()
@@ -115,7 +119,7 @@ class MusicBrainzClient:
         )
         self._used = True
         if response.status_code == 404:
-            raise EnrichmentError("MusicBrainz recording was not found")
+            raise EnrichmentNotFoundError("MusicBrainz recording was not found")
         try:
             response.raise_for_status()
             data = response.json()

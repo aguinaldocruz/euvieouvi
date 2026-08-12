@@ -79,6 +79,7 @@ def map_item(raw: dict[str, Any], library_id: str) -> ExternalMediaItem:
         year=_integer(raw.get("ProductionYear")),
         show_external_id=series_id,
         show_title=_text(raw.get("SeriesName")),
+        show_identifiers=_identifiers(raw.get("_SeriesProviderIds")),
         season_external_id=season_id,
         season_number=_integer(raw.get("ParentIndexNumber")),
         episode_number=_integer(raw.get("IndexNumber")),

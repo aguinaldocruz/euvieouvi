@@ -105,6 +105,51 @@ def test_mark_watched_posts_played_item_for_configured_user() -> None:
     connector.mark_watched("movie-1")
 
 
+def test_connector_fetches_and_caches_parent_series_provider_ids() -> None:
+    series_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal series_requests
+        if request.url.path.endswith("/Users/user-1/Items/show-1"):
+            series_requests += 1
+            return httpx.Response(
+                200,
+                json={"ProviderIds": {"Imdb": "tt0213327", "Tmdb": "2985"}},
+                request=request,
+            )
+        if request.url.path.endswith("/Users/user-1/Items"):
+            return httpx.Response(
+                200,
+                json={
+                    "TotalRecordCount": 2,
+                    "Items": [
+                        {
+                            "Id": f"episode-{number}",
+                            "Type": "Episode",
+                            "Name": f"Episode {number}",
+                            "SeriesId": "show-1",
+                            "SeriesName": "Andrômeda",
+                            "ParentIndexNumber": 1,
+                            "IndexNumber": number,
+                        }
+                        for number in (1, 2)
+                    ],
+                },
+                request=request,
+            )
+        raise AssertionError(str(request.url))
+
+    connector = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1")
+    page = connector.get_media_page(
+        ExternalLibraryRef("shows", ExternalLibraryType.SHOW),
+        ExternalMediaKind.EPISODE,
+        PageRequest(size=10),
+    )
+    assert series_requests == 1
+    assert page.items[0].show_identifiers[0].external_id == "tt0213327"
+    assert page.items[1].show_identifiers[1].external_id == "2985"
+
+
 def test_music_and_episode_mapping_with_fallbacks() -> None:
     track = map_item(
         {

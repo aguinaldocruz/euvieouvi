@@ -15,6 +15,7 @@ class LocalEnrichmentExecutor:
         self._app = app
         self._lock = threading.Lock()
         self._active = False
+        self._cancel = threading.Event()
         self._progress: dict[str, int] = {
             "processed": 0,
             "updated": 0,
@@ -38,6 +39,7 @@ class LocalEnrichmentExecutor:
             if self._active:
                 return False
             self._active = True
+            self._cancel.clear()
             self._progress = {
                 "processed": 0,
                 "updated": 0,
@@ -53,13 +55,20 @@ class LocalEnrichmentExecutor:
 
             try:
                 with self._app.app_context():
-                    enrich_catalog(self._app, progress=report)
+                    enrich_catalog(self._app, progress=report, cancelled=self._cancel.is_set)
             finally:
                 with self._lock:
                     self._active = False
 
         threading.Thread(target=execute, name="euvieouvi-enrichment", daemon=True).start()
         return True
+
+    def cancel(self) -> bool:
+        with self._lock:
+            if not self._active:
+                return False
+            self._cancel.set()
+            return True
 
 
 def get_enrichment_executor(app: Flask | None = None) -> LocalEnrichmentExecutor:

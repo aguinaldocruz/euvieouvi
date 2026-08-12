@@ -12,11 +12,13 @@ from sqlalchemy.orm import Session
 from euvieouvi.connectors.base import MediaConnector
 from euvieouvi.database.enums import ConnectorType, MediaKind, SyncStatus
 from euvieouvi.database.models import (
+    MediaIdentifier,
     MediaItem,
     Setting,
     Source,
     SourceMediaRef,
     SyncRun,
+    WatchEvent,
     WatchState,
 )
 
@@ -38,6 +40,49 @@ class WatchSyncResult:
     updated: int
     skipped: int
     failed: int
+
+
+def _matching_item_groups(
+    session: Session,
+    item_ids: set[int],
+    kinds: dict[int, MediaKind],
+) -> tuple[frozenset[int], ...]:
+    """Group same-kind catalog rows using stable cross-provider identifiers."""
+    parents = {media_item_id: media_item_id for media_item_id in item_ids}
+
+    def find(media_item_id: int) -> int:
+        while parents[media_item_id] != media_item_id:
+            parents[media_item_id] = parents[parents[media_item_id]]
+            media_item_id = parents[media_item_id]
+        return media_item_id
+
+    identifiers: dict[tuple[MediaKind, str, str], int] = {}
+    rows = session.execute(
+        select(
+            MediaIdentifier.media_item_id,
+            MediaIdentifier.provider,
+            MediaIdentifier.external_id,
+        ).where(
+            MediaIdentifier.media_item_id.in_(item_ids),
+            MediaIdentifier.provider.in_(("tmdb", "tvdb", "imdb")),
+        )
+    )
+    for media_item_id, provider, external_id in rows:
+        kind = kinds.get(media_item_id)
+        if kind not in _SYNCABLE_KINDS:
+            continue
+        key = (kind, provider, external_id)
+        existing = identifiers.setdefault(key, media_item_id)
+        left = find(media_item_id)
+        right = find(existing)
+        if left != right:
+            parents[right] = left
+
+    groups: dict[int, set[int]] = {}
+    for media_item_id in item_ids:
+        if kinds.get(media_item_id) in _SYNCABLE_KINDS:
+            groups.setdefault(find(media_item_id), set()).add(media_item_id)
+    return tuple(frozenset(group) for group in groups.values())
 
 
 class WatchSyncService:
@@ -116,31 +161,47 @@ class WatchSyncService:
                 )
             ).all()
             watched = {(state.media_item_id, state.source_id) for state in states}
+            watched.update(
+                session.execute(
+                    select(WatchEvent.media_item_id, WatchEvent.source_id).where(
+                        WatchEvent.source_id.in_(source_ids),
+                        WatchEvent.media_item_id.in_(item_ids),
+                        WatchEvent.completed.is_(True),
+                    )
+                ).all()
+            )
             refs_by_item: dict[int, dict[int, SourceMediaRef]] = {}
             for ref in refs:
                 refs_by_item.setdefault(ref.media_item_id, {}).setdefault(ref.source_id, ref)
+            groups = _matching_item_groups(session, item_ids, kinds)
             candidates: list[WatchSyncCandidate] = []
             scanned = 0
             skipped = 0
-            for media_item_id, item_refs in refs_by_item.items():
-                if (
-                    kinds.get(media_item_id) not in _SYNCABLE_KINDS
-                    or not source_ids <= item_refs.keys()
+            for group in groups:
+                grouped_refs: dict[int, list[SourceMediaRef]] = {}
+                for media_item_id in group:
+                    for source_id, ref in refs_by_item.get(media_item_id, {}).items():
+                        grouped_refs.setdefault(source_id, []).append(ref)
+                if not source_ids <= grouped_refs.keys() or any(
+                    len(grouped_refs[source_id]) != 1 for source_id in source_ids
                 ):
                     continue
                 scanned += 1
                 completed_sources = {
-                    source_id for source_id in source_ids if (media_item_id, source_id) in watched
+                    source_id
+                    for source_id in source_ids
+                    if any((media_item_id, source_id) in watched for media_item_id in group)
                 }
                 if not completed_sources or completed_sources == source_ids:
                     skipped += 1
                     continue
                 target_source_id = next(iter(source_ids - completed_sources))
+                target_ref = grouped_refs[target_source_id][0]
                 candidates.append(
                     WatchSyncCandidate(
-                        media_item_id,
+                        target_ref.media_item_id,
                         target_source_id,
-                        item_refs[target_source_id].external_id,
+                        target_ref.external_id,
                     )
                 )
             now = self._clock()

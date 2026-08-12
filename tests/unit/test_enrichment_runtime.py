@@ -13,14 +13,20 @@ def test_enrichment_executor_allows_only_one_active_run(app: Flask, monkeypatch:
     release = Event()
 
     def run(
-        application: Flask, *, progress: object = None
+        application: Flask, *, progress: object = None, cancelled: object = None
     ) -> dict[str, int]:
         assert application is app
         assert callable(progress)
-        progress({
-            "processed": 0, "updated": 0, "failed": 0,
-            "total": 1, "percent": 0,
-        })
+        assert callable(cancelled)
+        progress(
+            {
+                "processed": 0,
+                "updated": 0,
+                "failed": 0,
+                "total": 1,
+                "percent": 0,
+            }
+        )
         started.set()
         assert release.wait(2)
         return {"processed": 0, "updated": 0, "failed": 0}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import secrets
+import unicodedata
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from importlib.metadata import version
@@ -484,6 +485,15 @@ def metadata_enrich() -> Any:
         flash("Enriquecimento iniciado em segundo plano.", "success")
     else:
         flash("O enriquecimento já está em execução.", "warning")
+    return redirect(url_for("web.settings_metadata"))
+
+
+@blueprint.post("/metadata/enrich/cancel")
+def metadata_enrich_cancel() -> Any:
+    if get_enrichment_executor(current_app).cancel():
+        flash("Cancelamento do enriquecimento solicitado.", "warning")
+    else:
+        flash("Nenhum enriquecimento está em execução.", "info")
     return redirect(url_for("web.settings_metadata"))
 
 
@@ -1098,11 +1108,16 @@ def sync_list() -> Any:
         .where(SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]))
         .order_by(SyncRun.id.desc())
     ).first()
+    watch_sync_run = next(
+        (run for run, _source_value in runs if run.status is SyncStatus.SUCCEEDED),
+        None,
+    )
     return render_template(
         "sync_list.html",
         runs=runs,
         active_run=active[0] if active else None,
         active_source=active[1] if active else None,
+        watch_sync_run=watch_sync_run,
     )
 
 
@@ -1184,10 +1199,7 @@ def sync_watch_sync(run_id: int) -> Any:
     run = db.session.get(SyncRun, run_id)
     if run is None:
         return Response("Sincronização não encontrada.", 404)
-    enabled = _settings("watch_sync.enabled").get("watch_sync.enabled", "false") == "true"
-    if not enabled:
-        flash("Ative a propagação Plex ↔ Jellyfin nas configurações de sincronização.", "warning")
-    elif get_executor(current_app).submit_watch_sync(run_id):
+    if get_executor(current_app).submit_watch_sync(run_id):
         flash("Propagação de conclusões iniciada.", "success")
     else:
         flash("A propagação não pode ser iniciada para esta sincronização.", "warning")
@@ -1332,12 +1344,14 @@ def catalog() -> Any:
         else_=state_stats.c.state_last,
     )
     completed_known = completion_count > 0
-    statement = select(
-        MediaItem,
-        completion_count.label("completion_count"),
-        last_completed.label("last_completed"),
-    ).outerjoin(event_stats, event_stats.c.media_item_id == MediaItem.id).outerjoin(
-        state_stats, state_stats.c.media_item_id == MediaItem.id
+    statement = (
+        select(
+            MediaItem,
+            completion_count.label("completion_count"),
+            last_completed.label("last_completed"),
+        )
+        .outerjoin(event_stats, event_stats.c.media_item_id == MediaItem.id)
+        .outerjoin(state_stats, state_stats.c.media_item_id == MediaItem.id)
     )
     if kind in {item.value for item in allowed_kinds}:
         statement = statement.where(MediaItem.kind == MediaKind(kind))
@@ -1405,7 +1419,29 @@ def catalog() -> Any:
     availability_by_item: dict[int, set[ConnectorType]] = {
         media_id: set() for media_id in candidate_ids
     }
+    canonical_identifier_by_item: dict[int, tuple[str, str]] = {}
     if candidate_ids:
+        identifier_rows = db.session.execute(
+            select(
+                MediaIdentifier.media_item_id,
+                MediaIdentifier.provider,
+                MediaIdentifier.external_id,
+            ).where(
+                MediaIdentifier.media_item_id.in_(candidate_ids),
+                MediaIdentifier.provider.in_(("tmdb", "tvdb", "imdb")),
+            )
+        )
+        provider_priority = {"tmdb": 0, "tvdb": 1, "imdb": 2}
+        ranked_identifiers: dict[int, tuple[int, str, str]] = {}
+        for media_id, provider, external_id in identifier_rows:
+            candidate = (provider_priority[provider], provider, external_id)
+            current = ranked_identifiers.get(int(media_id))
+            if current is None or candidate < current:
+                ranked_identifiers[int(media_id)] = candidate
+        canonical_identifier_by_item = {
+            media_id: (ranked[1], ranked[2]) for media_id, ranked in ranked_identifiers.items()
+        }
+
         direct_rows = db.session.execute(
             select(SourceMediaRef.media_item_id, Source.connector_type)
             .join(Source, Source.id == SourceMediaRef.source_id)
@@ -1461,7 +1497,14 @@ def catalog() -> Any:
             ConnectorType.PLEX in availability,
             ConnectorType.JELLYFIN in availability,
         )
-        key = (item.title.strip().casefold(), item.year, item.kind.value)
+        identifier = canonical_identifier_by_item.get(item.id)
+        key = (
+            f"{identifier[0]}:{identifier[1]}"
+            if identifier is not None
+            else _normalized_catalog_title(item.title),
+            None if identifier is not None else item.year,
+            item.kind.value,
+        )
         if key not in deduped:
             deduped[key] = display_row
             ordered_keys.append(key)
@@ -1955,6 +1998,13 @@ def _parse_webhook_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone(UTC)
+
+
+def _normalized_catalog_title(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value)
+    return " ".join(
+        "".join(char for char in decomposed if not unicodedata.combining(char)).split()
+    ).casefold()
 
 
 def _truthy(value: Any) -> bool:

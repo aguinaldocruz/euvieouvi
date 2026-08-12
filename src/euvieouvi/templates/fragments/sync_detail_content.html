@@ -41,7 +41,7 @@
       {% if run.watch_sync_status %}<p class="mb-2"><span class="status-dot status-{{ run.watch_sync_status.value }}"></span>{{ run.watch_sync_status.value }}</p>{% else %}<p class="text-secondary mb-2">Ainda não executada.</p>{% endif %}
       <div class="row g-3"><div class="col">Analisados <strong class="d-block">{{ run.watch_sync_scanned }}</strong></div><div class="col">Atualizados <strong class="d-block">{{ run.watch_sync_updated }}</strong></div><div class="col">Alinhados <strong class="d-block">{{ run.watch_sync_skipped }}</strong></div><div class="col">Falhas <strong class="d-block">{{ run.watch_sync_failed }}</strong></div></div>
       {% if run.watch_sync_summary %}<p class="small text-secondary mb-0 mt-2">{{ run.watch_sync_summary }}</p>{% endif %}</div>
-      {% if watch_sync_enabled and run.status.value == 'succeeded' and (not run.watch_sync_status or run.watch_sync_status.value not in ['queued', 'running']) %}<form method="post" action="{{ url_for('web.sync_watch_sync', run_id=run.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-primary">{% if run.watch_sync_status %}Executar novamente{% else %}Executar agora{% endif %}</button></form>{% endif %}
+      {% if run.status.value == 'succeeded' and (not run.watch_sync_status or run.watch_sync_status.value not in ['queued', 'running']) %}<form method="post" action="{{ url_for('web.sync_watch_sync', run_id=run.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-primary">{% if run.watch_sync_status %}Executar novamente{% else %}Executar agora{% endif %}</button></form>{% endif %}
     </div>
   </div></div>
   <h2 class="h4">Bibliotecas</h2>

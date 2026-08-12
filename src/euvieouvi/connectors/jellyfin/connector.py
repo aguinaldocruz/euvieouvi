@@ -49,6 +49,7 @@ class JellyfinConnector:
             raise ValueError("Jellyfin user id must not be empty")
         self._client = client
         self._user_id = user_id.strip()
+        self._series_provider_ids: dict[str, Any] = {}
 
     def close(self) -> None:
         self._client.close()
@@ -154,15 +155,27 @@ class JellyfinConnector:
         total = raw.get("TotalRecordCount")
         return {"items": items, "total": total if isinstance(total, int) else len(items)}
 
-    @staticmethod
     def _map_valid_items(
-        items: list[dict[str, Any]], library_id: str
+        self, items: list[dict[str, Any]], library_id: str
     ) -> Iterator[ExternalMediaItem]:
         for value in items:
             try:
-                yield map_item(value, library_id)
+                yield map_item(self._with_series_provider_ids(value), library_id)
             except (ConnectorResponseError, ValueError):
                 continue
+
+    def _with_series_provider_ids(self, value: dict[str, Any]) -> dict[str, Any]:
+        series_id = value.get("SeriesId")
+        if not isinstance(series_id, str) or not series_id.strip():
+            return value
+        if series_id not in self._series_provider_ids:
+            raw = self._client.get_json(f"/Users/{self._user_id}/Items/{series_id}")
+            self._series_provider_ids[series_id] = (
+                raw.get("ProviderIds") if isinstance(raw, dict) else None
+            )
+        enriched = dict(value)
+        enriched["_SeriesProviderIds"] = self._series_provider_ids[series_id]
+        return enriched
 
     @staticmethod
     def _map_valid_history(

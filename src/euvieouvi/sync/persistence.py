@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import func, select
 
-from euvieouvi.connectors.dtos import ExternalMediaItem, ExternalMediaKind, ExternalWatchEvent
-from euvieouvi.database.enums import MediaKind
+from euvieouvi.connectors.dtos import (
+    ExternalIdentifier,
+    ExternalMediaItem,
+    ExternalMediaKind,
+    ExternalWatchEvent,
+)
+from euvieouvi.database.enums import ConnectorType, MediaKind
 from euvieouvi.database.models import (
     Genre,
     MediaGenre,
@@ -60,7 +66,8 @@ class MediaPersistenceService:
             media = matched_media or MediaItem(
                 kind=MediaKind(item.kind.value), title=item.title, parent_id=parent_id
             )
-            self._apply_media(media, item, parent_id)
+            if self._canonical_source_may_update(media.id):
+                self._apply_media(media, item, parent_id)
             if matched_media is None:
                 self.work.media_items.add(media)
                 self.work.session.flush()
@@ -88,7 +95,9 @@ class MediaPersistenceService:
                 if reference.raw_hash == signature
                 else ItemClassification.UPDATED
             )
-            if classification is ItemClassification.UPDATED:
+            if classification is ItemClassification.UPDATED and self._canonical_source_may_update(
+                media.id
+            ):
                 self._apply_media(media, item, parent_id)
             reference.external_key = item.external_key
             reference.external_updated_at = item.updated_at
@@ -98,7 +107,8 @@ class MediaPersistenceService:
             reference.raw_hash = signature
 
         self._sync_identifiers(media.id, item)
-        self._sync_genres(media.id, item.genres)
+        if self._canonical_source_may_update(media.id):
+            self._sync_genres(media.id, item.genres)
         self._sync_image(media.id, "poster", item.thumb_path)
         self._sync_image(media.id, "backdrop", item.art_path)
         self._reconcile_webhook_events(item)
@@ -362,6 +372,7 @@ class MediaPersistenceService:
             image_source_path=item.artist_thumb_path,
             genres=item.genres,
             observed_at=observed_at,
+            identifiers=item.show_identifiers,
         )
         season_external_id = item.season_external_id or (
             f"{item.show_external_id}:season:{item.season_number}"
@@ -423,16 +434,13 @@ class MediaPersistenceService:
             ).all()
             return candidates[0] if len(candidates) == 1 else None
         matched = self._required_media(matches.pop())
-        if (
-            item.kind is ExternalMediaKind.EPISODE
-            and not self._episode_hierarchy_is_compatible(item, matched)
+        if item.kind is ExternalMediaKind.EPISODE and not self._episode_hierarchy_is_compatible(
+            item, matched
         ):
             return None
         return matched
 
-    def _episode_hierarchy_is_compatible(
-        self, item: ExternalMediaItem, episode: MediaItem
-    ) -> bool:
+    def _episode_hierarchy_is_compatible(self, item: ExternalMediaItem, episode: MediaItem) -> bool:
         """Return whether a provider-id match can safely share this hierarchy."""
         season = self.work.media_items.get(episode.parent_id or 0)
         show = self.work.media_items.get(season.parent_id or 0) if season is not None else None
@@ -537,6 +545,7 @@ class MediaPersistenceService:
         image_source_path: str | None,
         genres: tuple[str, ...],
         observed_at: datetime,
+        identifiers: tuple[ExternalIdentifier, ...] = (),
     ) -> MediaItem:
         reference = self.work.source_media_refs.by_external_identity(self.source_id, external_id)
         if reference is not None:
@@ -549,8 +558,10 @@ class MediaPersistenceService:
             self._sync_image(media.id, "poster", image_source_path)
             if genres:
                 self._merge_genres(media.id, genres)
+            self._sync_identifier_values(media.id, identifiers)
             return media
-        historical = self._match_historical_container(
+        historical = self._match_container_by_identifiers(kind, identifiers)
+        historical = historical or self._match_historical_container(
             kind=kind,
             title=title,
             parent_id=parent_id,
@@ -564,6 +575,7 @@ class MediaPersistenceService:
                 genres=genres,
                 observed_at=observed_at,
             )
+            self._sync_identifier_values(historical.id, identifiers)
             return historical
         media = MediaItem(
             kind=kind,
@@ -585,7 +597,17 @@ class MediaPersistenceService:
         )
         self._sync_image(media.id, "poster", image_source_path)
         self._merge_genres(media.id, genres)
+        self._sync_identifier_values(media.id, identifiers)
         return media
+
+    def _match_container_by_identifiers(
+        self, kind: MediaKind, identifiers: tuple[ExternalIdentifier, ...]
+    ) -> MediaItem | None:
+        identities = tuple((value.provider, value.external_id) for value in identifiers)
+        matches = self.work.media_identifiers.media_ids_for_kind(kind.value, identities)
+        if len(matches) > 1:
+            raise ValueError("Container identifiers match more than one media item.")
+        return self._required_media(matches[0]) if matches else None
 
     def _match_historical_container(
         self,
@@ -600,12 +622,17 @@ class MediaPersistenceService:
             MediaItem.parent_id == parent_id,
         )
         if kind is MediaKind.SHOW:
-            statement = statement.where(MediaItem.title == title)
+            pass
         elif kind is MediaKind.SEASON:
             statement = statement.where(MediaItem.season_number == season_number)
         else:
             return None
-        candidates = self.work.session.scalars(statement.limit(2)).all()
+        candidates = self.work.session.scalars(statement).all()
+        if kind is MediaKind.SHOW:
+            normalized_title = _normalized_title(title)
+            candidates = [
+                item for item in candidates if _normalized_title(item.title) == normalized_title
+            ]
         if len(candidates) > 1:
             raise ValueError("Historical hierarchy has more than one matching container.")
         return candidates[0] if candidates else None
@@ -637,7 +664,12 @@ class MediaPersistenceService:
         media.source_added_at = item.added_at
 
     def _sync_identifiers(self, media_item_id: int, item: ExternalMediaItem) -> None:
-        for identifier in item.identifiers:
+        self._sync_identifier_values(media_item_id, item.identifiers)
+
+    def _sync_identifier_values(
+        self, media_item_id: int, identifiers: tuple[ExternalIdentifier, ...]
+    ) -> None:
+        for identifier in identifiers:
             if (
                 self.work.media_identifiers.by_identity(
                     media_item_id, identifier.provider, identifier.external_id
@@ -658,6 +690,8 @@ class MediaPersistenceService:
         image = self.work.media_images.by_item_and_type(media_item_id, image_type)
         provider = self.work.sources.get(self.source_id)
         provider_name = provider.connector_type.value if provider is not None else "plex"
+        if image is not None and image.provider == "plex" and provider_name != "plex":
+            return
         if image is None:
             self.work.media_images.add(
                 MediaImage(
@@ -678,6 +712,23 @@ class MediaPersistenceService:
             image.mime_type = None
             image.cache_status = "pending"
             image.cached_at = None
+
+    def _canonical_source_may_update(self, media_item_id: int) -> bool:
+        source = self.work.sources.get(self.source_id)
+        if source is None or source.connector_type is ConnectorType.PLEX:
+            return True
+        return (
+            self.work.session.scalar(
+                select(SourceMediaRef.id)
+                .join(Source, Source.id == SourceMediaRef.source_id)
+                .where(
+                    SourceMediaRef.media_item_id == media_item_id,
+                    Source.connector_type == ConnectorType.PLEX,
+                )
+                .limit(1)
+            )
+            is None
+        )
 
     def _sync_genres(self, media_item_id: int, names: tuple[str, ...]) -> None:
         normalized = {" ".join(name.split()).casefold(): " ".join(name.split()) for name in names}
@@ -744,6 +795,13 @@ class MediaPersistenceService:
         state.progress_ms = item.view_offset_ms
         state.observed_at = observed_at
         return regression
+
+
+def _normalized_title(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value)
+    return " ".join(
+        "".join(char for char in decomposed if not unicodedata.combining(char)).split()
+    ).casefold()
 
 
 def media_signature(item: ExternalMediaItem) -> str:

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from importlib.metadata import version
 
 from flask import Flask
-from sqlalchemy import and_, case, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select, update
 
 from euvieouvi.database.enums import MediaKind
 from euvieouvi.database.models import (
@@ -22,6 +22,7 @@ from euvieouvi.database.models import (
 from euvieouvi.enrichment.providers import (
     EnrichedMetadata,
     EnrichmentError,
+    EnrichmentNotFoundError,
     MusicBrainzClient,
     TmdbClient,
 )
@@ -33,6 +34,7 @@ def enrich_catalog(
     *,
     limit: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, int]:
     """Enrich all eligible exact identifiers, or a bounded batch when requested."""
     settings = {item.key: item.value for item in db.session.scalars(select(Setting))}
@@ -44,31 +46,19 @@ def enrich_catalog(
     if settings.get("metadata.musicbrainz.enabled") == "true":
         musicbrainz = MusicBrainzClient(f"euvieouvi/{version('euvieouvi')}")
     counters = {"processed": 0, "updated": 0, "failed": 0}
+    db.session.execute(
+        update(EnrichmentRecord)
+        .where(
+            EnrichmentRecord.status == "failed",
+            EnrichmentRecord.message.in_(
+                ("MusicBrainz recording was not found", "TMDB item was not found")
+            ),
+        )
+        .values(status="not_found")
+    )
     try:
         # Fetch only IDs to avoid DetachedInstanceError after commit
         # (holding ORM objects across commit expires them)
-        enabled_candidates = []
-        if tmdb is not None:
-            enabled_candidates.append(
-                and_(
-                    MediaIdentifier.provider == "tmdb",
-                    MediaItem.kind.in_([MediaKind.MOVIE, MediaKind.SHOW]),
-                )
-            )
-        if musicbrainz is not None:
-            enabled_candidates.append(
-                and_(
-                    MediaIdentifier.provider == "mbid",
-                    MediaItem.kind == MediaKind.TRACK,
-                )
-            )
-        if not enabled_candidates:
-            if progress is not None:
-                progress({**counters, "total": 0, "percent": 100})
-            _save_summary(counters)
-            db.session.commit()
-            return counters
-
         missing_metadata = or_(
             MediaItem.summary.is_(None),
             MediaItem.tagline.is_(None),
@@ -81,6 +71,30 @@ def enrich_catalog(
                 MediaImage.image_type == "poster",
             )
         )
+        eligible_candidates = []
+        if tmdb is not None:
+            eligible_candidates.append(
+                and_(
+                    MediaIdentifier.provider == "tmdb",
+                    MediaItem.kind.in_([MediaKind.MOVIE, MediaKind.SHOW]),
+                    or_(missing_metadata, ~has_poster),
+                )
+            )
+        if musicbrainz is not None:
+            eligible_candidates.append(
+                and_(
+                    MediaIdentifier.provider == "mbid",
+                    MediaItem.kind == MediaKind.TRACK,
+                    ~has_poster,
+                )
+            )
+        if not eligible_candidates:
+            if progress is not None:
+                progress({**counters, "total": 0, "percent": 100})
+            _save_summary(counters)
+            db.session.commit()
+            return counters
+
         candidate_query = (
             select(MediaIdentifier.id)
             .join(MediaItem, MediaItem.id == MediaIdentifier.media_item_id)
@@ -92,11 +106,10 @@ def enrich_catalog(
                 ),
             )
             .where(
-                or_(*enabled_candidates),
-                or_(missing_metadata, ~has_poster),
+                or_(*eligible_candidates),
                 or_(
                     EnrichmentRecord.id.is_(None),
-                    EnrichmentRecord.status != "succeeded",
+                    EnrichmentRecord.status.not_in(("succeeded", "not_found")),
                 ),
             )
             .order_by(
@@ -108,13 +121,18 @@ def enrich_catalog(
         )
         if limit is not None:
             candidate_query = candidate_query.limit(limit)
-        total = db.session.scalar(
-            select(func.count()).select_from(candidate_query.order_by(None).subquery())
-        ) or 0
+        total = (
+            db.session.scalar(
+                select(func.count()).select_from(candidate_query.order_by(None).subquery())
+            )
+            or 0
+        )
         if progress is not None:
             progress({**counters, "total": total, "percent": 100 if total == 0 else 0})
         candidate_ids: list[int] = list(db.session.scalars(candidate_query).all())
         for identifier_id in candidate_ids:
+            if cancelled is not None and cancelled():
+                break
             if limit is not None and counters["processed"] >= limit:
                 break
             identifier = db.session.get(MediaIdentifier, identifier_id)
@@ -160,11 +178,17 @@ def enrich_catalog(
             try:
                 if lookup_kind == "tmdb":
                     assert tmdb is not None
-                    metadata = tmdb.lookup(
-                        "movie" if item.kind is MediaKind.MOVIE else "tv",
-                        identifier.external_id,
-                        language=language,
-                    )
+                    media_type = "movie" if item.kind is MediaKind.MOVIE else "tv"
+                    metadata = tmdb.lookup(media_type, identifier.external_id, language=language)
+                    if language == "pt-BR" and _needs_language_fallback(metadata):
+                        try:
+                            fallback = tmdb.lookup(
+                                media_type, identifier.external_id, language="en-US"
+                            )
+                        except EnrichmentError:
+                            pass
+                        else:
+                            metadata = _merge_metadata(metadata, fallback)
                 else:
                     assert musicbrainz is not None
                     metadata = musicbrainz.lookup_recording(identifier.external_id)
@@ -172,6 +196,10 @@ def enrich_catalog(
                 record.status = "succeeded"
                 record.message = None
                 counters["updated"] += int(changed)
+            except EnrichmentNotFoundError as error:
+                record.status = "not_found"
+                record.message = str(error)[:500]
+                counters["failed"] += 1
             except (EnrichmentError, ValueError) as error:
                 record.status = "failed"
                 record.message = str(error)[:500]
@@ -194,6 +222,26 @@ def enrich_catalog(
     db.session.commit()
     app.logger.info("metadata enrichment finished", extra=counters)
     return counters
+
+
+def _needs_language_fallback(metadata: EnrichedMetadata) -> bool:
+    return metadata.summary is None or metadata.tagline is None
+
+
+def _merge_metadata(primary: EnrichedMetadata, fallback: EnrichedMetadata) -> EnrichedMetadata:
+    return EnrichedMetadata(
+        summary=primary.summary or fallback.summary,
+        tagline=primary.tagline or fallback.tagline,
+        studio=primary.studio or fallback.studio,
+        audience_rating=(
+            primary.audience_rating
+            if primary.audience_rating is not None
+            else fallback.audience_rating
+        ),
+        genres=primary.genres or fallback.genres,
+        poster_url=primary.poster_url or fallback.poster_url,
+        poster_provider=primary.poster_provider or fallback.poster_provider,
+    )
 
 
 def _apply(item: MediaItem, metadata: EnrichedMetadata) -> bool:

@@ -15,8 +15,8 @@
       {% else %}
         <div><strong>Último resultado:</strong> {{ last_summary if last_summary is defined else values.get('metadata.last_summary', 'ainda não executado') }}</div>
       {% endif %}
-      <form class="mt-3" method="post" action="{{ url_for('web.metadata_enrich') }}">
+      <form class="mt-3" method="post" action="{{ url_for('web.metadata_enrich_cancel') if enrichment.active else url_for('web.metadata_enrich') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button class="btn btn-outline-primary" {% if enrichment.active %}disabled{% endif %}>{{ 'Em execução…' if enrichment.active else 'Enriquecer agora' }}</button>
+        <button class="btn {{ 'btn-outline-danger' if enrichment.active else 'btn-outline-primary' }}">{{ 'Cancelar enriquecimento' if enrichment.active else 'Enriquecer agora' }}</button>
       </form>
     </div>

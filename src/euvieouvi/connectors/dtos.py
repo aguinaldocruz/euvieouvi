@@ -92,6 +92,7 @@ class ExternalMediaItem:
     year: int | None = None
     show_external_id: str | None = None
     show_title: str | None = None
+    show_identifiers: tuple[ExternalIdentifier, ...] = ()
     season_external_id: str | None = None
     season_number: int | None = None
     episode_number: int | None = None

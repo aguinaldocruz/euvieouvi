@@ -7,6 +7,7 @@ from euvieouvi.database.enums import MediaKind
 from euvieouvi.database.models import (
     EnrichmentRecord,
     Genre,
+    MediaGenre,
     MediaIdentifier,
     MediaImage,
     MediaItem,
@@ -112,6 +113,49 @@ def test_musicbrainz_enrichment_and_failure_are_audited(app: Flask, monkeypatch:
         assert records[1].message == "fixture failure"
 
 
+def test_musicbrainz_skips_tracks_with_plex_genre_and_poster(
+    app: Flask, monkeypatch: object
+) -> None:
+    class MustNotCallMusicBrainz(FakeMusicBrainz):
+        def lookup_recording(self, mbid: str) -> EnrichedMetadata:
+            raise AssertionError(f"unexpected MusicBrainz call for {mbid}")
+
+    monkeypatch.setattr(service, "MusicBrainzClient", MustNotCallMusicBrainz)
+    with app.app_context():
+        artist = MediaItem(kind=MediaKind.ARTIST, title="Complete Plex artist")
+        db.session.add(artist)
+        db.session.flush()
+        album = MediaItem(kind=MediaKind.ALBUM, title="Complete Plex album", parent_id=artist.id)
+        db.session.add(album)
+        db.session.flush()
+        track = MediaItem(kind=MediaKind.TRACK, title="Complete Plex track", parent_id=album.id)
+        genre = Genre(name="Rock", normalized_name="rock")
+        db.session.add_all([track, genre])
+        db.session.flush()
+        db.session.add_all(
+            [
+                MediaIdentifier(
+                    media_item_id=track.id,
+                    provider="mbid",
+                    external_id="b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d",
+                ),
+                MediaGenre(media_item_id=artist.id, genre_id=genre.id),
+                MediaImage(
+                    media_item_id=track.id,
+                    source_id=None,
+                    image_type="poster",
+                    provider="plex",
+                    source_path="/library/metadata/track/thumb",
+                ),
+                Setting(key="metadata.musicbrainz.enabled", value="true"),
+            ]
+        )
+        db.session.commit()
+
+        assert service.enrich_catalog(app) == {"processed": 0, "updated": 0, "failed": 0}
+        assert db.session.scalar(select(EnrichmentRecord)) is None
+
+
 def test_succeeded_records_do_not_starve_later_enrichment_candidates(
     app: Flask, monkeypatch: object
 ) -> None:
@@ -130,9 +174,7 @@ def test_succeeded_records_do_not_starve_later_enrichment_candidates(
             db.session.flush()
             db.session.add_all(
                 [
-                    MediaIdentifier(
-                        media_item_id=item.id, provider="tmdb", external_id=str(index)
-                    ),
+                    MediaIdentifier(media_item_id=item.id, provider="tmdb", external_id=str(index)),
                     EnrichmentRecord(
                         media_item_id=item.id,
                         provider="tmdb",
@@ -152,9 +194,10 @@ def test_succeeded_records_do_not_starve_later_enrichment_candidates(
         result = service.enrich_catalog(app, limit=1)
 
         assert result == {"processed": 1, "updated": 1, "failed": 0}
-        assert db.session.scalar(
-            select(MediaImage).where(MediaImage.media_item_id == target.id)
-        ) is not None
+        assert (
+            db.session.scalar(select(MediaImage).where(MediaImage.media_item_id == target.id))
+            is not None
+        )
 
 
 def test_default_enrichment_processes_more_than_one_hundred_candidates(
@@ -164,9 +207,7 @@ def test_default_enrichment_processes_more_than_one_hundred_candidates(
         def __init__(self, token: str) -> None:
             assert token == "tmdb-token"
 
-        def lookup(
-            self, media_type: str, external_id: str, *, language: str
-        ) -> EnrichedMetadata:
+        def lookup(self, media_type: str, external_id: str, *, language: str) -> EnrichedMetadata:
             assert media_type == "movie"
             return EnrichedMetadata(summary=f"Summary {external_id}")
 
@@ -200,7 +241,10 @@ def test_default_enrichment_processes_more_than_one_hundred_candidates(
         assert result == {"processed": 105, "updated": 105, "failed": 0}
         assert len(db.session.scalars(select(EnrichmentRecord)).all()) == 105
         assert progress_updates[0] == {
-            "processed": 0, "updated": 0, "failed": 0,
-            "total": 105, "percent": 0,
+            "processed": 0,
+            "updated": 0,
+            "failed": 0,
+            "total": 105,
+            "percent": 0,
         }
         assert progress_updates[-1]["percent"] == 100

@@ -186,24 +186,30 @@ def test_metadata_settings_and_manual_enrichment(
 
         def __init__(self) -> None:
             self.snapshot = {
-                "active": False, "processed": 0, "updated": 0, "failed": 0,
-                "total": 0, "percent": 0,
+                "active": False,
+                "processed": 0,
+                "updated": 0,
+                "failed": 0,
+                "total": 0,
+                "percent": 0,
             }
 
         def submit(self) -> bool:
             return True
 
     executor = Executor()
-    monkeypatch.setattr(
-        "euvieouvi.web.routes.get_enrichment_executor", lambda app: executor
-    )
+    monkeypatch.setattr("euvieouvi.web.routes.get_enrichment_executor", lambda app: executor)
     token = csrf(client, "/settings/metadata")
     started = client.post("/metadata/enrich", data={"csrf_token": token}, follow_redirects=True)
     assert "Enriquecimento iniciado" in started.get_data(as_text=True)
 
     executor.snapshot = {
-        "active": True, "processed": 50, "updated": 20, "failed": 1,
-        "total": 100, "percent": 50,
+        "active": True,
+        "processed": 50,
+        "updated": 20,
+        "failed": 1,
+        "total": 100,
+        "percent": 50,
     }
     progress = client.get("/metadata/enrichment-status").get_data(as_text=True)
     assert "50%" in progress and "50 de 100 processados" in progress
@@ -689,10 +695,12 @@ def test_auto_enrichment_remains_part_of_active_sync(
             *,
             limit: int = 100,
             progress: object = None,
+            cancelled: object = None,
         ) -> dict[str, int]:
             del limit
             assert application is app
             assert callable(progress)
+            assert callable(cancelled)
             progress({"processed": 1, "updated": 1, "failed": 0})
             return {"processed": 1, "updated": 1, "failed": 0}
 

@@ -14,15 +14,17 @@ from euvieouvi.database.enums import (
 )
 from euvieouvi.database.models import (
     Library,
+    MediaIdentifier,
     MediaItem,
     Setting,
     Source,
     SourceMediaRef,
     SyncRun,
+    WatchEvent,
     WatchState,
 )
 from euvieouvi.extensions import db
-from euvieouvi.sync.watch_sync import WatchSyncService
+from euvieouvi.sync.watch_sync import WatchSyncService, _matching_item_groups
 
 NOW = datetime(2026, 8, 11, 19, tzinfo=UTC)
 
@@ -127,6 +129,15 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
                     completed=True,
                     observed_at=NOW,
                 ),
+                WatchEvent(
+                    media_item_id=movie.id,
+                    source_id=source_by_type[watched_source].id,
+                    source_event_id="webhook:completed",
+                    dedup_key="webhook:completed",
+                    watched_at=NOW,
+                    completed=True,
+                    origin="webhook",
+                ),
             ]
         )
         run = SyncRun(
@@ -138,6 +149,15 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
         )
         db.session.add(run)
         db.session.commit()
+        if watched_source is ConnectorType.PLEX:
+            watched_state = db.session.scalar(
+                db.select(WatchState).where(
+                    WatchState.media_item_id == movie.id,
+                    WatchState.source_id == plex.id,
+                )
+            )
+            db.session.delete(watched_state)
+            db.session.commit()
         run_id = run.id
         movie_id = movie.id
         target_source_id = source_by_type[target_source].id
@@ -166,8 +186,8 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
         target_state.completed = False
         db.session.add(Setting(key="watch_sync.pending", value="true"))
         db.session.commit()
-        calls.clear()
 
+        calls.clear()
         pending_result = WatchSyncService(
             lambda: db.session(), lambda source: RecordingConnector(source, calls)
         ).run(None)
@@ -185,7 +205,6 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
         target_state.completed = False
         pending.value = "true"
         db.session.commit()
-
         failed_result = WatchSyncService(
             lambda: db.session(), lambda source: FailingConnector()
         ).run(None)
@@ -223,10 +242,31 @@ def test_already_aligned_media_does_not_call_remote_server(app: Flask) -> None:
         )
         db.session.add(run)
         db.session.commit()
-
         result = WatchSyncService(
             lambda: db.session(), lambda source: RecordingConnector(source, calls)
         ).run(run.id)
 
         assert result.updated == 0
         assert calls == []
+
+
+def test_separate_rows_are_grouped_by_provider_identity(app: Flask) -> None:
+    with app.app_context():
+        plex_item = MediaItem(kind=MediaKind.EPISODE, title="Second Contact")
+        jellyfin_item = MediaItem(kind=MediaKind.EPISODE, title="Second Contact")
+        db.session.add_all([plex_item, jellyfin_item])
+        db.session.flush()
+        db.session.add_all(
+            [
+                MediaIdentifier(media_item_id=plex_item.id, provider="tvdb", external_id="7820679"),
+                MediaIdentifier(
+                    media_item_id=jellyfin_item.id, provider="tvdb", external_id="7820679"
+                ),
+            ]
+        )
+        db.session.flush()
+        item_ids = {plex_item.id, jellyfin_item.id}
+        groups = _matching_item_groups(
+            db.session, item_ids, {media_id: MediaKind.EPISODE for media_id in item_ids}
+        )
+        assert groups == (frozenset(item_ids),)

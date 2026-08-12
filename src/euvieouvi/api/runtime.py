@@ -118,7 +118,9 @@ class LocalSyncExecutor:
                                 f"{counters['failed']} falhas.",
                             )
 
-                        counters = enrich_catalog(self._app, progress=report)
+                        counters = enrich_catalog(
+                            self._app, progress=report, cancelled=lambda: token.is_cancelled
+                        )
                         orchestrator.finish_success(
                             run_id,
                             "Sincronização e enriquecimento concluídos · "
