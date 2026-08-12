@@ -7,7 +7,7 @@ import json
 import secrets
 import unicodedata
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -861,6 +861,18 @@ def webhook_activity_fragment() -> Any:
 
 
 def _webhook_activity(history_limit: int) -> tuple[Sequence[Any], Sequence[Any]]:
+    # Playback-stop webhooks can be lost during restarts or connectivity failures.
+    stale_before = datetime.now(UTC) - timedelta(hours=1)
+    stale_events = db.session.scalars(
+        select(WebhookEvent).where(
+            WebhookEvent.active.is_(True), WebhookEvent.occurred_at < stale_before
+        )
+    ).all()
+    for event in stale_events:
+        event.active = False
+    if stale_events:
+        db.session.commit()
+
     recent_events = db.session.execute(
         select(WebhookEvent, Source)
         .join(Source, Source.id == WebhookEvent.source_id)
@@ -918,13 +930,16 @@ def plex_webhook(token: str) -> Any:
         return Response("Identidade da mídia ausente.", 400)
     watched_at = _parse_webhook_datetime(payload.get("eventTime")) or datetime.now(UTC)
     title = str(metadata.get("title") or metadata.get("grandparentTitle") or external_id)
+    media_kind = metadata.get("type")
+    series_title = metadata.get("grandparentTitle") if media_kind == "episode" else None
     active = event_type in {"media.play", "media.resume"}
     completed = event_type == "media.scrobble"
     _record_webhook_activity(
         source,
         external_id=external_id,
         title=title,
-        media_kind=metadata.get("type"),
+        series_title=series_title,
+        media_kind=media_kind,
         event_type=event_type,
         occurred_at=watched_at,
         completed=completed,
@@ -978,13 +993,20 @@ def jellyfin_webhook(token: str) -> Any:
     if not external_id:
         return Response("Identidade ou data ausente.", 400)
     completed = notification_type == "playbackstop" and _truthy(payload.get("PlayedToCompletion"))
+    media_kind = str(payload.get("ItemType") or raw_item.get("Type") or "") or None
+    series_title = (
+        (payload.get("SeriesName") or raw_item.get("SeriesName"))
+        if media_kind and media_kind.casefold() == "episode"
+        else None
+    )
     _record_webhook_activity(
         source,
         external_id=external_id,
         title=str(
             payload.get("Name") or payload.get("ItemName") or raw_item.get("Name") or external_id
         ),
-        media_kind=str(payload.get("ItemType") or raw_item.get("Type") or "") or None,
+        series_title=series_title,
+        media_kind=media_kind,
         event_type=notification_type,
         occurred_at=watched_at,
         completed=completed,
@@ -1959,6 +1981,7 @@ def _record_webhook_activity(
     *,
     external_id: str,
     title: str,
+    series_title: Any,
     media_kind: Any,
     event_type: str,
     occurred_at: datetime,
@@ -1984,6 +2007,7 @@ def _record_webhook_activity(
             external_id=external_id,
             event_key=event_key,
             title=title[:500],
+            series_title=str(series_title)[:500] if series_title else None,
             media_kind=str(media_kind)[:32] if media_kind else None,
             event_type=event_type[:32],
             occurred_at=occurred_at,

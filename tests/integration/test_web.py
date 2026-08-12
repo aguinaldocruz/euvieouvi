@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -1063,7 +1063,13 @@ def test_webhook_page_shows_current_activity_and_respects_retention(app: Flask) 
     client = app.test_client()
     play_payload = {
         "event": "media.play",
-        "Metadata": {"ratingKey": "m1", "librarySectionID": "1", "title": "Arrival"},
+        "Metadata": {
+            "ratingKey": "m1",
+            "librarySectionID": "1",
+            "title": "Pilot",
+            "type": "episode",
+            "grandparentTitle": "Example Series",
+        },
     }
     assert (
         client.post(
@@ -1072,10 +1078,12 @@ def test_webhook_page_shows_current_activity_and_respects_retention(app: Flask) 
         == 204
     )
     page = client.get("/settings/webhooks").get_data(as_text=True)
-    assert "Em reprodução no Plex" in page and "Arrival" in page
+    assert "Em reprodução no Plex" in page and "Pilot" in page
+    assert "Example Series" in page
+    assert 'aria-label="Episódio"' in page
     assert 'hx-trigger="every 2s"' in page
     fragment = client.get("/settings/webhooks/activity-fragment")
-    assert fragment.status_code == 200 and "Arrival" in fragment.get_data(as_text=True)
+    assert fragment.status_code == 200 and "Pilot" in fragment.get_data(as_text=True)
 
     token = csrf(client, "/settings/webhooks")
     assert (
@@ -1098,6 +1106,33 @@ def test_webhook_page_shows_current_activity_and_respects_retention(app: Flask) 
         )
     with app.app_context():
         assert db.session.query(WebhookEvent).filter_by(completed=True).count() == 1
+
+
+def test_webhook_page_deactivates_activity_older_than_one_hour(app: Flask) -> None:
+    with app.app_context():
+        source_id, _, _, _ = seed_web()
+        db.session.add(
+            WebhookEvent(
+                source_id=source_id,
+                external_id="stale",
+                title="Stale playback",
+                media_kind="movie",
+                event_type="media.play",
+                occurred_at=datetime.now(UTC) - timedelta(hours=1, seconds=1),
+                completed=False,
+                active=True,
+            )
+        )
+        db.session.commit()
+
+    response = app.test_client().get("/settings/webhooks/activity-fragment")
+    assert response.status_code == 200
+    assert "Stale playback" not in response.get_data(as_text=True)
+    with app.app_context():
+        event = db.session.scalar(
+            select(WebhookEvent).where(WebhookEvent.external_id == "stale")
+        )
+        assert event is not None and event.active is False
 
 
 def test_jellyfin_settings_validation_save_update_and_test(

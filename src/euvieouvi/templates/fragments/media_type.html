@@ -13,3 +13,12 @@
   {% else %}{% set type_class, label = 'movie', 'Filme' %}{% endif %}
   <span class="media-type-tab is-{{ type_class }}">{{ label }}</span>
 {%- endmacro %}
+
+{% macro webhook_badge(kind) -%}
+  {% set normalized = (kind or '')|lower %}
+  {% if normalized in ['artist', 'album', 'track', 'audio', 'musicvideo'] %}{% set type_class, symbol, label = 'music', '♫', 'Música' %}
+  {% elif normalized == 'episode' %}{% set type_class, symbol, label = 'episode', 'E', 'Episódio' %}
+  {% elif normalized in ['show', 'series', 'season'] %}{% set type_class, symbol, label = 'series', 'S', 'Série' %}
+  {% elif normalized in ['movie', 'film', 'video'] %}{% set type_class, symbol, label = 'movie', 'F', 'Filme' %}{% endif %}
+  {% if label is defined %}<span class="media-type-badge is-{{ type_class }}" title="{{ label }}" aria-label="{{ label }}">{{ symbol }}</span>{% endif %}
+{%- endmacro %}
