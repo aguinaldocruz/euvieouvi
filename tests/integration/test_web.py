@@ -1069,6 +1069,8 @@ def test_webhook_page_shows_current_activity_and_respects_retention(app: Flask) 
             "title": "Pilot",
             "type": "episode",
             "grandparentTitle": "Example Series",
+            "viewOffset": 45_000,
+            "duration": 100_000,
         },
     }
     assert (
@@ -1077,8 +1079,15 @@ def test_webhook_page_shows_current_activity_and_respects_retention(app: Flask) 
         ).status_code
         == 204
     )
-    page = client.get("/settings/webhooks").get_data(as_text=True)
+    assert "Atividade atual" not in client.get("/settings/webhooks").get_data(as_text=True)
+    page = client.get("/").get_data(as_text=True)
+    assert (
+        page.index("Resumo do catálogo")
+        < page.index("Atividade atual")
+        < page.index("Última sincronização")
+    )
     assert "Em reprodução no Plex" in page and "Pilot" in page
+    assert "45% reproduzido" in page
     assert "Example Series" in page
     assert 'aria-label="Episódio"' in page
     assert 'hx-trigger="every 2s"' in page
@@ -1106,6 +1115,165 @@ def test_webhook_page_shows_current_activity_and_respects_retention(app: Flask) 
         )
     with app.app_context():
         assert db.session.query(WebhookEvent).filter_by(completed=True).count() == 1
+
+def test_jellyfin_completed_unmapped_item_commits_before_queuing_sync(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with app.app_context():
+        jellyfin = Source(
+            connector_type=ConnectorType.JELLYFIN,
+            name="Jellyfin",
+            base_url="http://jellyfin",
+            secret=json.dumps({"api_key": "key", "user_id": "user-1"}),
+            enabled=True,
+        )
+        db.session.add_all(
+            [jellyfin, Setting(key="webhook.jellyfin.token", value="jf-secret")]
+        )
+        db.session.commit()
+        source_id = jellyfin.id
+
+    calls: list[str] = []
+
+    class Executor:
+        def submit(self, submitted_source_id: int) -> int:
+            assert submitted_source_id == source_id
+            assert not db.session().in_transaction()
+            calls.append("sync")
+            return 1
+
+        def submit_pending_watch_sync(self) -> bool:
+            calls.append("propagate")
+            return True
+
+    monkeypatch.setattr("euvieouvi.web.routes.get_executor", lambda app: Executor())
+    response = app.test_client().post(
+        "/webhooks/jellyfin/jf-secret",
+        data={
+            "NotificationType": "PlaybackStop",
+            "PlayedToCompletion": "True",
+            "ItemId": "unmapped-episode",
+            "Name": "Episode",
+            "ItemType": "Episode",
+            "UserId": "user-1",
+            "PlaybackPositionTicks": "999999",
+            "RunTimeTicks": "1000000",
+        },
+    )
+
+    assert response.status_code == 204
+    assert calls == ["sync", "propagate"]
+    with app.app_context():
+        event = db.session.query(WebhookEvent).filter_by(external_id="unmapped-episode").one()
+        assert event.completed is True and event.active is False
+        pending = db.session.get(Setting, "watch_sync.pending")
+        assert pending is not None and pending.value == "true"
+
+
+
+def test_plex_activity_shows_all_users_but_completion_uses_filter(app: Flask) -> None:
+    with app.app_context():
+        seed_web()
+        db.session.add_all(
+            [
+                Setting(key="webhook.plex.token", value="plex-secret"),
+                Setting(key="webhook.plex.user_filter", value="alice"),
+            ]
+        )
+        db.session.commit()
+        original_watch_count = db.session.query(WatchEvent).count()
+
+    client = app.test_client()
+
+    def send(event: str, user: str, rating_key: str, title: str) -> None:
+        payload = {
+            "event": event,
+            "Account": {"id": 10 if user == "alice" else 20, "title": user},
+            "Metadata": {
+                "ratingKey": rating_key,
+                "librarySectionID": "1",
+                "title": title,
+                "type": "movie",
+            },
+        }
+        assert (
+            client.post(
+                "/webhooks/plex/plex-secret",
+                data={"payload": json.dumps(payload)},
+            ).status_code
+            == 204
+        )
+
+    send("media.play", "alice", "m1", "Alice Movie")
+    send("media.play", "bob", "m2", "Bob Movie")
+    home = client.get("/").get_data(as_text=True)
+    assert "Alice Movie" in home and "por alice" in home
+    assert "Bob Movie" in home and "por bob" in home
+
+    send("media.scrobble", "bob", "m1", "Ignored completion")
+    with app.app_context():
+        assert db.session.query(WatchEvent).count() == original_watch_count
+        assert db.session.query(WebhookEvent).filter_by(completed=True).count() == 0
+
+    send("media.scrobble", "alice", "m1", "Accepted completion")
+    with app.app_context():
+        assert db.session.query(WatchEvent).count() == original_watch_count + 1
+        completed = db.session.query(WebhookEvent).filter_by(completed=True).one()
+        assert completed.playback_user == "alice"
+
+
+def test_jellyfin_progress_creates_and_updates_current_activity(app: Flask) -> None:
+    with app.app_context():
+        jellyfin = Source(
+            connector_type=ConnectorType.JELLYFIN,
+            name="Jellyfin",
+            base_url="http://jellyfin",
+            secret=json.dumps({"api_key": "key", "user_id": "user-1"}),
+            enabled=True,
+        )
+        db.session.add_all(
+            [jellyfin, Setting(key="webhook.jellyfin.token", value="jf-secret")]
+        )
+        db.session.commit()
+
+    client = app.test_client()
+    payload = {
+        "NotificationType": "PlaybackProgress",
+        "NotificationId": "progress-1",
+        "ItemId": "jf-episode",
+        "ItemName": "Epis&#243;dio 2",
+        "ItemType": "Episode",
+        "SeriesName": "S&#233;rie de Teste",
+        "UserId": "6c1f52e4-3b42-4d87-a80d-b324215c93ad",
+        "NotificationUsername": "user-1",
+        "PlaybackPositionTicks": 3_000_000,
+        "RunTimeTicks": 10_000_000,
+    }
+    assert client.post("/webhooks/jellyfin/jf-secret", data=payload).status_code == 204
+    page = client.get("/settings/webhooks/activity-fragment").get_data(as_text=True)
+    assert "Em reprodução no Jellyfin" in page
+    assert "Série de Teste" in page and "Episódio 2" in page
+    assert "&#243;" not in page and "&#233;" not in page
+    assert "30% reproduzido" in page
+
+    payload["NotificationId"] = "progress-2"
+    payload["PlaybackPositionTicks"] = 7_500_000
+    assert client.post("/webhooks/jellyfin/jf-secret", json=payload).status_code == 204
+    page = client.get("/settings/webhooks/activity-fragment").get_data(as_text=True)
+    assert "75% reproduzido" in page
+
+    payload.update(
+        ItemId="jf-next-episode",
+        ItemName="Episódio 3",
+        NotificationId="progress-3",
+        PlaybackPositionTicks=500_000,
+    )
+    assert client.post("/webhooks/jellyfin/jf-secret", data=payload).status_code == 204
+    with app.app_context():
+        active = db.session.query(WebhookEvent).filter_by(active=True).one()
+        assert active.external_id == "jf-next-episode"
+    with app.app_context():
+        assert db.session.query(WebhookEvent).filter_by(active=True).count() == 1
 
 
 def test_webhook_page_deactivates_activity_older_than_one_hour(app: Flask) -> None:

@@ -8,6 +8,7 @@ import secrets
 import unicodedata
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from html import unescape
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -156,6 +157,7 @@ def dashboard() -> Any:
         next_step = ("Selecione ao menos uma biblioteca", "libraries")
     elif last_run is None:
         next_step = ("Execute a primeira sincronização", "sync_list")
+    _, current_events = _webhook_activity(_webhook_history_limit())
     return render_template(
         "dashboard.html",
         counts=counts,
@@ -163,6 +165,7 @@ def dashboard() -> Any:
         next_step=next_step,
         last_run=last_run,
         recent=recent,
+        current_events=current_events,
         series_titles=_series_titles([row[1] for row in recent]),
     )
 
@@ -816,7 +819,12 @@ def backup_restore_upload() -> Any:
 
 @blueprint.route("/settings/webhooks", methods=["GET", "POST"])
 def settings_webhooks() -> Any:
-    tokens = _settings("webhook.plex.token", "webhook.jellyfin.token", "webhook.history_limit")
+    tokens = _settings(
+        "webhook.plex.token",
+        "webhook.jellyfin.token",
+        "webhook.history_limit",
+        "webhook.plex.user_filter",
+    )
     changed = False
     for provider in ("plex", "jellyfin"):
         key = f"webhook.{provider}.token"
@@ -828,6 +836,12 @@ def settings_webhooks() -> Any:
         db.session.commit()
     if request.method == "POST":
         raw_limit = (request.form.get("history_limit") or "20").strip()
+        if "plex_user_filter" in request.form:
+            plex_user_filter = (request.form.get("plex_user_filter") or "").strip()[:255]
+            _save_setting("webhook.plex.user_filter", plex_user_filter)
+            db.session.commit()
+            flash("Filtro de usuário Plex atualizado.", "success")
+            return redirect(url_for("web.settings_webhooks"))
         history_limit = min(max(int(raw_limit) if raw_limit.isdigit() else 20, 1), 200)
         _save_setting("webhook.history_limit", str(history_limit))
         _prune_webhook_events(history_limit)
@@ -842,6 +856,7 @@ def settings_webhooks() -> Any:
         jellyfin_url=url_for(
             "web.jellyfin_webhook", token=tokens["webhook.jellyfin.token"], _external=True
         ),
+        plex_user_filter=tokens.get("webhook.plex.user_filter", ""),
         history_limit=history_limit,
         recent_events=recent_events,
         current_events=current_events,
@@ -850,12 +865,9 @@ def settings_webhooks() -> Any:
 
 @blueprint.get("/settings/webhooks/activity-fragment")
 def webhook_activity_fragment() -> Any:
-    history_limit = _webhook_history_limit()
-    recent_events, current_events = _webhook_activity(history_limit)
+    _, current_events = _webhook_activity(_webhook_history_limit())
     return render_template(
         "fragments/webhook_activity.html",
-        history_limit=history_limit,
-        recent_events=recent_events,
         current_events=current_events,
     )
 
@@ -932,16 +944,23 @@ def plex_webhook(token: str) -> Any:
     title = str(metadata.get("title") or metadata.get("grandparentTitle") or external_id)
     media_kind = metadata.get("type")
     series_title = metadata.get("grandparentTitle") if media_kind == "episode" else None
+    account = payload.get("Account")
+    raw_account: dict[str, Any] = account if isinstance(account, dict) else {}
+    playback_user = str(raw_account.get("title") or raw_account.get("id") or "").strip() or None
     active = event_type in {"media.play", "media.resume"}
-    completed = event_type == "media.scrobble"
+    completed = event_type == "media.scrobble" and _plex_webhook_user_matches(raw_account)
     _record_webhook_activity(
         source,
         external_id=external_id,
         title=title,
         series_title=series_title,
+        playback_user=playback_user,
         media_kind=media_kind,
         event_type=event_type,
         occurred_at=watched_at,
+        progress_percent=_playback_percent(
+            metadata.get("viewOffset"), metadata.get("duration")
+        ),
         completed=completed,
         active=active,
         event_key=str(payload.get("event_id") or "").strip() or None,
@@ -970,17 +989,16 @@ def jellyfin_webhook(token: str) -> Any:
     if not _valid_webhook_token("jellyfin", token):
         return Response(status=404)
     source = _source(ConnectorType.JELLYFIN)
-    payload = request.get_json(silent=True)
+    payload = _jellyfin_webhook_payload()
     if source is None or not isinstance(payload, dict):
         return Response(status=204)
     notification_type = "".join(
         char for char in str(payload.get("NotificationType") or "").casefold() if char.isalnum()
     )
-    if notification_type not in {"playbackstart", "playbackstop"}:
+    if notification_type not in {"playbackstart", "playbackprogress", "playbackstop"}:
         return Response(status=204)
     credentials = _jellyfin_credentials(source)
-    user_id = str(payload.get("UserId") or "").strip()
-    if credentials.get("user_id") and user_id != credentials["user_id"]:
+    if not _jellyfin_webhook_user_matches(credentials, payload):
         return Response(status=204)
     payload_item = payload.get("Item")
     raw_item: dict[str, Any] = payload_item if isinstance(payload_item, dict) else {}
@@ -1002,6 +1020,15 @@ def jellyfin_webhook(token: str) -> Any:
     _record_webhook_activity(
         source,
         external_id=external_id,
+        playback_user=(
+            str(
+                payload.get("NotificationUsername")
+                or payload.get("Username")
+                or payload.get("UserId")
+                or ""
+            ).strip()
+            or None
+        ),
         title=str(
             payload.get("Name") or payload.get("ItemName") or raw_item.get("Name") or external_id
         ),
@@ -1009,8 +1036,17 @@ def jellyfin_webhook(token: str) -> Any:
         media_kind=media_kind,
         event_type=notification_type,
         occurred_at=watched_at,
+        progress_percent=_playback_percent(
+            _first_present(
+                payload.get("PlaybackPositionTicks"),
+                payload.get("PositionTicks"),
+                raw_item.get("PlaybackPositionTicks"),
+                raw_item.get("PositionTicks"),
+            ),
+            _first_present(payload.get("RunTimeTicks"), raw_item.get("RunTimeTicks")),
+        ),
         completed=completed,
-        active=notification_type == "playbackstart",
+        active=notification_type in {"playbackstart", "playbackprogress"},
         event_key=str(payload.get("NotificationId") or "").strip() or None,
     )
     if not completed:
@@ -1037,14 +1073,17 @@ def jellyfin_webhook(token: str) -> Any:
             source_event_id=str(payload.get("NotificationId") or "").strip() or None,
             duration_ms=_ticks_to_ms(payload.get("RunTimeTicks")),
         )
+        source_id = source.id
+        db.session.commit()
         # also queue a sync to enrich metadata, but don't block webhook response
         with contextlib.suppress(Exception):
-            _queue_source_sync(source.id)
+            _queue_source_sync(source_id)
         db.session.commit()
         _request_watch_propagation()
         return Response(status=204)
     library = db.session.get(Library, reference.library_id)
     if library is None:
+        db.session.commit()
         return Response(status=204)
     _persist_webhook_event(
         source,
@@ -1923,6 +1962,49 @@ def _jellyfin_credentials(source: Source) -> dict[str, str]:
     return {key: str(value) for key, value in raw.items()} if isinstance(raw, dict) else {}
 
 
+def _jellyfin_webhook_payload() -> dict[str, Any] | None:
+    """Accept both Jellyfin Webhook's JSON and Generic Form formats."""
+    if request.is_json:
+        payload = request.get_json(silent=True)
+        return payload if isinstance(payload, dict) else None
+    payload_text = request.form.get("payload")
+    if payload_text:
+        try:
+            payload = json.loads(payload_text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+    if request.form:
+        return request.form.to_dict(flat=True)
+    return None
+
+
+def _jellyfin_webhook_user_matches(
+    credentials: dict[str, str], payload: dict[str, Any]
+) -> bool:
+    configured = credentials.get("user_id", "").strip().casefold()
+    if not configured:
+        return True
+    webhook_users = (
+        payload.get("UserId"),
+        payload.get("NotificationUsername"),
+        payload.get("Username"),
+    )
+    return any(str(value or "").strip().casefold() == configured for value in webhook_users)
+
+
+def _plex_webhook_user_matches(account: dict[str, Any]) -> bool:
+    configured = _settings("webhook.plex.user_filter").get(
+        "webhook.plex.user_filter", ""
+    ).strip().casefold()
+    if not configured:
+        return True
+    return any(
+        str(account.get(key) or "").strip().casefold() == configured
+        for key in ("id", "title")
+    )
+
+
 def _persist_webhook_event(
     source: Source,
     *,
@@ -1939,7 +2021,6 @@ def _persist_webhook_event(
         )
     )
     if reference is None:
-        _queue_source_sync(source.id)
         return False
     event = ExternalWatchEvent(
         media_external_id=external_id,
@@ -1981,23 +2062,46 @@ def _record_webhook_activity(
     *,
     external_id: str,
     title: str,
+    playback_user: str | None,
     series_title: Any,
     media_kind: Any,
     event_type: str,
     occurred_at: datetime,
+    progress_percent: int | None,
     completed: bool,
     active: bool,
     event_key: str | None,
 ) -> None:
+    title = unescape(title)
+    series_title = unescape(str(series_title)) if series_title else None
     # Any terminal event closes prior playback rows for the same item.
     prior = db.session.scalars(
         select(WebhookEvent).where(
             WebhookEvent.source_id == source.id,
-            WebhookEvent.external_id == external_id,
             WebhookEvent.active.is_(True),
         )
     ).all()
-    for row in prior:
+    same_user = [row for row in prior if row.playback_user == playback_user]
+    matching = [
+        row
+        for row in same_user
+        if row.external_id == external_id
+    ]
+    if active and matching:
+        current = max(matching, key=lambda row: (row.occurred_at, row.id or 0))
+        for row in same_user:
+            if row is not current:
+                row.active = False
+        current.event_key = event_key or current.event_key
+        current.playback_user = playback_user[:255] if playback_user else None
+        current.title = title[:500]
+        current.series_title = str(series_title)[:500] if series_title else None
+        current.media_kind = str(media_kind)[:32] if media_kind else None
+        current.event_type = event_type[:32]
+        if progress_percent is not None:
+            current.progress_percent = progress_percent
+        return
+    for row in same_user if active else matching:
         row.active = False
     if not active and not completed:
         return
@@ -2005,12 +2109,14 @@ def _record_webhook_activity(
         WebhookEvent(
             source_id=source.id,
             external_id=external_id,
+            playback_user=playback_user[:255] if playback_user else None,
             event_key=event_key,
             title=title[:500],
             series_title=str(series_title)[:500] if series_title else None,
             media_kind=str(media_kind)[:32] if media_kind else None,
             event_type=event_type[:32],
             occurred_at=occurred_at,
+            progress_percent=progress_percent,
             completed=completed,
             active=active,
         )
@@ -2045,6 +2151,18 @@ def _safe_integer(value: Any) -> int | None:
 def _ticks_to_ms(value: Any) -> int | None:
     ticks = _safe_integer(value)
     return ticks // 10_000 if ticks is not None else None
+
+
+def _playback_percent(position: Any, duration: Any) -> int | None:
+    position_value = _safe_integer(position)
+    duration_value = _safe_integer(duration)
+    if position_value is None or duration_value is None or duration_value <= 0:
+        return None
+    return min(position_value * 100 // duration_value, 100)
+
+
+def _first_present(*values: Any) -> Any:
+    return next((value for value in values if value is not None), None)
 
 
 def _parse_webhook_datetime(value: Any) -> datetime | None:

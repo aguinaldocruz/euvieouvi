@@ -6,15 +6,36 @@
 
 <div class="card mb-3"><div class="card-body">
   <h2 class="h5">Plex</h2>
-  <p>Adicione a URL abaixo em <strong>Settings → Webhooks</strong>. Apenas eventos <code>media.scrobble</code> são registrados.</p>
+  <p>Adicione a URL abaixo em <strong>Settings → Account → Webhooks</strong>. A atividade atual mostra todos os usuários Plex.</p>
   <input class="form-control font-monospace" readonly value="{{ plex_url }}" aria-label="URL do webhook Plex">
+  <form class="row g-2 align-items-end mt-2" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><div class="col-md-8"><label class="form-label" for="plex_user_filter">Usuário Plex para histórico e propagação</label><input class="form-control" id="plex_user_filter" name="plex_user_filter" value="{{ plex_user_filter }}" placeholder="Nome do usuário ou Account.id"></div><div class="col-md-auto"><button class="btn btn-primary">Salvar filtro</button></div></form>
+  <p class="small text-secondary mt-2 mb-0">Informe exatamente o <strong>Account.title</strong> (nome de usuário) ou <strong>Account.id</strong> do Plex. Somente esse usuário alimentará o histórico, marcará o catálogo como assistido e propagará o estado para o Jellyfin. Deixe vazio para aceitar conclusões de todos os usuários. A atividade em reprodução nunca é filtrada.</p>
 </div></div>
 
 <div class="card mb-3"><div class="card-body">
   <h2 class="h5">Jellyfin</h2>
-  <p>No plugin oficial Webhook, crie um destino Generic Form com esta URL e habilite <strong>Playback Stop</strong>. Somente <code>PlayedToCompletion=true</code> é registrado.</p>
+  <p>No plugin oficial Webhook, crie um destino <strong>Generic Form</strong>, habilite <strong>Playback Start</strong>, <strong>Playback Progress</strong> e <strong>Playback Stop</strong>, e use a URL abaixo.</p>
   <input class="form-control font-monospace" readonly value="{{ jellyfin_url }}" aria-label="URL do webhook Jellyfin">
+  <label class="form-label mt-3" for="jellyfin-fields">Fields (obrigatório)</label>
+  <textarea class="form-control font-monospace" id="jellyfin-fields" rows="13" readonly>{
+  "NotificationType": "{{ '{{NotificationType}}' }}",
+  "UserId": "{{ '{{UserId}}' }}",
+  "NotificationUsername": "{{ '{{NotificationUsername}}' }}",
+  "ItemId": "{{ '{{ItemId}}' }}",
+  "Name": "{{ '{{Name}}' }}",
+  "ItemType": "{{ '{{ItemType}}' }}",
+  "SeriesName": "{{ '{{SeriesName}}' }}",
+  "UtcTimestamp": "{{ '{{UtcTimestamp}}' }}",
+  "PlaybackPositionTicks": "{{ '{{PlaybackPositionTicks}}' }}",
+  "RunTimeTicks": "{{ '{{RunTimeTicks}}' }}",
+  "PlayedToCompletion": "{{ '{{PlayedToCompletion}}' }}"
+}</textarea>
+  <p class="small text-secondary mt-2 mb-0">Não deixe <strong>Fields</strong> vazio: o plugin não envia a requisição nesse caso. Conclusões são registradas somente quando <code>PlayedToCompletion=true</code>.</p>
 </div></div>
 
-{% include 'fragments/webhook_activity.html' %}
+{% from 'fragments/media_type.html' import webhook_badge %}
+<div class="card"><div class="card-body">
+  <div class="d-flex flex-wrap justify-content-between gap-3 align-items-end"><div><h2 class="h5">Conclusões recentes via webhook</h2><p class="text-secondary mb-0">Eventos recebidos do Plex e Jellyfin.</p></div><form class="d-flex gap-2 align-items-end" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><div><label class="form-label" for="history_limit">Quantidade</label><input class="form-control" id="history_limit" name="history_limit" type="number" min="1" max="200" value="{{ history_limit }}"></div><button class="btn btn-primary">Salvar</button></form></div>
+  {% if recent_events %}<div class="list-group list-group-flush mt-3">{% for event,source in recent_events %}<div class="list-group-item px-0 d-flex gap-3 align-items-start">{{ webhook_badge(event.media_kind) }}<div>{% if event.series_title %}<span class="small text-secondary d-block">{{ event.series_title }}</span>{% endif %}<strong>{{ event.title }}</strong><br><span class="small text-secondary">{{ format_datetime(event.occurred_at) }} · {{ source.connector_type.value|capitalize }}</span></div></div>{% endfor %}</div>{% else %}<p class="text-secondary mt-3 mb-0">Nenhuma conclusão recebida.</p>{% endif %}
+</div></div>
 {% endblock %}

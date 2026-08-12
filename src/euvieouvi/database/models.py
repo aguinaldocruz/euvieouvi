@@ -318,9 +318,11 @@ class WebhookEvent(TimestampMixin, Base):
     event_key: Mapped[str | None] = mapped_column(String(255))
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     series_title: Mapped[str | None] = mapped_column(String(500))
+    playback_user: Mapped[str | None] = mapped_column(String(255))
     media_kind: Mapped[str | None] = mapped_column(String(32))
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    progress_percent: Mapped[int | None] = mapped_column(Integer)
     completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
