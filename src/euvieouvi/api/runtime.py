@@ -49,7 +49,10 @@ def connector_for(source: Source) -> MediaConnector:
         application_version=version("euvieouvi"),
         client_identifier=f"euvieouvi-{uuid.getnode():x}",
     )
-    return PlexConnector(client)
+    configured_user = db.session.get(Setting, "plex.user_id")
+    if configured_user is None:
+        configured_user = db.session.get(Setting, "webhook.plex.user_filter")
+    return PlexConnector(client, configured_user.value if configured_user is not None else None)
 
 
 class LocalSyncExecutor:

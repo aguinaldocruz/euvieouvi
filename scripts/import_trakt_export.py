@@ -34,6 +34,7 @@ SUPPORTED_DATABASE_REVISIONS = {
     "20260812_0012",
     "20260812_0013",
     "20260812_0014",
+    "20260813_0015",
 }
 Progress = Callable[[str], None]
 
@@ -48,6 +49,7 @@ class ImportReport:
     archive: str
     database: str
     source_id: int
+    plex_user: str
     history_files: int = 0
     events_read: int = 0
     events_valid: int = 0
@@ -172,6 +174,11 @@ Sem --apply, a transação sempre termina em rollback (dry-run).
         help="fonte Plex; seleção automática quando existe somente uma",
     )
     parser.add_argument(
+        "--plex-user",
+        metavar="ACCOUNT_ID",
+        help="Account.id do usuário Plex dono do histórico; usa a configuração se omitido",
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="grava após backup; sem esta opção executa dry-run",
@@ -218,6 +225,11 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _validate_database(connection)
             source_id = _select_source(connection, args.source_id)
+            plex_user = (args.plex_user or _configured_plex_user(connection)).strip()
+            if not plex_user:
+                raise ImportFailure(
+                    "Informe --plex-user ou configure o Account.id do usuário Plex."
+                )
             if args.apply and not args.yes:
                 confirmation = input(
                     "Digite IMPORTAR para criar o backup e gravar definitivamente: "
@@ -230,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
                 database,
                 source_id=source_id,
                 apply=args.apply,
+                plex_user=plex_user,
                 progress=progress,
                 progress_every=args.progress_every,
             )
@@ -251,6 +264,7 @@ def import_archive(
     *,
     source_id: int,
     apply: bool,
+    plex_user: str,
     progress: Progress | None = None,
     progress_every: int = 1000,
 ) -> ImportReport:
@@ -261,6 +275,7 @@ def import_archive(
         archive=str(archive),
         database=str(database),
         source_id=source_id,
+        plex_user=plex_user,
         history_files=history_files,
         events_read=len(events) + invalid,
         events_valid=len(events),
@@ -346,8 +361,10 @@ def import_archive(
                 """
                 INSERT INTO watch_events (
                     media_item_id, source_id, source_event_id, dedup_key, watched_at,
-                    completed, progress_ms, duration_ms, view_number, created_at, updated_at, origin
-                ) VALUES (?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, 'trakt_import')
+                    completed, progress_ms, duration_ms, view_number, created_at, updated_at,
+                    origin,
+                    playback_user
+                ) VALUES (?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, ?, 'trakt_import', ?)
                 """,
                 (
                     media_id,
@@ -357,6 +374,7 @@ def import_archive(
                     event.watched_at,
                     now,
                     now,
+                    plex_user,
                 ),
             )
             report.events_inserted += 1
@@ -737,6 +755,13 @@ def _validate_database(connection: sqlite3.Connection) -> None:
         supported = ", ".join(sorted(SUPPORTED_DATABASE_REVISIONS))
         current = str(revision[0]) if revision is not None else "ausente"
         raise ImportFailure(f"Revisão do banco incompatível: {current}; esperada: {supported}.")
+
+def _configured_plex_user(connection: sqlite3.Connection) -> str:
+    row = connection.execute(
+        "SELECT value FROM settings WHERE key IN ('plex.user_id', 'webhook.plex.user_filter')"
+        " ORDER BY CASE key WHEN 'plex.user_id' THEN 0 ELSE 1 END LIMIT 1"
+    ).fetchone()
+    return str(row[0]).strip() if row is not None else ""
 
 
 def _select_source(connection: sqlite3.Connection, requested: int | None) -> int:

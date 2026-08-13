@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -144,6 +145,23 @@ class WatchSyncService:
                     return self._start_without_candidates(run, session)
                 return (), 0, 0
             source_ids = {source.id for source in by_type.values()}
+            configured_users: dict[int, str] = {}
+            plex_user = session.get(Setting, "plex.user_id") or session.get(
+                Setting, "webhook.plex.user_filter"
+            )
+            if plex_user is not None and plex_user.value.strip():
+                configured_users[by_type[ConnectorType.PLEX].id] = plex_user.value.strip()
+            try:
+                secret = json.loads(by_type[ConnectorType.JELLYFIN].secret)
+                jellyfin_user = str(secret.get("user_id") or "").strip()
+            except (TypeError, ValueError, json.JSONDecodeError):
+                jellyfin_user = ""
+            if jellyfin_user:
+                configured_users[by_type[ConnectorType.JELLYFIN].id] = jellyfin_user
+            if configured_users.keys() != source_ids:
+                if run is not None:
+                    return self._start_without_candidates(run, session)
+                return (), 0, 0
             refs = session.scalars(
                 select(SourceMediaRef).where(
                     SourceMediaRef.source_id.in_(source_ids),
@@ -155,21 +173,18 @@ class WatchSyncService:
                 item.id: item.kind
                 for item in session.scalars(select(MediaItem).where(MediaItem.id.in_(item_ids)))
             }
-            states = session.scalars(
-                select(WatchState).where(
-                    WatchState.source_id.in_(source_ids), WatchState.completed.is_(True)
+            watched: set[tuple[int, int]] = set()
+            for source_id, configured_user in configured_users.items():
+                watched.update(
+                    session.execute(
+                        select(WatchEvent.media_item_id, WatchEvent.source_id).where(
+                            WatchEvent.source_id == source_id,
+                            WatchEvent.media_item_id.in_(item_ids),
+                            WatchEvent.completed.is_(True),
+                            WatchEvent.playback_user == configured_user,
+                        )
+                    ).all()
                 )
-            ).all()
-            watched = {(state.media_item_id, state.source_id) for state in states}
-            watched.update(
-                session.execute(
-                    select(WatchEvent.media_item_id, WatchEvent.source_id).where(
-                        WatchEvent.source_id.in_(source_ids),
-                        WatchEvent.media_item_id.in_(item_ids),
-                        WatchEvent.completed.is_(True),
-                    )
-                ).all()
-            )
             refs_by_item: dict[int, dict[int, SourceMediaRef]] = {}
             for ref in refs:
                 refs_by_item.setdefault(ref.media_item_id, {}).setdefault(ref.source_id, ref)

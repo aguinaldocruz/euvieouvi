@@ -25,4 +25,25 @@
 <h2 class="h5">Restaurar de arquivo externo</h2><p class="text-secondary small">Selecione um .db do seu computador/mídia externa. Será validado com PRAGMA integrity_check antes de sobrescrever.</p>
 <form method="post" action="{{ url_for('web.backup_restore_upload') }}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><div class="row g-3 align-items-end"><div class="col-md-8"><label class="form-label" for="file">Arquivo .db</label><input class="form-control" id="file" name="file" type="file" accept=".db" required></div><div class="col-md-4"><button class="btn btn-warning w-100">Restaurar externo</button></div></div></form>
 </div></div>
+<div class="card mt-4 border-danger"><div class="card-body">
+<h2 class="h5 text-danger">Recriar catálogo e histórico</h2>
+<p class="text-secondary small">Apaga mídias, identificadores, imagens, estados assistidos, eventos, atividades de monitoramento e execuções de sincronização. Fontes, credenciais, opções e bibliotecas configuradas são preservadas.</p>
+<form method="post" action="{{ url_for('web.reset_catalog_history') }}" onsubmit="return confirm('Apagar todo o catálogo e histórico para recarregar dos servidores?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><div class="row g-3 align-items-end"><div class="col-md-8"><label class="form-label" for="confirmation">Digite RECARREGAR</label><input class="form-control" id="confirmation" name="confirmation" autocomplete="off" required></div><div class="col-md-4"><button class="btn btn-danger w-100">Apagar catálogo e histórico</button></div></div></form>
+</div></div>
+
+<div class="card mt-4"><div class="card-body">
+<h2 class="h5">Importar export offline do Trakt</h2>
+<p class="text-secondary small">Carregue o ZIP completo do Trakt. O dry-run valida e desfaz tudo; aplicar cria um backup automático antes de gravar.</p>
+<form id="traktImportForm" method="post" action="{{ url_for('web.trakt_import') }}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<div class="row g-3">
+<div class="col-md-6"><label class="form-label" for="trakt_archive">Export .zip</label><input class="form-control" id="trakt_archive" name="archive" type="file" accept=".zip,application/zip" required></div>
+<div class="col-md-6"><label class="form-label" for="trakt_source">Fonte para associar o histórico</label><select class="form-select" id="trakt_source" name="source_id" required><option value="">Selecione…</option>{% for source in trakt_sources %}<option value="{{ source.id }}">{{ source.name }} · {{ source.connector_type.value|capitalize }}</option>{% endfor %}</select></div>
+<div class="col-md-6"><label class="form-label" for="trakt_mode">Modo</label><select class="form-select" id="trakt_mode" name="mode"><option value="dry-run">Dry-run (não grava)</option><option value="apply">Aplicar e criar backup</option></select></div>
+<div class="col-md-6"><label class="form-label" for="trakt_plex_user_name">Usuário Plex dono do histórico</label><input class="form-control" id="trakt_plex_user_name" value="{{ trakt_plex_user_name }}" readonly><input type="hidden" name="plex_user" value="{{ trakt_plex_user_id }}"><div class="form-text">Usuário configurado no Plex. O Account.id correspondente é enviado internamente para impedir mistura entre usuários.</div></div>
+<div class="col-md-6"><label class="form-label" for="progress_every">Intervalo de progresso</label><input class="form-control" id="progress_every" name="progress_every" type="number" min="1" max="100000" value="1000"></div>
+</div><button id="traktImportButton" class="btn btn-primary mt-3">Executar importador Trakt</button>
+<div id="traktImportProgress" class="mt-3 d-none" aria-live="polite"><div class="d-flex justify-content-between mb-1"><strong id="traktImportPhase">Preparando…</strong><span id="traktImportPercent">0%</span></div><div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div id="traktImportBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%"></div></div><p id="traktImportMessage" class="small text-secondary mt-2 mb-0">Aguardando início.</p></div>
+</form>
+</div></div>
+
 {% endblock %}

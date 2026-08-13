@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from typing import Any
 
 from euvieouvi.connectors.dtos import (
@@ -177,9 +178,8 @@ class JellyfinConnector:
         enriched["_SeriesProviderIds"] = self._series_provider_ids[series_id]
         return enriched
 
-    @staticmethod
     def _map_valid_history(
-        items: list[dict[str, Any]], library_id: str
+        self, items: list[dict[str, Any]], library_id: str
     ) -> Iterator[ExternalWatchEvent]:
         for value in items:
             try:
@@ -187,4 +187,4 @@ class JellyfinConnector:
             except (ConnectorResponseError, ValueError):
                 continue
             if event is not None:
-                yield event
+                yield replace(event, playback_user=self._user_id)

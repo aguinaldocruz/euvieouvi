@@ -37,6 +37,16 @@ class ConnectionInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalUser:
+    external_id: str
+    name: str
+
+    def __post_init__(self) -> None:
+        _require_text(self.external_id, "external_id")
+        _require_text(self.name, "name")
+
+
+@dataclass(frozen=True, slots=True)
 class ExternalLibrary:
     external_id: str
     name: str
@@ -161,6 +171,7 @@ class ExternalWatchEvent:
     progress_ms: int | None = None
     duration_ms: int | None = None
     view_number: int | None = None
+    playback_user: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.media_external_id, "media_external_id")
@@ -168,6 +179,9 @@ class ExternalWatchEvent:
         _require_utc(self.watched_at, "watched_at")
         for name in ("progress_ms", "duration_ms", "view_number"):
             _require_nonnegative(getattr(self, name), name)
+
+        if self.playback_user is not None:
+            _require_text(self.playback_user, "playback_user")
 
 
 @dataclass(frozen=True, slots=True)

@@ -78,7 +78,7 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
             secret='{"api_key":"key","user_id":"user"}',
             enabled=True,
         )
-        db.session.add_all([plex, jellyfin])
+        db.session.add_all([plex, jellyfin, Setting(key="plex.user_id", value="plex-user")])
         db.session.flush()
         source_by_type = {ConnectorType.PLEX: plex, ConnectorType.JELLYFIN: jellyfin}
         plex_library = Library(
@@ -136,6 +136,9 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
                     dedup_key="webhook:completed",
                     watched_at=NOW,
                     completed=True,
+                    playback_user=(
+                        "plex-user" if watched_source is ConnectorType.PLEX else "user"
+                    ),
                     origin="webhook",
                 ),
             ]

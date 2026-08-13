@@ -33,6 +33,7 @@ def create_app(config_overrides: Mapping[str, Any] | None = None) -> Flask:
     app.config.from_mapping(settings.as_flask_mapping())
     if app.config.get("MAX_CONTENT_LENGTH") is None:
         app.config["MAX_CONTENT_LENGTH"] = 64 * 1024
+    app.config.setdefault("TRAKT_IMPORT_MAX_CONTENT_LENGTH", 513 * 1024 * 1024)
 
     configure_logging(settings.log_level)
     register_request_id(app)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 from euvieouvi.connectors.dtos import (
     ConnectionInfo,
@@ -11,6 +12,7 @@ from euvieouvi.connectors.dtos import (
     ExternalLibraryRejection,
     ExternalMediaItem,
     ExternalMediaKind,
+    ExternalUser,
     ExternalWatchEvent,
     HistoryCheckpoint,
     Page,
@@ -23,6 +25,7 @@ from euvieouvi.connectors.errors import (
 )
 from euvieouvi.connectors.plex.client import PlexHttpClient
 from euvieouvi.connectors.plex.mapper import (
+    map_account_discovery,
     map_connection,
     map_library_discovery,
     map_media_item,
@@ -36,8 +39,9 @@ _LOGGER = logging.getLogger(__name__)
 class PlexConnector:
     """Collect Plex data and return only neutral immutable values."""
 
-    def __init__(self, client: PlexHttpClient) -> None:
+    def __init__(self, client: PlexHttpClient, user_id: str | None = None) -> None:
         self._client = client
+        self._user_id = (user_id or "").strip()
         self._last_pages: dict[str, tuple[int, tuple[str, ...]]] = {}
         self.last_unsupported_libraries: tuple[ExternalLibraryRejection, ...] = ()
 
@@ -47,6 +51,10 @@ class PlexConnector:
     def test_connection(self) -> ConnectionInfo:
         container, _ = parse_container(self._client.get("/"))
         return map_connection(container)
+
+    def list_users(self) -> tuple[ExternalUser, ...]:
+        _, items = parse_container(self._client.get("/accounts"))
+        return map_account_discovery(items)
 
     def list_libraries(self) -> list[ExternalLibrary]:
         _, items = parse_container(self._client.get("/library/sections"))
@@ -127,6 +135,8 @@ class PlexConnector:
             current_page = PageRequest(start=current_start, size=page.size)
             params = self._page_params(current_page)
             params["librarySectionID"] = library.external_id
+            if self._user_id:
+                params["accountID"] = self._user_id
             params["sort"] = "viewedAt:asc"
             payload = self._client.get("/status/sessions/history/all", params=params)
             container, items = parse_container(payload)
@@ -140,7 +150,13 @@ class PlexConnector:
                     current_start,
                     skipped,
                 )
-            mapped = tuple(map_watch_event(item, library.external_id) for item in identified)
+            mapped = tuple(
+                replace(
+                    map_watch_event(item, library.external_id),
+                    playback_user=self._user_id or None,
+                )
+                for item in identified
+            )
             result = self._page(
                 container,
                 mapped,

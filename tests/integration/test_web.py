@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import time
@@ -383,6 +384,80 @@ def test_plex_form_validation_save_and_token_preservation(app: Flask) -> None:
     with app.app_context():
         source = db.session.get(Source, 1)
         assert source and source.secret == "private" and source.name == "Plex novo"
+
+
+def test_plex_user_selector_saves_numeric_account_id(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class PlexUsersConnector(PlexConnector):
+        def __init__(self) -> None:
+            pass
+
+        def list_users(self):
+            from euvieouvi.connectors.dtos import ExternalUser
+
+            return (ExternalUser("7", "Alice"), ExternalUser("42", "Zoe"))
+
+        def close(self) -> None:
+            pass
+
+    with app.app_context():
+        source = Source(
+            connector_type=ConnectorType.PLEX,
+            name="Plex",
+            base_url="http://plex:32400",
+            secret="private",
+            enabled=True,
+            last_connection_status="succeeded",
+        )
+        db.session.add_all([source, Setting(key="plex.user_id", value="7")])
+        db.session.commit()
+
+    monkeypatch.setattr("euvieouvi.web.routes.connector_for", lambda source: PlexUsersConnector())
+    client = app.test_client()
+    page = client.get("/settings/plex")
+    text = page.get_data(as_text=True)
+    assert '<option value="7" selected>Alice</option>' in text
+    assert '<option value="42"' in text
+
+    backup_text = client.get("/settings/backup").get_data(as_text=True)
+    assert 'id="trakt_plex_user_name" value="Alice"' in backup_text
+    assert 'type="hidden" name="plex_user" value="7"' in backup_text
+
+    token = csrf(client, "/settings/plex")
+    saved = client.post(
+        "/settings/plex",
+        data={
+            "csrf_token": token,
+            "name": "Plex",
+            "base_url": "http://plex:32400",
+            "secret": "",
+            "user_id": "42",
+            "enabled": "on",
+        },
+    )
+    assert saved.status_code == 302
+    with app.app_context():
+        assert db.session.get(Setting, "plex.user_id").value == "42"
+        assert db.session.get(Setting, "webhook.plex.user_filter").value == "42"
+
+
+def test_trakt_upload_uses_route_specific_body_limit(app: Flask) -> None:
+    client = app.test_client()
+    token = csrf(client, "/settings/backup")
+    response = client.post(
+        "/backups/trakt-import",
+        data={
+            "csrf_token": token,
+            "archive": (io.BytesIO(b"x" * (65 * 1024)), "export.zip"),
+            "source_id": "invalid",
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 302
+    status = client.get("/backups/trakt-import/status")
+    assert status.status_code == 200
+    assert {"active", "state", "percent", "message"} <= set(status.get_json())
 
 
 def test_csrf_required_for_web_but_not_api(app: Flask) -> None:
@@ -1116,6 +1191,7 @@ def test_webhook_page_shows_current_activity_and_respects_retention(app: Flask) 
     with app.app_context():
         assert db.session.query(WebhookEvent).filter_by(completed=True).count() == 1
 
+
 def test_jellyfin_completed_unmapped_item_commits_before_queuing_sync(
     app: Flask, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1127,9 +1203,7 @@ def test_jellyfin_completed_unmapped_item_commits_before_queuing_sync(
             secret=json.dumps({"api_key": "key", "user_id": "user-1"}),
             enabled=True,
         )
-        db.session.add_all(
-            [jellyfin, Setting(key="webhook.jellyfin.token", value="jf-secret")]
-        )
+        db.session.add_all([jellyfin, Setting(key="webhook.jellyfin.token", value="jf-secret")])
         db.session.commit()
         source_id = jellyfin.id
 
@@ -1168,7 +1242,6 @@ def test_jellyfin_completed_unmapped_item_commits_before_queuing_sync(
         assert event.completed is True and event.active is False
         pending = db.session.get(Setting, "watch_sync.pending")
         assert pending is not None and pending.value == "true"
-
 
 
 def test_plex_activity_shows_all_users_but_completion_uses_filter(app: Flask) -> None:
@@ -1231,9 +1304,7 @@ def test_jellyfin_progress_creates_and_updates_current_activity(app: Flask) -> N
             secret=json.dumps({"api_key": "key", "user_id": "user-1"}),
             enabled=True,
         )
-        db.session.add_all(
-            [jellyfin, Setting(key="webhook.jellyfin.token", value="jf-secret")]
-        )
+        db.session.add_all([jellyfin, Setting(key="webhook.jellyfin.token", value="jf-secret")])
         db.session.commit()
 
     client = app.test_client()
@@ -1297,9 +1368,7 @@ def test_webhook_page_deactivates_activity_older_than_one_hour(app: Flask) -> No
     assert response.status_code == 200
     assert "Stale playback" not in response.get_data(as_text=True)
     with app.app_context():
-        event = db.session.scalar(
-            select(WebhookEvent).where(WebhookEvent.external_id == "stale")
-        )
+        event = db.session.scalar(select(WebhookEvent).where(WebhookEvent.external_id == "stale"))
         assert event is not None and event.active is False
 
 

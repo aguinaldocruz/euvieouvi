@@ -39,6 +39,29 @@ def make_connector(handler: httpx.MockTransport) -> PlexConnector:
     return PlexConnector(http_client)
 
 
+def test_user_discovery_maps_names_to_numeric_account_ids() -> None:
+    def route(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/accounts"
+        return httpx.Response(
+            200,
+            content=(
+                b'<MediaContainer size="3">'
+                b'<Account id="42" name="Zoe" />'
+                b'<Account id="7" name="Alice" />'
+                b'<Account id="invalid" name="Ignored" />'
+                b"</MediaContainer>"
+            ),
+            request=request,
+        )
+
+    users = make_connector(httpx.MockTransport(route)).list_users()
+
+    assert [(user.name, user.external_id) for user in users] == [
+        ("Alice", "7"),
+        ("Zoe", "42"),
+    ]
+
+
 def test_mark_watched_uses_scrobble_endpoint() -> None:
     def route(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/:/scrobble"

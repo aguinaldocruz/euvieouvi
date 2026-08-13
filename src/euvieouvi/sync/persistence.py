@@ -176,6 +176,7 @@ class MediaPersistenceService:
                 existing.progress_ms = event.progress_ms
                 existing.duration_ms = event.duration_ms
                 existing.view_number = event.view_number
+                existing.playback_user = event.playback_user
                 existing.origin = origin
                 return False
         if self.work.watch_events.by_dedup_key(self.source_id, dedup_key) is not None:
@@ -205,6 +206,7 @@ class MediaPersistenceService:
                 progress_ms=event.progress_ms,
                 duration_ms=event.duration_ms,
                 view_number=event.view_number,
+                playback_user=event.playback_user,
                 origin=origin,
             )
         )
@@ -607,7 +609,7 @@ class MediaPersistenceService:
         matches = self.work.media_identifiers.media_ids_for_kind(kind.value, identities)
         if len(matches) > 1:
             raise ValueError("Container identifiers match more than one media item.")
-        return self._required_media(matches[0]) if matches else None
+        return self._required_media(next(iter(matches))) if matches else None
 
     def _match_historical_container(
         self,

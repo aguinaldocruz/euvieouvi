@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import secrets
+import sqlite3
+import threading
 import unicodedata
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -24,7 +27,7 @@ from flask import (
     send_file,
     url_for,
 )
-from sqlalchemy import and_, case, delete, exists, func, or_, select
+from sqlalchemy import and_, case, delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
@@ -32,6 +35,7 @@ from euvieouvi.api.runtime import connector_for, get_executor
 from euvieouvi.api.validation import http_url
 from euvieouvi.connectors.dtos import ExternalWatchEvent
 from euvieouvi.connectors.errors import ConnectorError
+from euvieouvi.connectors.plex.connector import PlexConnector
 from euvieouvi.database.enums import ConnectorType, MediaKind, SyncStatus
 from euvieouvi.database.models import (
     Genre,
@@ -43,6 +47,7 @@ from euvieouvi.database.models import (
     Setting,
     Source,
     SourceMediaRef,
+    SyncCheckpoint,
     SyncError,
     SyncRun,
     SyncRunLibrary,
@@ -61,6 +66,31 @@ from euvieouvi.sync.persistence import MediaPersistenceService
 from euvieouvi.web.formatting import duration_ms, local_datetime
 
 blueprint = Blueprint("web", __name__)
+
+_TRAKT_LOCK = threading.Lock()
+_TRAKT_STATUS: dict[str, Any] = {
+    "active": False,
+    "state": "idle",
+    "percent": 0,
+    "message": "Pronto para importar.",
+}
+
+
+def _trakt_progress(message: str) -> None:
+    percent = int(_TRAKT_STATUS["percent"])
+    phases = {"Fase 1/4": 5, "Fase 2/4": 20, "Fase 3/4": 50, "Fase 4/4": 85}
+    for prefix, value in phases.items():
+        if message.startswith(prefix):
+            percent = value
+    match = re.match(r"^\s*(associação|eventos|estados):\s*(\d+)/(\d+)", message)
+    if match:
+        ranges = {"associação": (20, 50), "eventos": (50, 85), "estados": (85, 98)}
+        start, end = ranges[match.group(1)]
+        percent = min(
+            end, start + round((end - start) * int(match.group(2)) / max(int(match.group(3)), 1))
+        )
+    with _TRAKT_LOCK:
+        _TRAKT_STATUS.update(percent=percent, message=message)
 
 
 @blueprint.app_context_processor
@@ -178,11 +208,37 @@ def setup() -> Any:
 @blueprint.route("/settings/plex", methods=["GET", "POST"])
 def settings_plex() -> Any:
     source = _source(ConnectorType.PLEX)
+    user_values = _settings("plex.user_id", "webhook.plex.user_filter")
+    configured_user = user_values.get("plex.user_id") or user_values.get(
+        "webhook.plex.user_filter", ""
+    )
+    plex_users = ()
+    if source is not None and source.last_connection_status == "succeeded":
+        connector = connector_for(source)
+        if isinstance(connector, PlexConnector):
+            try:
+                plex_users = connector.list_users()
+            except ConnectorError:
+                flash(
+                    "Não foi possível carregar os usuários do Plex. Teste a conexão novamente.",
+                    "warning",
+                )
+            finally:
+                connector.close()
+    selected_user = next(
+        (
+            user.external_id
+            for user in plex_users
+            if configured_user.casefold() in {user.external_id.casefold(), user.name.casefold()}
+        ),
+        configured_user,
+    )
     errors: dict[str, str] = {}
     if request.method == "POST":
         name = request.form.get("name", "").strip()
         base_url = request.form.get("base_url", "").strip()
         secret = request.form.get("secret", "")
+        user_id = request.form.get("user_id", "").strip()
         enabled = request.form.get("enabled") == "on"
         if not name or len(name) > 255:
             errors["name"] = "Informe um nome com até 255 caracteres."
@@ -193,6 +249,13 @@ def settings_plex() -> Any:
             normalized_url = base_url
         if source is None and not secret.strip():
             errors["secret"] = "O token Plex é obrigatório no primeiro cadastro."
+        if plex_users and not user_id:
+            errors["user_id"] = "Selecione o usuário Plex acompanhado."
+        elif user_id and (
+            not user_id.isdigit()
+            or (plex_users and user_id not in {user.external_id for user in plex_users})
+        ):
+            errors["user_id"] = "Selecione um usuário disponível no servidor Plex."
         if not errors:
             if source is None:
                 source = Source(
@@ -209,6 +272,11 @@ def settings_plex() -> Any:
                 source.enabled = enabled
                 if secret.strip():
                     source.secret = secret.strip()
+            if user_id:
+                selected = next((user for user in plex_users if user.external_id == user_id), None)
+                _save_setting("plex.user_id", user_id)
+                _save_setting("plex.user_name", selected.name if selected is not None else user_id)
+                _save_setting("webhook.plex.user_filter", user_id)
             try:
                 db.session.commit()
             except IntegrityError:
@@ -217,7 +285,13 @@ def settings_plex() -> Any:
             else:
                 flash("Configuração do Plex salva com segurança.", "success")
                 return redirect(url_for("web.settings_plex"))
-    return render_template("settings_plex.html", source=source, errors=errors)
+    return render_template(
+        "settings_plex.html",
+        source=source,
+        errors=errors,
+        plex_users=plex_users,
+        selected_user=selected_user,
+    )
 
 
 @blueprint.route("/settings/jellyfin", methods=["GET", "POST"])
@@ -676,6 +750,26 @@ def settings_backup() -> Any:
             flash("Configurações de backup e retenção salvas.", "success")
             return redirect(url_for("web.settings_backup"))
     backups = _list_backups()
+    plex_identity = _settings("plex.user_id", "plex.user_name")
+    trakt_plex_user_id = plex_identity.get("plex.user_id", "")
+    trakt_plex_user_name = plex_identity.get("plex.user_name", "")
+    plex_source = _source(ConnectorType.PLEX)
+    if trakt_plex_user_id and not trakt_plex_user_name and plex_source is not None:
+        connector = connector_for(plex_source)
+        if isinstance(connector, PlexConnector):
+            try:
+                trakt_plex_user_name = next(
+                    (
+                        user.name
+                        for user in connector.list_users()
+                        if user.external_id == trakt_plex_user_id
+                    ),
+                    trakt_plex_user_id,
+                )
+            except ConnectorError:
+                trakt_plex_user_name = trakt_plex_user_id
+            finally:
+                connector.close()
     return render_template(
         "settings_backup.html",
         backup_enabled=values.get("backup.schedule.enabled", "false") == "true",
@@ -684,7 +778,12 @@ def settings_backup() -> Any:
         sync_keep=values.get("sync.retention.keep_last", "15"),
         backups=backups,
         timezone=current_app.config["TIMEZONE"],
+        trakt_sources=db.session.scalars(
+            select(Source).where(Source.connector_type == ConnectorType.PLEX).order_by(Source.name)
+        ).all(),
         errors=errors,
+        trakt_plex_user_id=trakt_plex_user_id,
+        trakt_plex_user_name=trakt_plex_user_name,
     )
 
 
@@ -815,6 +914,170 @@ def backup_restore_upload() -> Any:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
     return redirect(url_for("web.settings_backup"))
+
+
+def _active_sync_exists() -> bool:
+    return (
+        db.session.scalar(
+            select(SyncRun.id).where(SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]))
+        )
+        is not None
+    )
+
+
+@blueprint.post("/backups/reset-catalog-history")
+def reset_catalog_history() -> Any:
+    if request.form.get("confirmation", "").strip() != "RECARREGAR":
+        flash("Digite RECARREGAR para confirmar a limpeza.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    if _active_sync_exists():
+        flash("Há sincronização ativa; aguarde terminar antes de limpar os dados.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    try:
+        # Sources, libraries and settings are setup/configuration and are intentionally preserved.
+        db.session.execute(delete(SyncCheckpoint))
+        db.session.execute(delete(SyncRun))
+        db.session.execute(delete(WebhookEvent))
+        db.session.execute(delete(WatchEvent))
+        db.session.execute(delete(WatchState))
+        db.session.execute(delete(MediaGenre))
+        db.session.execute(delete(MediaIdentifier))
+        db.session.execute(delete(MediaImage))
+        from euvieouvi.database.models import EnrichmentRecord
+
+        db.session.execute(delete(EnrichmentRecord))
+        db.session.execute(delete(SourceMediaRef))
+        db.session.execute(update(MediaItem).values(parent_id=None))
+        db.session.execute(delete(MediaItem))
+        db.session.execute(delete(Genre))
+        for key in ("watch_sync.pending",):
+            setting = db.session.get(Setting, key)
+            if setting is not None:
+                db.session.delete(setting)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("catalog and history reset failed")
+        flash("Não foi possível limpar catálogo e histórico.", "danger")
+    else:
+        flash(
+            "Catálogo e histórico apagados. Configuração e bibliotecas foram preservadas.",
+            "success",
+        )
+    return redirect(url_for("web.settings_backup"))
+
+
+@blueprint.get("/backups/trakt-import/status")
+def trakt_import_status() -> Any:
+    with _TRAKT_LOCK:
+        return dict(_TRAKT_STATUS)
+
+
+@blueprint.post("/backups/trakt-import")
+def trakt_import() -> Any:
+    from scripts import import_trakt_export as importer
+
+    if _active_sync_exists():
+        flash("Há sincronização ativa; aguarde terminar antes de importar.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    archive_file = request.files.get("archive")
+    if archive_file is None or not archive_file.filename:
+        flash("Selecione o arquivo ZIP exportado pelo Trakt.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    if not archive_file.filename.casefold().endswith(".zip"):
+        flash("O export do Trakt deve ser um arquivo .zip.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    raw_source_id = request.form.get("source_id", "")
+    if not raw_source_id.isdigit():
+        flash("Selecione a fonte à qual o histórico será associado.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    source_id = int(raw_source_id)
+    selected_source = db.session.get(Source, source_id)
+    if selected_source is None or selected_source.connector_type is not ConnectorType.PLEX:
+        flash("A fonte selecionada não existe.", "warning")
+        return redirect(url_for("web.settings_backup"))
+    apply_import = request.form.get("mode") == "apply"
+    configured_plex_user = _configured_source_user(selected_source)
+    plex_user = request.form.get("plex_user", "").strip() or configured_plex_user
+    if not plex_user or plex_user != configured_plex_user:
+        flash(
+            "O usuário do Trakt deve ser o Account.id configurado para o Plex.",
+            "warning",
+        )
+        return redirect(url_for("web.settings_backup"))
+    progress_raw = request.form.get("progress_every", "1000")
+    progress_every = int(progress_raw) if progress_raw.isdigit() else 1000
+    progress_every = min(max(progress_every, 1), 100000)
+    uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    if not uri.startswith("sqlite:///"):
+        flash("A importação offline do Trakt requer o banco SQLite local.", "danger")
+        return redirect(url_for("web.settings_backup"))
+    database = Path(uri.removeprefix("sqlite:///"))
+    upload = _backup_dir() / ("trakt-" + secrets.token_hex(8) + ".zip")
+    upload.parent.mkdir(parents=True, exist_ok=True)
+    with _TRAKT_LOCK:
+        if _TRAKT_STATUS["active"]:
+            return {"error": "Já existe uma importação Trakt em andamento."}, 409
+        _TRAKT_STATUS.update(
+            active=True,
+            state="processing",
+            percent=1,
+            message="Upload concluído. Preparando o arquivo…",
+        )
+    try:
+        archive_file.save(upload)
+    except Exception:
+        with _TRAKT_LOCK:
+            _TRAKT_STATUS.update(
+                active=False, state="failed", percent=100, message="Falha ao salvar o upload."
+            )
+        raise
+    db.session.remove()
+    db.engine.dispose()
+    application = current_app._get_current_object()
+
+    def execute_import() -> None:
+        try:
+            connection = sqlite3.connect(database)
+            connection.row_factory = sqlite3.Row
+            try:
+                importer._validate_database(connection)
+                report = importer.import_archive(
+                    connection,
+                    upload,
+                    database,
+                    source_id=source_id,
+                    plex_user=plex_user,
+                    apply=apply_import,
+                    progress=_trakt_progress,
+                    progress_every=progress_every,
+                )
+            finally:
+                connection.close()
+            action = "importados" if report.committed else "validados em dry-run"
+            with _TRAKT_LOCK:
+                _TRAKT_STATUS.update(
+                    active=False,
+                    state="succeeded",
+                    percent=100,
+                    message=(
+                        f"{report.events_valid} eventos {action}; "
+                        f"{report.events_inserted} novos e "
+                        f"{report.events_already_imported} já existentes."
+                    ),
+                )
+        except Exception as exc:
+            application.logger.exception("Trakt background import failed")
+            with _TRAKT_LOCK:
+                _TRAKT_STATUS.update(
+                    active=False, state="failed", percent=100, message=f"Importação falhou: {exc}"
+                )
+        finally:
+            with contextlib.suppress(OSError):
+                upload.unlink(missing_ok=True)
+
+    threading.Thread(target=execute_import, name="euvieouvi-trakt-import", daemon=True).start()
+    return {"accepted": True, "status_url": url_for("web.trakt_import_status")}, 202
 
 
 @blueprint.route("/settings/webhooks", methods=["GET", "POST"])
@@ -958,9 +1221,7 @@ def plex_webhook(token: str) -> Any:
         media_kind=media_kind,
         event_type=event_type,
         occurred_at=watched_at,
-        progress_percent=_playback_percent(
-            metadata.get("viewOffset"), metadata.get("duration")
-        ),
+        progress_percent=_playback_percent(metadata.get("viewOffset"), metadata.get("duration")),
         completed=completed,
         active=active,
         event_key=str(payload.get("event_id") or "").strip() or None,
@@ -998,19 +1259,26 @@ def jellyfin_webhook(token: str) -> Any:
     if notification_type not in {"playbackstart", "playbackprogress", "playbackstop"}:
         return Response(status=204)
     credentials = _jellyfin_credentials(source)
-    if not _jellyfin_webhook_user_matches(credentials, payload):
-        return Response(status=204)
+    configured_user_matches = _jellyfin_webhook_user_matches(credentials, payload)
     payload_item = payload.get("Item")
     raw_item: dict[str, Any] = payload_item if isinstance(payload_item, dict) else {}
     external_id = str(payload.get("ItemId") or raw_item.get("Id") or "").strip()
     timestamp_value = payload.get("UtcTimestamp")
     watched_at = _parse_webhook_datetime(timestamp_value)
     if timestamp_value and watched_at is None:
+        if not configured_user_matches:
+            return Response(status=204)
         return Response("Identidade ou data ausente.", 400)
     watched_at = watched_at or datetime.now(UTC)
     if not external_id:
+        if not configured_user_matches:
+            return Response(status=204)
         return Response("Identidade ou data ausente.", 400)
-    completed = notification_type == "playbackstop" and _truthy(payload.get("PlayedToCompletion"))
+    completed = (
+        notification_type == "playbackstop"
+        and _truthy(payload.get("PlayedToCompletion"))
+        and configured_user_matches
+    )
     media_kind = str(payload.get("ItemType") or raw_item.get("Type") or "") or None
     series_title = (
         (payload.get("SeriesName") or raw_item.get("SeriesName"))
@@ -1962,6 +2230,14 @@ def _jellyfin_credentials(source: Source) -> dict[str, str]:
     return {key: str(value) for key, value in raw.items()} if isinstance(raw, dict) else {}
 
 
+def _configured_source_user(source: Source) -> str | None:
+    if source.connector_type is ConnectorType.PLEX:
+        values = _settings("plex.user_id", "webhook.plex.user_filter")
+        return values.get("plex.user_id") or values.get("webhook.plex.user_filter") or None
+    credentials = _jellyfin_credentials(source)
+    return credentials.get("user_id") or None
+
+
 def _jellyfin_webhook_payload() -> dict[str, Any] | None:
     """Accept both Jellyfin Webhook's JSON and Generic Form formats."""
     if request.is_json:
@@ -1979,9 +2255,7 @@ def _jellyfin_webhook_payload() -> dict[str, Any] | None:
     return None
 
 
-def _jellyfin_webhook_user_matches(
-    credentials: dict[str, str], payload: dict[str, Any]
-) -> bool:
+def _jellyfin_webhook_user_matches(credentials: dict[str, str], payload: dict[str, Any]) -> bool:
     configured = credentials.get("user_id", "").strip().casefold()
     if not configured:
         return True
@@ -1994,14 +2268,13 @@ def _jellyfin_webhook_user_matches(
 
 
 def _plex_webhook_user_matches(account: dict[str, Any]) -> bool:
-    configured = _settings("webhook.plex.user_filter").get(
-        "webhook.plex.user_filter", ""
-    ).strip().casefold()
+    configured = (
+        _settings("webhook.plex.user_filter").get("webhook.plex.user_filter", "").strip().casefold()
+    )
     if not configured:
         return True
     return any(
-        str(account.get(key) or "").strip().casefold() == configured
-        for key in ("id", "title")
+        str(account.get(key) or "").strip().casefold() == configured for key in ("id", "title")
     )
 
 
@@ -2082,11 +2355,7 @@ def _record_webhook_activity(
         )
     ).all()
     same_user = [row for row in prior if row.playback_user == playback_user]
-    matching = [
-        row
-        for row in same_user
-        if row.external_id == external_id
-    ]
+    matching = [row for row in same_user if row.external_id == external_id]
     if active and matching:
         current = max(matching, key=lambda row: (row.occurred_at, row.id or 0))
         for row in same_user:

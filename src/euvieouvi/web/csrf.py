@@ -24,6 +24,8 @@ def register_csrf(app: Flask) -> None:
 
     @app.before_request
     def protect_web_mutation() -> None:
+        if request.path == "/backups/trakt-import":
+            request.max_content_length = app.config["TRAKT_IMPORT_MAX_CONTENT_LENGTH"]
         if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
             return
         if request.path.startswith("/api/"):

@@ -298,6 +298,7 @@ class WatchEvent(TimestampMixin, Base):
     progress_ms: Mapped[int | None] = mapped_column(Integer)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     view_number: Mapped[int | None] = mapped_column(Integer)
+    playback_user: Mapped[str | None] = mapped_column(String(255))
     origin: Mapped[str] = mapped_column(String(32), default="synchronization", nullable=False)
 
 

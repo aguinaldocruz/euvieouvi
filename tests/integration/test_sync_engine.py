@@ -626,6 +626,57 @@ def test_plex_sync_reuses_trakt_episode_hierarchy(app: Flask) -> None:
         }
 
 
+def test_show_provider_identifier_reuses_historical_container(app: Flask) -> None:
+    with app.app_context():
+        source_id, library_ids = seed_source(second_library=True)
+        movie_library = db.session.get(Library, library_ids[0])
+        assert movie_library is not None
+        movie_library.enabled = False
+        historical_show = MediaItem(kind=MediaKind.SHOW, title="Landman")
+        db.session.add(historical_show)
+        db.session.flush()
+        db.session.add(
+            MediaIdentifier(
+                media_item_id=historical_show.id,
+                provider="tvdb",
+                external_id="418934",
+            )
+        )
+        db.session.commit()
+
+        special = ExternalMediaItem(
+            external_id="jellyfin-special",
+            library_external_id="shows",
+            kind=ExternalMediaKind.EPISODE,
+            title="Constant Crisis: The Path To Landman",
+            show_external_id="jellyfin-landman",
+            show_title="Landman",
+            show_identifiers=(ExternalIdentifier("tvdb", "418934"),),
+            season_external_id="jellyfin-landman-specials",
+            season_number=0,
+            episode_number=1,
+            identifiers=(ExternalIdentifier("tvdb", "11144887"),),
+        )
+
+        result = orchestrator(FixtureConnector({"shows": (special,)})).run(source_id)
+
+        assert result.status is SyncStatus.SUCCEEDED
+        show_reference = db.session.scalar(
+            select(SourceMediaRef).where(
+                SourceMediaRef.source_id == source_id,
+                SourceMediaRef.external_id == "jellyfin-landman",
+            )
+        )
+        assert show_reference is not None
+        assert show_reference.media_item_id == historical_show.id
+        assert (
+            db.session.scalar(
+                select(func.count()).select_from(MediaItem).where(MediaItem.kind == MediaKind.SHOW)
+            )
+            == 1
+        )
+
+
 def test_same_source_duplicate_episode_identifier_keeps_both_hierarchies(app: Flask) -> None:
     with app.app_context():
         source_id, library_ids = seed_source(second_library=True)

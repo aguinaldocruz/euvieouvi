@@ -16,6 +16,7 @@ from euvieouvi.connectors.dtos import (
     ExternalLibraryType,
     ExternalMediaItem,
     ExternalMediaKind,
+    ExternalUser,
     ExternalWatchEvent,
 )
 from euvieouvi.connectors.errors import ConnectorResponseError
@@ -63,6 +64,22 @@ def map_connection(container: Mapping[str, Any]) -> ConnectionInfo:
         authenticated=True,
         capabilities=capabilities,
     )
+
+
+def map_account_discovery(items: Sequence[Mapping[str, Any]]) -> tuple[ExternalUser, ...]:
+    accounts: list[ExternalUser] = []
+    for item in items:
+        if str(item.get("_tag", "")).casefold() != "account":
+            continue
+        account_id = _optional_text(item.get("id"))
+        name = (
+            _optional_text(item.get("name"))
+            or _optional_text(item.get("title"))
+            or _optional_text(item.get("username"))
+        )
+        if account_id and account_id.isdigit() and name:
+            accounts.append(ExternalUser(account_id, name))
+    return tuple(sorted(accounts, key=lambda account: account.name.casefold()))
 
 
 def map_library_discovery(
