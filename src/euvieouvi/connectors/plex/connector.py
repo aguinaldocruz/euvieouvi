@@ -70,6 +70,22 @@ class PlexConnector:
             params={"key": external_id, "identifier": "com.plexapp.plugins.library"},
         )
 
+    def get_media_item(
+        self, external_id: str, library_external_id: str
+    ) -> ExternalMediaItem:
+        """Fetch one item so webhook handling can verify Plex's stored watch state."""
+        if not external_id.strip():
+            raise ConnectorConfigurationError("Plex media id must not be empty.")
+        payload = self._client.get(f"/library/metadata/{external_id}")
+        _, items = parse_container(payload)
+        matching = next(
+            (item for item in items if str(item.get("ratingKey") or "") == external_id),
+            None,
+        )
+        if matching is None:
+            raise ConnectorResponseError("Plex metadata omitted the requested media item.")
+        return map_media_item(matching, library_external_id)
+
     def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]:
         """Fetch a bounded, Plex-resized image without exposing the server token."""
         if not source_path.startswith("/") or source_path.startswith("//"):
@@ -102,6 +118,8 @@ class PlexConnector:
         ):
             raise ConnectorConfigurationError("Plex media kind does not match the library type.")
         params = self._page_params(page)
+        if page.updated_since is not None:
+            params["updatedAt>"] = int(page.updated_since.timestamp())
         # Plex does not consistently include the nested Guid elements on
         # library listings unless they are explicitly requested. Those ids
         # let persistence reconcile localized titles across media servers.
@@ -129,7 +147,6 @@ class PlexConnector:
         checkpoint: HistoryCheckpoint | None,
         page: PageRequest,
     ) -> Page[ExternalWatchEvent]:
-        del checkpoint  # A full defensive scan remains correct until a reliable filter is adopted.
         current_start = page.start
         while True:
             current_page = PageRequest(start=current_start, size=page.size)
@@ -138,6 +155,8 @@ class PlexConnector:
             if self._user_id:
                 params["accountID"] = self._user_id
             params["sort"] = "viewedAt:asc"
+            if checkpoint is not None and checkpoint.watermark_at is not None:
+                params["viewedAt>"] = int(checkpoint.watermark_at.timestamp())
             payload = self._client.get("/status/sessions/history/all", params=params)
             container, items = parse_container(payload)
             identified = tuple(item for item in items if _has_text(item.get("ratingKey")))

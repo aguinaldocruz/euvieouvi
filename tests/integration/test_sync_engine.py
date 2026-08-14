@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from flask import Flask
@@ -73,6 +73,7 @@ class FixtureConnector:
         self.fail_at = fail_at
         self.after_page = after_page
         self.media_calls: list[tuple[str, int]] = []
+        self.media_watermarks: list[datetime | None] = []
         self.history_calls: list[tuple[str, int]] = []
 
     def test_connection(self) -> ConnectionInfo:
@@ -89,6 +90,7 @@ class FixtureConnector:
     ) -> Page[ExternalMediaItem]:
         del media_kind
         self.media_calls.append((library.external_id, page.start))
+        self.media_watermarks.append(page.updated_since)
         if self.fail_at == (library.external_id, page.start):
             raise ConnectorConnectionError("fixture page failure")
         result = _slice_page(self.media.get(library.external_id, ()), page)
@@ -314,6 +316,7 @@ def test_initial_sync_and_repetition_are_idempotent(app: Flask) -> None:
         engine = orchestrator(connector)
 
         first = engine.run(source_id)
+        first_call_count = len(connector.media_watermarks)
         second = engine.run(source_id)
 
         assert first.status is SyncStatus.SUCCEEDED
@@ -326,6 +329,13 @@ def test_initial_sync_and_repetition_are_idempotent(app: Flask) -> None:
         second_run = db.session.get(SyncRun, second.run_id)
         assert first_run is not None and first_run.items_inserted == 3
         assert second_run is not None and second_run.items_unchanged == 3
+        assert all(value is None for value in connector.media_watermarks[:first_call_count])
+        assert all(
+            value == NOW - timedelta(minutes=2)
+            for value in connector.media_watermarks[first_call_count:]
+        )
+        checkpoint = db.session.scalar(select(SyncCheckpoint))
+        assert checkpoint is not None and checkpoint.last_full_scan_at is not None
         assert db.session.scalar(select(func.count()).select_from(Genre)) == 2
         assert db.session.scalar(select(func.count()).select_from(MediaGenre)) == 2
 

@@ -1,6 +1,6 @@
 <section id="sync-detail"
   {% if run.status.value in ['queued', 'running'] or (run.watch_sync_status and run.watch_sync_status.value in ['queued', 'running']) %}
-    hx-get="{{ url_for('web.sync_detail_fragment', run_id=run.id) }}"
+    hx-get="{{ poll_url }}"
     hx-trigger="every 3s"
     hx-swap="outerHTML"
   {% endif %}
@@ -11,7 +11,7 @@
       <p><span class="status-dot status-{{ run.status.value }}"></span>{{ run.status.value }}</p>
     </div>
     {% if run.status.value in ['queued','running'] %}
-      <form method="post" action="{{ url_for('web.sync_cancel', run_id=run.id) }}">
+      <form method="post" action="{{ url_for('web.job_sync_cancel', run_id=run.id) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="btn btn-outline-warning">Cancelar</button>
       </form>
@@ -35,15 +35,6 @@
       {% endif %}
     </div>
   </div>
-  <div class="card mb-4"><div class="card-body">
-    <div class="d-flex justify-content-between align-items-start gap-3">
-      <div><h2 class="h5">Propagação Plex ↔ Jellyfin</h2>
-      {% if run.watch_sync_status %}<p class="mb-2"><span class="status-dot status-{{ run.watch_sync_status.value }}"></span>{{ run.watch_sync_status.value }}</p>{% else %}<p class="text-secondary mb-2">Ainda não executada.</p>{% endif %}
-      <div class="row g-3"><div class="col">Analisados <strong class="d-block">{{ run.watch_sync_scanned }}</strong></div><div class="col">Atualizados <strong class="d-block">{{ run.watch_sync_updated }}</strong></div><div class="col">Alinhados <strong class="d-block">{{ run.watch_sync_skipped }}</strong></div><div class="col">Falhas <strong class="d-block">{{ run.watch_sync_failed }}</strong></div></div>
-      {% if run.watch_sync_summary %}<p class="small text-secondary mb-0 mt-2">{{ run.watch_sync_summary }}</p>{% endif %}</div>
-      {% if run.status.value == 'succeeded' and (not run.watch_sync_status or run.watch_sync_status.value not in ['queued', 'running']) %}<form method="post" action="{{ url_for('web.sync_watch_sync', run_id=run.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-primary">{% if run.watch_sync_status %}Executar novamente{% else %}Executar agora{% endif %}</button></form>{% endif %}
-    </div>
-  </div></div>
   <h2 class="h4">Bibliotecas</h2>
   <div class="table-responsive bg-white mb-4">
     <table class="table">

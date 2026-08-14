@@ -55,7 +55,7 @@ Bootstrap, HTMX, ícones e fontes necessárias serão servidos localmente pela a
 
 - Início;
 - Histórico;
-- Sincronizações;
+- Jobs;
 - Bibliotecas;
 - Configurações.
 
@@ -82,7 +82,7 @@ flowchart TB
     L --> S["Primeira sincronização"]
     S --> D["Início"]
     D --> H["Histórico"]
-    D --> R["Sincronizações"]
+    D --> R["Jobs"]
     D --> C["Configurações"]
 ```
 
@@ -99,10 +99,10 @@ Após a configuração inicial, o usuário sempre entra em `Início`. Se faltar 
 | GET | `/libraries` | listar e selecionar bibliotecas |
 | POST | `/libraries/discover` | atualizar descoberta |
 | POST | `/libraries/{id}/selection` | habilitar ou desabilitar |
-| GET | `/sync` | listar execuções |
-| POST | `/sync` | iniciar sincronização |
-| GET | `/sync/{id}` | detalhar execução |
-| POST | `/sync/{id}/cancel` | solicitar cancelamento |
+| GET, POST | `/jobs` | listar, configurar e agendar operações |
+| POST | `/jobs/{job_id}/run` | iniciar um job |
+| GET | `/jobs/sync-runs/{id}/fragment` | acompanhar uma sincronização no modal |
+| POST | `/jobs/sync-runs/{id}/cancel` | solicitar cancelamento |
 | GET | `/history` | consultar histórico e catálogo assistido |
 | GET | `/media/{id}` | detalhar filme, série ou episódio |
 | GET | `/about` | versão e informações operacionais seguras |
@@ -249,7 +249,7 @@ A seleção será enviada individualmente por HTMX. Durante a requisição, some
 
 Nenhum item da biblioteca de mídia será carregado nesta página.
 
-## 12. Página Sincronizações
+## 12. Sincronizações na página Jobs
 
 ### 12.1 Execução ativa
 
@@ -266,7 +266,7 @@ Painel com:
 - botão `Cancelar`;
 - horário da última atualização.
 
-O painel será atualizado por polling HTMX em intervalo moderado enquanto a execução estiver ativa. O polling para automaticamente quando a execução terminar ou a página deixar de estar ativa.
+O painel é aberto em modal pelo botão `Acompanhar` dos jobs Plex e Jellyfin. Ele será atualizado por polling HTMX em intervalo moderado enquanto a execução estiver ativa. O polling para automaticamente quando a execução terminar ou o modal deixar de existir.
 
 ### 12.2 Histórico de execuções
 
@@ -631,7 +631,7 @@ Esta entrega estará aprovada quando houver concordância explícita sobre:
 - estrutura e navegação;
 - fluxo de primeiro acesso;
 - dashboard básico;
-- páginas Plex, Bibliotecas, Sincronizações e Histórico;
+- páginas Plex, Bibliotecas, Jobs e Histórico;
 - detalhes de filme, série, temporada e episódio;
 - polling HTMX e fallback tradicional;
 - proteção CSRF;

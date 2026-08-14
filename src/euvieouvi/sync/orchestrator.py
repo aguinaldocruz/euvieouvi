@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,8 @@ from euvieouvi.sync.errors import (
 from euvieouvi.sync.persistence import ItemClassification, MediaPersistenceService
 
 SessionFactory = Callable[[], Session]
+_FULL_SCAN_INTERVAL = timedelta(days=7)
+_WATERMARK_OVERLAP = timedelta(minutes=2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +206,17 @@ class SyncOrchestrator:
         library = self._start_library(run_id, library_id)
         checkpoint = self._load_checkpoint(library_id)
         stage, start = _resume_position(checkpoint)
-        full_catalog_scan = stage == "media" and start == 0
+        scan_started_at = self._clock()
+        previous_watermark = _utc(checkpoint.watermark_at) if checkpoint else None
+        last_full_scan_at = _utc(checkpoint.last_full_scan_at) if checkpoint else None
+        periodic_full_scan = (
+            checkpoint is None
+            or previous_watermark is None
+            or last_full_scan_at is None
+            or scan_started_at - last_full_scan_at >= _FULL_SCAN_INTERVAL
+        )
+        full_catalog_scan = periodic_full_scan and stage == "media" and start == 0
+        updated_since = None if periodic_full_scan else previous_watermark
         seen_external_ids: set[str] = set()
         reference = ExternalLibraryRef(
             library.external_id,
@@ -227,7 +239,11 @@ class SyncOrchestrator:
                 media_page = self._connector.get_media_page(
                     reference,
                     media_kind,
-                    PageRequest(start=start, size=self._page_size),
+                    PageRequest(
+                        start=start,
+                        size=self._page_size,
+                        updated_since=updated_since,
+                    ),
                 )
                 for item in media_page.items:
                     seen_external_ids.update(_external_ids_for_item(item))
@@ -263,7 +279,7 @@ class SyncOrchestrator:
             history_page = self._connector.get_history_page(
                 reference,
                 HistoryCheckpoint(
-                    watermark_at=checkpoint.watermark_at if checkpoint else None,
+                    watermark_at=previous_watermark,
                     last_external_id=checkpoint.last_external_id if checkpoint else None,
                 ),
                 PageRequest(start=start, size=self._page_size),
@@ -282,6 +298,12 @@ class SyncOrchestrator:
             start = next_start
         self._update_progress(run_id, f"Reconciliando estados assistidos de {library.name}.")
         self._rebuild_container_watch_states(source_id, library_id)
+        self._complete_checkpoint(
+            library_id,
+            run_id,
+            watermark_at=scan_started_at - _WATERMARK_OVERLAP,
+            full_scan=periodic_full_scan,
+        )
         self._finish_library(run_id, library_id, SyncStatus.SUCCEEDED, None)
 
     def _persist_media_page(
@@ -391,8 +413,10 @@ class SyncOrchestrator:
     ) -> None:
         checkpoint = work.sync_checkpoints.by_library(library_id)
         if checkpoint is None:
-            checkpoint = SyncCheckpoint(library_id=library_id, strategy="full_scan_v1")
+            checkpoint = SyncCheckpoint(library_id=library_id, strategy="incremental_v2")
             work.sync_checkpoints.add(checkpoint)
+        else:
+            checkpoint.strategy = "incremental_v2"
         checkpoint.cursor = (
             None if stage == "complete" else json.dumps({"stage": stage, "start": start})
         )
@@ -400,6 +424,35 @@ class SyncOrchestrator:
             run_id if stage == "complete" else checkpoint.last_successful_run_id
         )
         checkpoint.updated_at = self._clock()
+
+    def _complete_checkpoint(
+        self,
+        library_id: int,
+        run_id: int,
+        *,
+        watermark_at: datetime,
+        full_scan: bool,
+    ) -> None:
+        session = self._session_factory()
+        try:
+            work = UnitOfWork(session)
+            checkpoint = work.sync_checkpoints.by_library(library_id)
+            if checkpoint is None:
+                checkpoint = SyncCheckpoint(
+                    library_id=library_id,
+                    strategy="incremental_v2",
+                )
+                work.sync_checkpoints.add(checkpoint)
+            checkpoint.strategy = "incremental_v2"
+            checkpoint.cursor = None
+            checkpoint.watermark_at = watermark_at
+            if full_scan:
+                checkpoint.last_full_scan_at = watermark_at
+            checkpoint.last_successful_run_id = run_id
+            checkpoint.updated_at = self._clock()
+            session.commit()
+        finally:
+            session.close()
 
     def _mark_missing_unavailable(self, library_id: int, seen_external_ids: set[str]) -> None:
         session = self._session_factory()
@@ -566,7 +619,11 @@ class SyncOrchestrator:
 
 
 def _resume_position(checkpoint: SyncCheckpoint | None) -> tuple[str, int]:
-    if checkpoint is None or checkpoint.strategy != "full_scan_v1" or checkpoint.cursor is None:
+    if (
+        checkpoint is None
+        or checkpoint.strategy not in {"full_scan_v1", "incremental_v2"}
+        or checkpoint.cursor is None
+    ):
         return "media", 0
     try:
         payload = json.loads(checkpoint.cursor)
@@ -577,6 +634,12 @@ def _resume_position(checkpoint: SyncCheckpoint | None) -> tuple[str, int]:
     if stage not in {"media", "history"} or start < 0:
         return "media", 0
     return stage, start
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def _external_ids_for_item(item: ExternalMediaItem) -> set[str]:

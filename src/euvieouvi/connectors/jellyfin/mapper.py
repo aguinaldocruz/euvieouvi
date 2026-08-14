@@ -111,7 +111,7 @@ def map_item(raw: dict[str, Any], library_id: str) -> ExternalMediaItem:
             f"/Items/{season_id or album_id}/Images/Primary" if season_id or album_id else None
         ),
         identifiers=_identifiers(raw.get("ProviderIds")),
-        updated_at=_timestamp(raw.get("DateLastMediaAdded")),
+        updated_at=_timestamp(raw.get("DateLastSaved") or raw.get("DateLastMediaAdded")),
         last_viewed_at=_timestamp(user_data.get("LastPlayedDate")),
         view_count=_integer(user_data.get("PlayCount")),
         view_offset_ms=_milliseconds(user_data.get("PlaybackPositionTicks")),

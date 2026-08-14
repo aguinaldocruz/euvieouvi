@@ -16,15 +16,15 @@
 <nav class="navbar navbar-expand-lg border-bottom" aria-label="Navegação principal">
   <div class="container page-shell">
     <a class="navbar-brand text-primary d-inline-flex align-items-center gap-2" href="{{ url_for('web.dashboard') }}"><img src="{{ url_for('static', filename='icons/euvieouvi-sync.svg') }}" alt="" width="28" height="28" aria-hidden="true">euvieouvi</a>
-    {% if active_sync %}<a class="small text-decoration-none me-3" href="{{ url_for('web.sync_detail', run_id=active_sync.id) }}"><span class="status-dot status-{{ active_sync.status.value }}"></span>Sincronizando</a>{% endif %}
+    {% if active_sync %}<a class="small text-decoration-none me-3" href="{{ url_for('web.jobs') }}"><span class="status-dot status-{{ active_sync.status.value }}"></span>Sincronizando</a>{% endif %}
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMain" aria-controls="navMain" aria-expanded="false" aria-label="Abrir navegação"><span class="navbar-toggler-icon"></span></button>
     <div class="collapse navbar-collapse" id="navMain"><ul class="navbar-nav ms-auto">
       <li class="nav-item"><a class="nav-link" href="{{ url_for('web.dashboard') }}">Início</a></li>
       <li class="nav-item"><a class="nav-link" href="{{ url_for('web.catalog') }}">Catálogo</a></li>
       <li class="nav-item"><a class="nav-link" href="{{ url_for('web.history') }}">Histórico</a></li>
-      <li class="nav-item"><a class="nav-link" href="{{ url_for('web.sync_list') }}">Sincronizações</a></li>
+      <li class="nav-item"><a class="nav-link" href="{{ url_for('web.jobs') }}">Jobs</a></li>
       <li class="nav-item"><a class="nav-link" href="{{ url_for('web.libraries') }}">Bibliotecas</a></li>
-      <li class="nav-item dropdown"><a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Configurações</a><ul class="dropdown-menu"><li><a class="dropdown-item" href="{{ url_for('web.settings_plex') }}">Plex</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_jellyfin') }}">Jellyfin</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_webhooks') }}">Webhooks</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_sync') }}">Agendamento</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_backup') }}">Backup</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_metadata') }}">Metadados</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_appearance') }}">Aparência</a></li></ul></li>
+      <li class="nav-item dropdown"><a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Configurações</a><ul class="dropdown-menu"><li><a class="dropdown-item" href="{{ url_for('web.settings_plex') }}">Plex</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_jellyfin') }}">Jellyfin</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_webhooks') }}">Webhooks</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_backup') }}">Backup</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_metadata') }}">Metadados</a></li><li><a class="dropdown-item" href="{{ url_for('web.settings_appearance') }}">Aparência</a></li></ul></li>
       <li class="nav-item d-flex align-items-center ms-2"><button id="themeToggle" class="btn btn-sm btn-outline-secondary" type="button" aria-label="Alternar tema claro e escuro" title="Alternar tema">◐</button></li>
     </ul></div>
   </div>

@@ -199,12 +199,14 @@ class PageRequest:
     start: int = 0
     size: int = 200
     cursor: str | None = None
+    updated_since: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.start < 0:
             raise ValueError("start must be nonnegative")
         if not 1 <= self.size <= 1000:
             raise ValueError("size must be from 1 to 1000")
+        _require_utc(self.updated_since, "updated_since")
 
 
 @dataclass(frozen=True, slots=True)

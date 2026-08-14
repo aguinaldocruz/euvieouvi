@@ -1,5 +1,5 @@
 {% extends 'base.html' %}{% block title %}Backup · euvieouvi{% endblock %}{% block content %}
-<div class="d-flex justify-content-between align-items-start mb-4"><div><h1 class="h2">Backup e retenção</h1><p class="text-secondary mb-0">Dump SQLite agendado, retenção e restauração com sobrescrita.</p></div><a class="btn btn-outline-secondary" href="{{ url_for('web.settings_sync') }}">Agendamento sync</a></div>
+<div class="d-flex justify-content-between align-items-start mb-4"><div><h1 class="h2">Backup e retenção</h1><p class="text-secondary mb-0">Dump SQLite agendado, retenção e restauração com sobrescrita.</p></div></div>
 <div class="card mb-4"><div class="card-body">
 <form method="post" novalidate><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 <div class="form-check form-switch mb-3"><input class="form-check-input" id="backup_enabled" name="backup_enabled" type="checkbox" {% if backup_enabled %}checked{% endif %}><label class="form-check-label" for="backup_enabled">Ativar backup diário</label></div>

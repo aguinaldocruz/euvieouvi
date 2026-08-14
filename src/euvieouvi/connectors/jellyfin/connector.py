@@ -38,6 +38,7 @@ _FIELDS = ",".join(
         "Studios",
         "Taglines",
         "DateCreated",
+        "DateLastSaved",
         "MediaSources",
         "ParentId",
     ]
@@ -97,13 +98,18 @@ class JellyfinConnector:
         checkpoint: HistoryCheckpoint | None,
         page: PageRequest,
     ) -> Page[ExternalWatchEvent]:
-        del checkpoint
         kind = {
             "movie": ExternalMediaKind.MOVIE,
             "show": ExternalMediaKind.EPISODE,
             "artist": ExternalMediaKind.TRACK,
         }[library.media_type.value]
-        raw = self._items(library, kind, page, played_only=True)
+        effective_page = replace(
+            page,
+            updated_since=checkpoint.watermark_at if checkpoint is not None else None,
+        )
+        raw = self._items(
+            library, kind, effective_page, played_only=True, updated_for_user=True
+        )
         mapped = tuple(self._map_valid_history(raw["items"], library.external_id))
         return Page(
             mapped,
@@ -130,6 +136,7 @@ class JellyfinConnector:
         page: PageRequest,
         *,
         played_only: bool,
+        updated_for_user: bool = False,
     ) -> dict[str, Any]:
         include_type = _INCLUDE_TYPES.get(kind)
         if include_type is None:
@@ -149,6 +156,10 @@ class JellyfinConnector:
             params["IsPlayed"] = True
             params["SortBy"] = "DatePlayed"
             params["SortOrder"] = "Ascending"
+        if page.updated_since is not None:
+            params[
+                "MinDateLastSavedForUser" if updated_for_user else "MinDateLastSaved"
+            ] = page.updated_since.isoformat().replace("+00:00", "Z")
         raw = self._client.get_json(f"/Users/{self._user_id}/Items", params=params)
         if not isinstance(raw, dict) or not isinstance(raw.get("Items"), list):
             raise ConnectorResponseError("Jellyfin item response was invalid.")

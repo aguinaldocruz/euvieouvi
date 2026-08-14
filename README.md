@@ -20,7 +20,11 @@ history and records for media that later disappears from a server.
 - Completed playback history with source and acquisition origin (`webhook` or
   `synchronization`).
 - Plex and Jellyfin webhooks, recent-event retention, and currently playing media.
-- Daily schedules shared by both sources or configured per source.
+- Durable asynchronous webhook updates with idempotency, automatic retries, restart recovery,
+  periodic/page-activity draining, and a manual queue job.
+- Independent manual/daily jobs with persistent progress, results, and rotated logs. Available
+  Plex/Jellyfin artwork is proxied on demand without exposing tokens; the image job preserves only
+  artwork for catalog items no longer available on either server.
 - Optional TMDB, MusicBrainz, and Cover Art Archive enrichment using exact identifiers.
 - Local artwork cache and historical retention for unavailable media.
 - Light and dark themes, responsive server-rendered UI, and REST API.
@@ -37,10 +41,11 @@ run is active at a time.
 Persistent data is stored under the Flask instance directory:
 
 ```text
-instance/
+data/
 ├── euvieouvi.db
 ├── backups/
-└── images/
+├── images/
+└── job-logs/
 ```
 
 See [Project documentation](docs/README.md) for the component model, data behavior, API,
@@ -93,7 +98,7 @@ For upgrades, backups, restore, reverse-proxy guidance, and troubleshooting, rea
 | `EUVIEOUVI_SECRET_KEY` | none | Required Flask/session secret. Use a long random value. |
 | `EUVIEOUVI_HOST` | `0.0.0.0` | Bind address. |
 | `EUVIEOUVI_PORT` | `8000` | Application port, 1–65535. |
-| `EUVIEOUVI_INSTANCE_PATH` | `./instance` | Database, image cache, and backup directory. |
+| `EUVIEOUVI_INSTANCE_PATH` | `./instance` (`/data` in Docker) | Database, image cache, job logs, and backup directory. |
 | `EUVIEOUVI_DATABASE_URI` | SQLite in the instance path | SQLite URI; other databases are unsupported. |
 | `EUVIEOUVI_LOG_LEVEL` | `INFO` | `CRITICAL`, `ERROR`, `WARNING`, `INFO`, or `DEBUG`. |
 | `EUVIEOUVI_TIMEZONE` | `America/Sao_Paulo` | Valid IANA timezone used by schedules and display. |

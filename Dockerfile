@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     EUVIEOUVI_ENV=production \
     EUVIEOUVI_HOST=0.0.0.0 \
     EUVIEOUVI_PORT=8000 \
-    EUVIEOUVI_INSTANCE_PATH=/app/instance
+    EUVIEOUVI_INSTANCE_PATH=/data
 
 ARG APP_UID=10001
 ARG APP_GID=10001
@@ -27,8 +27,8 @@ RUN python -m pip install --requirement requirements.lock \
 COPY gunicorn.conf.py ./gunicorn.conf.py
 COPY docker/entrypoint.sh /usr/local/bin/euvieouvi-entrypoint
 
-RUN mkdir -p /app/instance \
-    && chown -R euvieouvi:euvieouvi /app/instance \
+RUN mkdir -p /data \
+    && chown -R euvieouvi:euvieouvi /data \
     && chmod 0555 /usr/local/bin/euvieouvi-entrypoint
 
 USER euvieouvi

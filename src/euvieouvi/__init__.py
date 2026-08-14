@@ -44,6 +44,14 @@ def create_app(config_overrides: Mapping[str, Any] | None = None) -> Flask:
     register_web(app)
     start_scheduler(app)
 
+    @app.before_request
+    def drain_async_tasks_on_activity() -> None:
+        if app.config.get("TESTING"):
+            return
+        from euvieouvi.sync.async_tasks import get_async_task_executor
+
+        get_async_task_executor(app).submit()
+
     @app.after_request
     def browser_security_headers(response: Any) -> Any:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")

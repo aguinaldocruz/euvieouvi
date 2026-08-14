@@ -14,9 +14,9 @@ def test_dockerfile_uses_pinned_python_and_non_root_user() -> None:
 
 
 def test_compose_preserves_data_and_drops_privileges() -> None:
-    compose = (PROJECT_ROOT / "compose.yaml").read_text(encoding="utf-8")
+    compose = (PROJECT_ROOT / "compose.yaml.sample").read_text(encoding="utf-8")
 
-    assert "euvieouvi_data:/app/instance" in compose
+    assert "euvieouvi_data:/data" in compose
     assert "read_only: true" in compose
     assert "no-new-privileges:true" in compose
     assert "cap_drop:" in compose and "- ALL" in compose
@@ -31,7 +31,7 @@ def test_production_lock_contains_runtime_dependencies() -> None:
 
 def test_build_context_excludes_sensitive_and_runtime_data() -> None:
     ignored = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
-    for required in (".git", ".env", "*.db", "instance", "tests"):
+    for required in (".git", ".env", "*.db", "instance", "data", "tests"):
         assert required in ignored
 
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")

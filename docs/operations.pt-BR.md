@@ -15,7 +15,7 @@ docker compose logs --tail=100 euvieouvi
 ./scripts/validate-deployment.sh
 ```
 
-O exemplo publica a porta 8000, usa `euvieouvi_data` em `/app/instance`, executa com UID/GID
+O exemplo publica a porta 8000, usa `euvieouvi_data` em `/data`, executa com UID/GID
 10001, remove capabilities, impede elevação e deixa a raiz somente leitura, exceto volume e `/tmp`.
 
 Para bind mount, crie `compose.override.yaml` e permita escrita ao UID 10001:
@@ -24,7 +24,7 @@ Para bind mount, crie `compose.override.yaml` e permita escrita ao UID 10001:
 services:
   euvieouvi:
     volumes:
-      - ./instance:/app/instance
+      - ./data:/data
 ```
 
 ## Configuração inicial
@@ -53,8 +53,8 @@ especialmente em webhook e upload de restauração. Não armazene páginas/API p
 
 ```bash
 docker compose exec -T euvieouvi python -m euvieouvi.database.backup \
-  backup /app/instance/euvieouvi.db /app/instance/backups/pre-upgrade.db
-docker compose cp euvieouvi:/app/instance/backups/pre-upgrade.db ./pre-upgrade.db
+  backup /data/euvieouvi.db /data/backups/pre-upgrade.db
+docker compose cp euvieouvi:/data/backups/pre-upgrade.db ./pre-upgrade.db
 docker compose build --pull
 docker compose up -d --force-recreate
 ./scripts/validate-deployment.sh
@@ -72,7 +72,7 @@ serviço ativo. Para restauração manual mais segura, pare o serviço principal
 ```bash
 docker compose stop euvieouvi
 docker compose run --rm --no-deps euvieouvi python -m euvieouvi.database.backup \
-  restore /app/instance/backups/pre-upgrade.db /app/instance/euvieouvi.db
+  restore /data/backups/pre-upgrade.db /data/euvieouvi.db
 docker compose up -d
 ./scripts/validate-deployment.sh
 ```
@@ -90,6 +90,16 @@ docker compose logs -f --tail=200 euvieouvi
 
 Logs usam UTC e request ID. Segredos são removidos defensivamente, mas revise antes de compartilhar.
 Readiness falha se SQLite ou migração estiver incorreto; queda de conector não derruba o catálogo.
+
+Cada job também grava logs em `/data/job-logs`; a quantidade mantida por job é configurada na
+página **Jobs**. Para migrar uma instalação antiga, pare o contêiner, copie todo o conteúdo do
+volume antigo (`/app/instance`) para o novo volume `/data`, preserve UID/GID 10001 e só então
+recrie o serviço. Não copie apenas o `.db`: preserve também `backups/` e `images/`.
+
+O job **Otimizar dados** pode rodar online: remove logs excedentes, imagens órfãs e executa
+`PRAGMA optimize`. Um `VACUUM` completo não é agendado porque bloqueia gravações e pode exigir
+espaço temporário semelhante ao tamanho do banco; quando necessário, faça backup, pare o serviço
+e execute `sqlite3 /data/euvieouvi.db 'VACUUM;'` manualmente.
 
 ## Diagnóstico
 
@@ -117,3 +127,13 @@ uvx pip-audit --requirement requirements.lock
 
 O teste Plex real é opt-in em `tests/integration/test_real_plex.py`. Pare preservando dados com
 `docker compose down`. Não use `docker compose down -v` sem intenção de apagar e backup validado.
+Atualizações instantâneas de webhook são gravadas em `async_tasks` antes da execução externa.
+A fila tenta esvaziar a cada evento, periodicamente e durante atividade web. Falhas permanecem
+com backoff de 15 segundos até 1 hora e também podem ser antecipadas manualmente pelo job
+**Processar fila de atualizações**. Reinicializações recuperam itens que estavam em processamento.
+
+Imagens disponíveis no Plex/Jellyfin são servidas por proxy sob demanda, sem expor tokens nem
+persistir uma segunda cópia. O cache HTTP privado do navegador evita requisições repetidas. O job
+**Baixar imagens do catálogo** usa trabalhadores paralelos limitados (seis por padrão), preserva
+somente imagens de itens indisponíveis nos dois servidores e publica progresso ao vivo. O job
+**Otimizar dados** remove cópias locais de itens que voltaram a estar disponíveis.

@@ -186,6 +186,18 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
         assert persisted_run.watch_sync_updated == 1
         assert "1 atualizados" in (persisted_run.watch_sync_summary or "")
 
+        calls.clear()
+        aligned_result = WatchSyncService(
+            lambda: db.session(), lambda source: RecordingConnector(source, calls)
+        ).run(None)
+        assert aligned_result.updated == 0
+        assert calls == []
+
+        target_state = (
+            db.session.query(WatchState)
+            .filter_by(media_item_id=movie_id, source_id=target_source_id)
+            .one()
+        )
         target_state.completed = False
         db.session.add(Setting(key="watch_sync.pending", value="true"))
         db.session.commit()

@@ -290,8 +290,6 @@ def test_runtime_builds_jellyfin_connector_and_rejects_bad_credentials() -> None
 def test_executor_rejects_empty_or_unknown_sources(app: Flask) -> None:
     executor = LocalSyncExecutor(app)
     with app.app_context():
-        with pytest.raises(LookupError, match="No source"):
-            executor.submit_all(())
         with pytest.raises(LookupError, match="Source not found"):
             executor.submit(999)
         assert executor.cancel(999) is False

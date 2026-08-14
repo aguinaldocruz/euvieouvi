@@ -12,10 +12,10 @@ htmlcov
 build
 dist
 instance
+data
 *.db
 *.db-shm
 *.db-wal
 .env
 tests
 docs
-

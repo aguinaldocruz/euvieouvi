@@ -15,7 +15,7 @@ docker compose logs --tail=100 euvieouvi
 ./scripts/validate-deployment.sh
 ```
 
-The sample publishes port 8000, uses the named `euvieouvi_data` volume at `/app/instance`, runs as
+The sample publishes port 8000, uses the named `euvieouvi_data` volume at `/data`, runs as
 UID/GID 10001, drops Linux capabilities, prevents privilege escalation, and mounts the root
 filesystem read-only except for the persistent volume and `/tmp`.
 
@@ -25,7 +25,7 @@ For a bind mount, create `compose.override.yaml` and make the host directory wri
 services:
   euvieouvi:
     volumes:
-      - ./instance:/app/instance
+      - ./data:/data
 ```
 
 ## Initial setup
@@ -55,8 +55,8 @@ Do not cache authenticated pages or API responses containing private catalog dat
 
 ```bash
 docker compose exec -T euvieouvi python -m euvieouvi.database.backup \
-  backup /app/instance/euvieouvi.db /app/instance/backups/pre-upgrade.db
-docker compose cp euvieouvi:/app/instance/backups/pre-upgrade.db ./pre-upgrade.db
+  backup /data/euvieouvi.db /data/backups/pre-upgrade.db
+docker compose cp euvieouvi:/data/backups/pre-upgrade.db ./pre-upgrade.db
 docker compose build --pull
 docker compose up -d --force-recreate
 ./scripts/validate-deployment.sh
@@ -75,7 +75,7 @@ restore, stop the main service:
 ```bash
 docker compose stop euvieouvi
 docker compose run --rm --no-deps euvieouvi python -m euvieouvi.database.backup \
-  restore /app/instance/backups/pre-upgrade.db /app/instance/euvieouvi.db
+  restore /data/backups/pre-upgrade.db /data/euvieouvi.db
 docker compose up -d
 ./scripts/validate-deployment.sh
 ```
@@ -94,6 +94,16 @@ docker compose logs -f --tail=200 euvieouvi
 Logs use UTC timestamps and request IDs. Token-like values are redacted defensively, but review logs
 before sharing. Readiness fails when SQLite is unavailable or the migration revision is not current;
 connector downtime does not make the local catalog unavailable.
+
+Each job also writes logs under `/data/job-logs`; retention per job is configured on the **Jobs**
+page. To migrate an older installation, stop the container, copy all old `/app/instance` contents
+into `/data`, preserve UID/GID 10001, and only then recreate the service. Keep `backups/` and
+`images/` together with the database.
+
+The **Optimize data** job is safe online: it rotates operational records, removes orphaned image
+files, and runs `PRAGMA optimize`. Full `VACUUM` remains offline/manual because it locks writes and
+can require temporary free space comparable to the database size. Back up and stop the service
+before running `sqlite3 /data/euvieouvi.db 'VACUUM;'`.
 
 ## Troubleshooting
 

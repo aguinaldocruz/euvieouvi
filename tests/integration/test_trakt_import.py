@@ -55,7 +55,7 @@ def test_trakt_import_runs_against_current_schema(app: Flask, tmp_path: Path) ->
             database,
             source_id=source_id,
             apply=True,
-                plex_user="plex-user",
+            plex_user="plex-user",
         )
         assert report.events_inserted == 1
         assert report.media_created == 1

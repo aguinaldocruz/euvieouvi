@@ -11,9 +11,8 @@ from flask import Flask
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from euvieouvi.api.runtime import get_executor
-from euvieouvi.database.enums import ConnectorType, SyncTrigger
-from euvieouvi.database.models import Setting, Source
+from euvieouvi.database.enums import SyncTrigger
+from euvieouvi.database.models import Setting
 from euvieouvi.extensions import db
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
 
@@ -36,18 +35,32 @@ def start_scheduler(app: Flask) -> None:
 
 
 def _scheduler_loop(app: Flask, stop: threading.Event) -> None:
+    with app.app_context():
+        from euvieouvi.sync.async_tasks import recover_async_tasks
+        from euvieouvi.sync.jobs import reconcile_interrupted_job_runs
+
+        interrupted = reconcile_interrupted_job_runs()
+        recovered_tasks = recover_async_tasks()
+        if interrupted:
+            app.logger.warning(
+                "reconciled interrupted job runs", extra={"count": interrupted}
+            )
+        if recovered_tasks:
+            app.logger.warning("recovered interrupted asynchronous tasks")
     while not stop.wait(_POLL_SECONDS):
         with app.app_context():
             try:
-                _run_if_due(app)
+                _run_jobs_if_due(app)
             except SQLAlchemyError:
                 db.session.rollback()
-                app.logger.exception("scheduled synchronization check failed")
+                app.logger.exception("scheduled jobs check failed")
             try:
-                _run_watch_sync_if_pending(app)
+                from euvieouvi.sync.async_tasks import get_async_task_executor
+
+                get_async_task_executor(app).submit()
             except SQLAlchemyError:
                 db.session.rollback()
-                app.logger.exception("pending watched-state propagation check failed")
+                app.logger.exception("asynchronous task queue check failed")
             try:
                 _backup_if_due(app)
             except SQLAlchemyError:
@@ -57,166 +70,50 @@ def _scheduler_loop(app: Flask, stop: threading.Event) -> None:
                 app.logger.exception("scheduled backup failed")
 
 
-def _run_watch_sync_if_pending(app: Flask) -> bool:
-    return get_executor(app).submit_pending_watch_sync()
+def _run_jobs_if_due(app: Flask, *, now: datetime | None = None) -> bool:
+    """Queue each independently configured operational job once per local day."""
+    from euvieouvi.sync.jobs import JOBS, setting_key, submit_job
 
-
-def _run_if_due(app: Flask, *, now: datetime | None = None) -> bool:
+    keys = {
+        setting_key(job.id, field) for job in JOBS for field in ("enabled", "time", "last_date")
+    }
     values = {
         item.key: item.value
-        for item in db.session.scalars(
-            select(Setting).where(
-                Setting.key.in_(
-                    {
-                        "sync.schedule.enabled",
-                        "sync.schedule.time",
-                        "sync.schedule.last_date",
-                        "sync.schedule.mode",
-                        "sync.schedule.enabled.plex",
-                        "sync.schedule.enabled.jellyfin",
-                        "sync.schedule.time.plex",
-                        "sync.schedule.time.jellyfin",
-                        "sync.schedule.last_date.plex",
-                        "sync.schedule.last_date.jellyfin",
-                    }
-                )
-            )
-        )
+        for item in db.session.scalars(select(Setting).where(Setting.key.in_(keys)))
     }
-    mode = values.get("sync.schedule.mode", "shared")
-    if mode not in {"shared", "per_source"}:
-        mode = "shared"
     local_now = now or datetime.now(ZoneInfo(app.config["TIMEZONE"]))
     local_date = local_now.date().isoformat()
-
-    # Determine which connector types are due
-    due_types: list[ConnectorType] = []
-    if mode == "per_source":
-        for ctype, key_enabled, key_time, key_last in [
-            (
-                ConnectorType.PLEX,
-                "sync.schedule.enabled.plex",
-                "sync.schedule.time.plex",
-                "sync.schedule.last_date.plex",
-            ),
-            (
-                ConnectorType.JELLYFIN,
-                "sync.schedule.enabled.jellyfin",
-                "sync.schedule.time.jellyfin",
-                "sync.schedule.last_date.jellyfin",
-            ),
-        ]:
-            if values.get(key_enabled, "false") != "true":
-                continue
-            t = values.get(key_time, values.get("sync.schedule.time", "03:00"))
-            try:
-                hour, minute = (int(p) for p in t.split(":"))
-            except (TypeError, ValueError):
-                app.logger.error("invalid persisted synchronization schedule for %s", ctype.value)
-                continue
-            if (local_now.hour, local_now.minute) < (hour, minute):
-                continue
-            if values.get(key_last) == local_date:
-                continue
-            due_types.append(ctype)
-    else:
-        # shared mode: legacy single time, but respect per-source enabled flags if present
-        has_per = (
-            "sync.schedule.enabled.plex" in values or "sync.schedule.enabled.jellyfin" in values
-        )
-        if has_per:
-            any_enabled = (
-                values.get("sync.schedule.enabled.plex", "false") == "true"
-                or values.get("sync.schedule.enabled.jellyfin", "false") == "true"
-            )
-            if not any_enabled:
-                return False
-        else:
-            if values.get("sync.schedule.enabled", "false") != "true":
-                return False
-        scheduled_time = values.get("sync.schedule.time", "03:00")
+    queued = False
+    for job in JOBS:
+        if values.get(setting_key(job.id, "enabled"), "false") != "true":
+            continue
         try:
-            hour, minute = (int(part) for part in scheduled_time.split(":"))
-        except (TypeError, ValueError):
-            app.logger.error("invalid persisted synchronization schedule")
-            return False
-        if (local_now.hour, local_now.minute) < (hour, minute):
-            return False
-        if values.get("sync.schedule.last_date") == local_date:
-            return False
-        # shared mode: queue enabled sources (per-source flags or legacy)
-        if has_per:
-            for ctype, key_enabled in [
-                (ConnectorType.PLEX, "sync.schedule.enabled.plex"),
-                (ConnectorType.JELLYFIN, "sync.schedule.enabled.jellyfin"),
-            ]:
-                if values.get(key_enabled, "false") == "true":
-                    due_types.append(ctype)
-        else:
-            due_types = [ConnectorType.PLEX, ConnectorType.JELLYFIN]
-
-    if not due_types:
-        return False
-
-    # Resolve source_ids for due types that are actually configured and enabled
-    source_ids: list[int] = []
-    for ctype in due_types:
-        ids = db.session.scalars(
-            select(Source.id)
-            .where(Source.connector_type == ctype, Source.enabled.is_(True))
-            .order_by(Source.id)
-        ).all()
-        source_ids.extend(ids)
-
-    if not source_ids:
-        return False
-
-    try:
-        executor = get_executor(app)
-        submit_all = getattr(executor, "submit_all", None)
-        if callable(submit_all):
-            submit_all(tuple(source_ids), trigger=SyncTrigger.SCHEDULED)
-        else:
-            executor.submit(source_ids[0], trigger=SyncTrigger.SCHEDULED)
-    except (SyncAlreadyRunningError, SyncSourceUnavailableError):
-        return False
-
-    # mark last_date per type
-    if mode == "per_source":
-        for ctype in due_types:
-            key_last = (
-                "sync.schedule.last_date.plex"
-                if ctype == ConnectorType.PLEX
-                else "sync.schedule.last_date.jellyfin"
+            hour, minute = (
+                int(part)
+                for part in values.get(setting_key(job.id, "time"), job.default_time).split(":")
             )
-            s = db.session.get(Setting, key_last)
-            if s is None:
-                db.session.add(Setting(key=key_last, value=local_date))
-            else:
-                s.value = local_date
-    else:
-        s = db.session.get(Setting, "sync.schedule.last_date")
-        if s is None:
-            db.session.add(Setting(key="sync.schedule.last_date", value=local_date))
+        except (TypeError, ValueError):
+            app.logger.error("invalid schedule for job %s", job.id)
+            continue
+        if (local_now.hour, local_now.minute) < (hour, minute):
+            continue
+        last_key = setting_key(job.id, "last_date")
+        if values.get(last_key) == local_date:
+            continue
+        try:
+            started = submit_job(app, job.id, trigger=SyncTrigger.SCHEDULED)
+        except (SyncAlreadyRunningError, SyncSourceUnavailableError):
+            continue
+        if not started:
+            continue
+        setting = db.session.get(Setting, last_key)
+        if setting is None:
+            db.session.add(Setting(key=last_key, value=local_date))
         else:
-            s.value = local_date
-        # also update per-source last_dates for consistency
-        for key_last in ("sync.schedule.last_date.plex", "sync.schedule.last_date.jellyfin"):
-            s2 = db.session.get(Setting, key_last)
-            if s2 is None:
-                db.session.add(Setting(key=key_last, value=local_date))
-            else:
-                s2.value = local_date
-    db.session.commit()
-    app.logger.info(
-        "daily synchronization queued",
-        extra={
-            "source_ids": tuple(source_ids),
-            "mode": mode,
-            "due_types": [t.value for t in due_types],
-        },
-    )
-    return True
+            setting.value = local_date
+        db.session.commit()
+        queued = True
+    return queued
 
 
 def _backup_if_due(app: Flask, *, now: datetime | None = None) -> bool:

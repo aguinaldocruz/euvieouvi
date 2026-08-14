@@ -37,6 +37,7 @@ from euvieouvi.database.enums import (
 )
 from euvieouvi.database.models import (
     Genre,
+    JobRun,
     Library,
     MediaGenre,
     MediaIdentifier,
@@ -89,35 +90,87 @@ def csrf(client: object, path: str = "/") -> str:
     return match.group(1)
 
 
-def test_daily_schedule_settings_are_persisted(app: Flask) -> None:
+def test_jobs_page_lists_independent_operations_and_saves_schedules(app: Flask) -> None:
     client = app.test_client()
-    token = csrf(client, "/settings/sync")
-    response = client.post(
-        "/settings/sync",
-        data={"csrf_token": token, "enabled": "on", "scheduled_time": "04:30"},
-        follow_redirects=True,
-    )
-    assert response.status_code == 200
-    assert "Agendamento diário atualizado" in response.get_data(as_text=True)
-    with app.app_context():
-        from euvieouvi.database.models import Setting
+    page = client.get("/jobs")
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200
+    assert "Sincronizar Plex" in body
+    assert "Assistidos: Plex → Jellyfin" in body
+    assert "Assistidos: Jellyfin → Plex" in body
+    assert "Atualizar metadados" in body
+    assert "Baixar imagens do catálogo" in body
+    assert "Otimizar dados" in body
+    assert "Última execução" in body
+    assert "Jobs e agendamentos" not in body
+    assert client.get("/settings/sync").status_code == 404
+    assert "Agendamento sync" not in client.get("/settings/backup").get_data(as_text=True)
+    assert 'hx-trigger="every 2s"' in body
+    assert client.get("/jobs/sync_plex/status-fragment").status_code == 200
+    dashboard_jobs = client.get("/jobs/dashboard-fragment").get_data(as_text=True)
+    assert "Jobs e tarefas" in dashboard_jobs
+    assert 'hx-trigger="every 2s"' in dashboard_jobs
 
-        enabled = db.session.get(Setting, "sync.schedule.enabled")
-        scheduled_time = db.session.get(Setting, "sync.schedule.time")
-        assert enabled is not None and enabled.value == "true"
-        assert scheduled_time is not None and scheduled_time.value == "04:30"
+    token = csrf(client, "/jobs")
+    response = client.post(
+        "/jobs",
+        data={
+            "csrf_token": token,
+            "enabled_sync_plex": "on",
+            "time_sync_plex": "02:15",
+            "time_sync_jellyfin": "03:15",
+            "time_watched_plex_to_jellyfin": "03:30",
+            "time_watched_jellyfin_to_plex": "03:45",
+            "time_metadata": "04:00",
+            "time_catalog_images": "04:30",
+            "time_maintenance": "05:00",
+            "retention_keep": "7",
+            "watch_sync_enabled": "on",
+        },
+    )
+    assert response.status_code == 302
+    with app.app_context():
+        assert db.session.get(Setting, "jobs.sync_plex.enabled").value == "true"  # type: ignore[union-attr]
+        assert db.session.get(Setting, "jobs.sync_plex.time").value == "02:15"  # type: ignore[union-attr]
+        assert db.session.get(Setting, "jobs.retention.keep_last").value == "7"  # type: ignore[union-attr]
+        assert db.session.get(Setting, "watch_sync.enabled").value == "true"  # type: ignore[union-attr]
+
+
+def test_maintenance_job_persists_result_and_readable_log(app: Flask) -> None:
+    client = app.test_client()
+    response = client.post(
+        "/jobs/maintenance/run",
+        data={"csrf_token": csrf(client, "/jobs")},
+    )
+    assert response.status_code == 302
+    deadline = time.monotonic() + 3
+    run_id = 0
+    while time.monotonic() < deadline:
+        with app.app_context():
+            run = db.session.scalar(
+                select(JobRun).where(JobRun.job_id == "maintenance").order_by(JobRun.id.desc())
+            )
+            if run is not None:
+                run_id = run.id
+                if run.status is SyncStatus.SUCCEEDED:
+                    break
+        time.sleep(0.02)
+    assert run_id
+    log = client.get(f"/job-runs/{run_id}/log")
+    assert log.status_code == 200
+    assert "Otimização concluída" in log.get_data(as_text=True)
 
 
 def test_watched_state_propagation_is_disabled_by_default_and_configurable(app: Flask) -> None:
     client = app.test_client()
-    page = client.get("/settings/sync").get_data(as_text=True)
+    page = client.get("/jobs").get_data(as_text=True)
     assert 'id="watch_sync_enabled"' in page
     assert 'id="watch_sync_enabled" name="watch_sync_enabled" type="checkbox" checked' not in page
 
-    token = csrf(client, "/settings/sync")
+    token = csrf(client, "/jobs")
     response = client.post(
-        "/settings/sync",
-        data={"csrf_token": token, "mode": "shared", "watch_sync_enabled": "on"},
+        "/jobs",
+        data={"csrf_token": token, "watch_sync_enabled": "on"},
         follow_redirects=True,
     )
     assert response.status_code == 200
@@ -142,17 +195,6 @@ def test_appearance_setting_is_persisted_and_used_as_page_default(app: Flask) ->
     with app.app_context():
         setting = db.session.get(Setting, "ui.theme")
         assert setting is not None and setting.value == "dark"
-
-
-def test_daily_schedule_rejects_invalid_time(app: Flask) -> None:
-    client = app.test_client()
-    token = csrf(client, "/settings/sync")
-    response = client.post(
-        "/settings/sync",
-        data={"csrf_token": token, "scheduled_time": "99:00"},
-    )
-    assert response.status_code == 200
-    assert "horário válido" in response.get_data(as_text=True)
 
 
 def test_metadata_settings_and_manual_enrichment(
@@ -183,6 +225,8 @@ def test_metadata_settings_and_manual_enrichment(
     assert "hidden-token" not in text
 
     class Executor:
+        watch_sync_active = False
+
         active = False
 
         def __init__(self) -> None:
@@ -337,7 +381,7 @@ def test_first_access_navigation_and_local_assets(app: Flask) -> None:
         ("/settings/plex", "Configurações do Plex"),
         ("/settings/appearance", "Aparência"),
         ("/libraries", "Bibliotecas"),
-        ("/sync", "Sincronizações"),
+        ("/jobs", "Jobs e tarefas"),
         ("/history", "Histórico"),
         ("/catalog", "Catálogo"),
         ("/about", "Sobre esta instalação"),
@@ -565,7 +609,7 @@ def test_dashboard_history_media_and_sync_detail(app: Flask) -> None:
         detail_row.items_scanned = 50
         detail_row.items_total = 200
         db.session.commit()
-    sync = client.get(f"/sync/{run_id}").get_data(as_text=True)
+    sync = client.get(f"/jobs/sync-runs/{run_id}/fragment").get_data(as_text=True)
     assert (
         "Sincronização #" in sync
         and "Plex" in sync
@@ -574,11 +618,11 @@ def test_dashboard_history_media_and_sync_detail(app: Flask) -> None:
         and "Mensagem segura" in sync
         and "(25%)" in sync
     )
-    sync_list = client.get("/sync").get_data(as_text=True)
-    assert "· Plex" in sync_list
-    assert client.get("/sync/active-fragment").status_code == 200
+    jobs = client.get("/jobs").get_data(as_text=True)
+    assert "Sincronizar Plex" in jobs and "Acompanhar" in jobs
     assert (
-        client.get("/media/999").status_code == 404 and client.get("/sync/999").status_code == 404
+        client.get("/media/999").status_code == 404
+        and client.get("/jobs/sync-runs/999/fragment").status_code == 404
     )
 
 
@@ -606,14 +650,16 @@ def test_partial_event_is_hidden_from_completion_views(app: Flask) -> None:
 def test_sync_start_cancel_and_polling_fragment(
     app: Flask, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    watch_calls: list[int] = []
     with app.app_context():
         source_id, _, _, finished_id = seed_web()
 
     class Executor:
-        def submit(self, submitted_source_id: int) -> int:
+        watch_sync_active = False
+
+        def submit(self, submitted_source_id: int, *, trigger: SyncTrigger) -> int:
             assert submitted_source_id == source_id
-            run = SyncRun(source_id=source_id, trigger=SyncTrigger.API, status=SyncStatus.QUEUED)
+            assert trigger is SyncTrigger.MANUAL
+            run = SyncRun(source_id=source_id, trigger=trigger, status=SyncStatus.QUEUED)
             db.session.add(run)
             db.session.commit()
             return run.id
@@ -621,41 +667,30 @@ def test_sync_start_cancel_and_polling_fragment(
         def cancel(self, run_id: int) -> bool:
             return True
 
-        def submit_watch_sync(self, run_id: int) -> bool:
-            watch_calls.append(run_id)
-            return True
-
-    with app.app_context():
-        db.session.add(Setting(key="watch_sync.enabled", value="true"))
-        db.session.commit()
-
     executor = Executor()
+    monkeypatch.setattr("euvieouvi.sync.jobs.get_executor", lambda app: executor)
     monkeypatch.setattr("euvieouvi.web.routes.get_executor", lambda app: executor)
     client = app.test_client()
-    token = csrf(client, "/sync")
-    started = client.post("/sync", data={"csrf_token": token})
-    assert started.status_code == 302 and "/sync/" in started.headers["Location"]
-    active = client.get("/sync/active-fragment").get_data(as_text=True)
+    token = csrf(client, "/jobs")
+    started = client.post("/jobs/sync_plex/run", data={"csrf_token": token})
+    assert started.status_code == 302 and started.headers["Location"].endswith("/jobs")
+    with app.app_context():
+        run_id = db.session.scalar(select(SyncRun.id).order_by(SyncRun.id.desc()))
+    active = client.get(f"/jobs/sync-runs/{run_id}/fragment").get_data(as_text=True)
     assert 'hx-trigger="every 3s"' in active
-    run_id = int(started.headers["Location"].rsplit("/", 1)[1])
-    token = csrf(client, f"/sync/{run_id}")
-    assert client.post(f"/sync/{run_id}/cancel", data={"csrf_token": token}).status_code == 302
-    token = csrf(client, f"/sync/{finished_id}")
+    token = csrf(client, "/jobs")
+    assert client.post(
+        f"/jobs/sync-runs/{run_id}/cancel", data={"csrf_token": token}
+    ).status_code == 302
+    token = csrf(client, "/jobs")
     assert (
         client.post(
-            f"/sync/{finished_id}/cancel", data={"csrf_token": token}, follow_redirects=True
+            f"/jobs/sync-runs/{finished_id}/cancel",
+            data={"csrf_token": token},
+            follow_redirects=True,
         ).status_code
         == 200
     )
-    token = csrf(client, f"/sync/{finished_id}")
-    response = client.post(
-        f"/sync/{finished_id}/watch-sync",
-        data={"csrf_token": token},
-        follow_redirects=True,
-    )
-    assert response.status_code == 200
-    assert watch_calls == [finished_id]
-    assert "Propagação de conclusões iniciada" in response.get_data(as_text=True)
 
 
 def test_formatters(app: Flask) -> None:
@@ -762,7 +797,6 @@ def test_auto_enrichment_remains_part_of_active_sync(
     with app.app_context():
         source_id, _, _, _ = seed_web()
         db.session.add(Setting(key="metadata.auto_after_sync", value="true"))
-        db.session.add(Setting(key="watch_sync.enabled", value="true"))
         db.session.commit()
 
         def enrich(
@@ -796,13 +830,12 @@ def test_auto_enrichment_remains_part_of_active_sync(
         assert run is not None
         assert run.finished_at is not None
         assert run.summary is not None and "enriquecimento concluídos" in run.summary
-        assert run.watch_sync_summary is not None
-        fragment = app.test_client().get(f"/sync/{run_id}/fragment")
+        fragment = app.test_client().get(f"/jobs/sync-runs/{run_id}/fragment")
         assert fragment.status_code == 200
         assert "Etapa atual" in fragment.get_data(as_text=True)
 
 
-def test_media_image_placeholder_and_local_cache(
+def test_media_image_proxies_available_source_without_local_cache(
     app: Flask, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with app.app_context():
@@ -839,7 +872,13 @@ def test_media_image_placeholder_and_local_cache(
     second = client.get(f"/media/{movie_id}/image")
     assert first.status_code == 200 and first.data == b"cached-jpeg"
     assert second.status_code == 200 and second.data == b"cached-jpeg"
-    assert calls == [f"/library/metadata/{movie_id}/thumb"]
+    assert calls == [
+        f"/library/metadata/{movie_id}/thumb",
+        f"/library/metadata/{movie_id}/thumb",
+    ]
+    with app.app_context():
+        image = db.session.query(MediaImage).filter_by(media_item_id=movie_id).one()
+        assert image.local_filename is None and image.cache_status == "pending"
 
 
 def test_media_image_serves_external_fallback(app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1068,10 +1107,12 @@ def test_webhooks_accept_only_completed_events_and_deduplicate(app: Flask) -> No
             [
                 Setting(key="webhook.plex.token", value="plex-secret"),
                 Setting(key="webhook.jellyfin.token", value="jf-secret"),
+                Setting(key="plex.user_id", value="plex-user"),
             ]
         )
         db.session.commit()
         original_count = db.session.query(WatchEvent).count()
+        jellyfin_source_id = jellyfin.id
 
     client = app.test_client()
     ignored = client.post(
@@ -1084,11 +1125,13 @@ def test_webhooks_accept_only_completed_events_and_deduplicate(app: Flask) -> No
         data={
             "payload": json.dumps(
                 {
-                    "event": "media.scrobble",
+                    "event": "media.stop",
+                    "Account": {"id": "plex-user"},
                     "Metadata": {
                         "ratingKey": "m1",
                         "librarySectionID": "1",
                         "duration": 1000,
+                        "viewOffset": 950,
                     },
                 }
             )
@@ -1115,10 +1158,73 @@ def test_webhooks_accept_only_completed_events_and_deduplicate(app: Flask) -> No
             event.origin
             for event in db.session.query(WatchEvent).order_by(WatchEvent.id.desc()).limit(2)
         } == {"webhook"}
+        webhook_events = (
+            db.session.query(WatchEvent)
+            .filter(WatchEvent.origin == "webhook")
+            .order_by(WatchEvent.id.desc())
+            .limit(2)
+            .all()
+        )
+        assert {event.playback_user for event in webhook_events} == {"plex-user", "user-1"}
+        states = db.session.query(WatchState).filter_by(media_item_id=media_id).all()
+        assert {state.source_id for state in states} >= {plex_source_id, jellyfin_source_id}
+        assert all(state.completed and state.view_count > 0 for state in states)
         assert db.session.get(Source, plex_source_id) is not None
         assert db.session.get(Library, plex_library_id) is not None
-        pending = db.session.get(Setting, "watch_sync.pending")
-        assert pending is not None and pending.value == "true"
+
+
+def test_plex_stop_verifies_authoritative_watch_state_when_progress_is_stale(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with app.app_context():
+        seed_web()
+        db.session.add_all(
+            [
+                Setting(key="webhook.plex.token", value="plex-secret"),
+                Setting(key="plex.user_id", value="plex-user"),
+            ]
+        )
+        db.session.commit()
+
+    watched_at = datetime.now(UTC).replace(microsecond=0)
+    connector = object.__new__(PlexConnector)
+    monkeypatch.setattr(
+        connector,
+        "get_media_item",
+        lambda external_id, library_external_id: type(
+            "StoredItem",
+            (),
+            {"view_count": 4, "last_viewed_at": watched_at},
+        )(),
+    )
+    monkeypatch.setattr(connector, "close", lambda: None)
+    monkeypatch.setattr("euvieouvi.web.routes.connector_for", lambda source: connector)
+
+    response = app.test_client().post(
+        "/webhooks/plex/plex-secret",
+        data={
+            "payload": json.dumps(
+                {
+                    "event": "media.stop",
+                    "eventTime": watched_at.timestamp(),
+                    "Account": {"id": "plex-user"},
+                    "Metadata": {
+                        "ratingKey": "m1",
+                        "librarySectionID": "1",
+                        "duration": 1000,
+                        "viewOffset": 880,
+                    },
+                }
+            )
+        },
+    )
+
+    assert response.status_code == 204
+    with app.app_context():
+        event = db.session.query(WatchEvent).filter_by(origin="webhook").one()
+        state = db.session.query(WatchState).filter_by(media_item_id=event.media_item_id).one()
+        assert event.view_number == 4 and event.playback_user == "plex-user"
+        assert state.completed is True and state.view_count == 4
 
 
 def test_webhook_settings_generate_secret_urls(app: Flask) -> None:
@@ -1236,12 +1342,12 @@ def test_jellyfin_completed_unmapped_item_commits_before_queuing_sync(
     )
 
     assert response.status_code == 204
-    assert calls == ["sync", "propagate"]
+    assert calls == ["sync"]
     with app.app_context():
         event = db.session.query(WebhookEvent).filter_by(external_id="unmapped-episode").one()
         assert event.completed is True and event.active is False
         pending = db.session.get(Setting, "watch_sync.pending")
-        assert pending is not None and pending.value == "true"
+        assert pending is None
 
 
 def test_plex_activity_shows_all_users_but_completion_uses_filter(app: Flask) -> None:

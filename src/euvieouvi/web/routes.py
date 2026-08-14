@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
 import secrets
@@ -39,6 +40,7 @@ from euvieouvi.connectors.plex.connector import PlexConnector
 from euvieouvi.database.enums import ConnectorType, MediaKind, SyncStatus
 from euvieouvi.database.models import (
     Genre,
+    JobRun,
     Library,
     MediaGenre,
     MediaIdentifier,
@@ -60,8 +62,10 @@ from euvieouvi.enrichment.runtime import get_enrichment_executor
 from euvieouvi.errors import AppError
 from euvieouvi.extensions import db
 from euvieouvi.media_images import ensure_cached, ensure_external_cached
+from euvieouvi.sync.async_tasks import enqueue_watch_update, get_async_task_executor
 from euvieouvi.sync.discovery import LibraryDiscoveryService
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
+from euvieouvi.sync.jobs import JOBS, get_image_executor, setting_key, submit_job
 from euvieouvi.sync.persistence import MediaPersistenceService
 from euvieouvi.web.formatting import duration_ms, local_datetime
 
@@ -186,7 +190,7 @@ def dashboard() -> Any:
     elif not any(item.enabled and item.available for item in libraries):
         next_step = ("Selecione ao menos uma biblioteca", "libraries")
     elif last_run is None:
-        next_step = ("Execute a primeira sincronização", "sync_list")
+        next_step = ("Execute a primeira sincronização", "jobs")
     _, current_events = _webhook_activity(_webhook_history_limit())
     return render_template(
         "dashboard.html",
@@ -197,6 +201,8 @@ def dashboard() -> Any:
         recent=recent,
         current_events=current_events,
         series_titles=_series_titles([row[1] for row in recent]),
+        job_definitions=JOBS,
+        job_runs=_latest_job_runs(),
     )
 
 
@@ -375,161 +381,176 @@ def settings_appearance() -> Any:
     return render_template("settings_appearance.html", theme=theme)
 
 
-@blueprint.route("/settings/sync", methods=["GET", "POST"])
-def settings_sync() -> Any:
+@blueprint.route("/jobs", methods=["GET", "POST"])
+def jobs() -> Any:
+    """List, configure, and operate independent background jobs."""
+    keys = tuple(
+        setting_key(job.id, field) for job in JOBS for field in ("enabled", "time", "last_date")
+    )
     values = _settings(
-        "sync.schedule.enabled",
-        "sync.schedule.time",
-        "sync.schedule.mode",
-        "sync.schedule.time.plex",
-        "sync.schedule.time.jellyfin",
-        "sync.schedule.enabled.plex",
-        "sync.schedule.enabled.jellyfin",
-        "sync.schedule.last_date",
-        "sync.schedule.last_date.plex",
-        "sync.schedule.last_date.jellyfin",
+        *keys,
+        "jobs.retention.keep_last",
+        "jobs.catalog_reconcile.apply",
         "watch_sync.enabled",
     )
-    # Compat: legacy single enabled/time -> migrate view defaults
-    legacy_enabled = values.get("sync.schedule.enabled", "false") == "true"
-    legacy_time = values.get("sync.schedule.time", "03:00")
     errors: dict[str, str] = {}
     if request.method == "POST":
-        # Backwards compat: legacy fields 'enabled' / 'scheduled_time'
-        if "enabled" in request.form or "scheduled_time" in request.form:
-            legacy_post_enabled = request.form.get("enabled") == "on"
-            legacy_sched_raw = request.form.get("scheduled_time", "").strip()
-            # always validate legacy scheduled_time if provided (even when disabled)
-            parsed_legacy: datetime | None = None
-            if legacy_sched_raw:
-                try:
-                    parsed_legacy = datetime.strptime(legacy_sched_raw, "%H:%M")
-                except ValueError:
-                    errors["scheduled_time"] = "Informe um horário válido entre 00:00 e 23:59."
-                    errors["time_shared"] = "Informe um horário válido entre 00:00 e 23:59."
-            elif legacy_post_enabled:
-                errors["scheduled_time"] = "Informe um horário válido entre 00:00 e 23:59."
-                errors["time_shared"] = "Informe um horário válido entre 00:00 e 23:59."
-            if not errors and parsed_legacy is not None:
-                _save_setting("sync.schedule.enabled", "true" if legacy_post_enabled else "false")
+        parsed: dict[str, str] = {}
+        for job in JOBS:
+            raw = request.form.get(f"time_{job.id}", job.default_time).strip()
+            try:
+                parsed[job.id] = datetime.strptime(raw, "%H:%M").strftime("%H:%M")
+            except ValueError:
+                errors[job.id] = "Informe um horário válido entre 00:00 e 23:59."
+        keep_raw = request.form.get("retention_keep", "20").strip()
+        try:
+            retention_keep = int(keep_raw)
+            if not 1 <= retention_keep <= 500:
+                raise ValueError
+        except ValueError:
+            retention_keep = 20
+            errors["retention"] = "Informe um número entre 1 e 500."
+        if not errors:
+            for job in JOBS:
                 _save_setting(
-                    "sync.schedule.enabled.plex", "true" if legacy_post_enabled else "false"
+                    setting_key(job.id, "enabled"),
+                    "true" if request.form.get(f"enabled_{job.id}") == "on" else "false",
                 )
-                _save_setting("sync.schedule.time", parsed_legacy.strftime("%H:%M"))
-                _save_setting("sync.schedule.time.plex", parsed_legacy.strftime("%H:%M"))
-                # keep shared mode for legacy
-                _save_setting("sync.schedule.mode", "shared")
-                db.session.commit()
-                flash("Agendamento diário atualizado.", "success")
-                return redirect(url_for("web.settings_sync"))
-            # if errors, fall through to render with errors
-        else:
-            mode = request.form.get("mode", "shared").strip()
-            if mode not in {"shared", "per_source"}:
-                mode = "shared"
-            enabled_plex = request.form.get("enabled_plex") == "on"
-            enabled_jellyfin = request.form.get("enabled_jellyfin") == "on"
+                _save_setting(setting_key(job.id, "time"), parsed[job.id])
+            _save_setting("jobs.retention.keep_last", str(retention_keep))
+            _save_setting(
+                "jobs.catalog_reconcile.apply",
+                "true" if request.form.get("catalog_reconcile_apply") == "on" else "false",
+            )
             watch_sync_enabled = request.form.get("watch_sync_enabled") == "on"
-            time_shared = request.form.get("time_shared", "").strip() or legacy_time
-            time_plex = request.form.get("time_plex", "").strip() or values.get(
-                "sync.schedule.time.plex", legacy_time
-            )
-            time_jellyfin = request.form.get("time_jellyfin", "").strip() or values.get(
-                "sync.schedule.time.jellyfin", legacy_time
-            )
+            _save_setting("watch_sync.enabled", "true" if watch_sync_enabled else "false")
+            db.session.commit()
+            if watch_sync_enabled:
+                with contextlib.suppress(Exception):
+                    get_executor(current_app).submit_pending_watch_sync()
+            flash("Agendamentos dos jobs atualizados.", "success")
+            return redirect(url_for("web.jobs"))
 
-            # validate times that are actually used
-            def _parse(t: str, field: str) -> datetime | None:
-                try:
-                    return datetime.strptime(t, "%H:%M")
-                except ValueError:
-                    errors[field] = "Informe um horário válido entre 00:00 e 23:59."
-                    return None
-
-            parsed_shared = (
-                _parse(time_shared, "time_shared")
-                if (enabled_plex or enabled_jellyfin) and mode == "shared"
-                else None
-            )
-            parsed_plex = (
-                _parse(time_plex, "time_plex") if enabled_plex and mode == "per_source" else None
-            )
-            parsed_jelly = (
-                _parse(time_jellyfin, "time_jellyfin")
-                if enabled_jellyfin and mode == "per_source"
-                else None
-            )
-            if not (enabled_plex or enabled_jellyfin):
-                # allow disabling all -> still valid, no time needed
-                pass
-            elif mode == "shared" and parsed_shared is None and "time_shared" not in errors:
-                errors["time_shared"] = "Informe um horário válido entre 00:00 e 23:59."
-            elif mode == "per_source":
-                if enabled_plex and parsed_plex is None:
-                    pass
-                if enabled_jellyfin and parsed_jelly is None:
-                    pass
-            if not errors:
-                _save_setting("sync.schedule.mode", mode)
-                _save_setting("sync.schedule.enabled.plex", "true" if enabled_plex else "false")
-                _save_setting(
-                    "sync.schedule.enabled.jellyfin", "true" if enabled_jellyfin else "false"
-                )
-                _save_setting("watch_sync.enabled", "true" if watch_sync_enabled else "false")
-                # keep legacy keys for compat
-                _save_setting(
-                    "sync.schedule.enabled",
-                    "true" if (enabled_plex or enabled_jellyfin) else "false",
-                )
-                if mode == "shared" and parsed_shared is not None:
-                    _save_setting("sync.schedule.time", parsed_shared.strftime("%H:%M"))
-                    _save_setting("sync.schedule.time.plex", parsed_shared.strftime("%H:%M"))
-                    _save_setting("sync.schedule.time.jellyfin", parsed_shared.strftime("%H:%M"))
-                else:
-                    if parsed_plex is not None:
-                        _save_setting("sync.schedule.time.plex", parsed_plex.strftime("%H:%M"))
-                    if parsed_jelly is not None:
-                        _save_setting("sync.schedule.time.jellyfin", parsed_jelly.strftime("%H:%M"))
-                    # keep shared time for fallback
-                    if parsed_shared is not None:
-                        _save_setting("sync.schedule.time", parsed_shared.strftime("%H:%M"))
-                db.session.commit()
-                if watch_sync_enabled:
-                    with contextlib.suppress(Exception):
-                        get_executor(current_app).submit_pending_watch_sync()
-                flash("Agendamento diário atualizado.", "success")
-                return redirect(url_for("web.settings_sync"))
-    # GET defaults
-    mode_val = values.get("sync.schedule.mode", "shared")
-    if mode_val not in {"shared", "per_source"}:
-        mode_val = "shared"
-    enabled_plex_val = (
-        values.get("sync.schedule.enabled.plex", "true" if legacy_enabled else "false") == "true"
-    )
-    enabled_jelly_val = values.get("sync.schedule.enabled.jellyfin", "false") == "true"
-    # if per-source keys absent, fallback to legacy
-    if (
-        "sync.schedule.enabled.plex" not in values
-        and "sync.schedule.enabled.jellyfin" not in values
+    active_syncs = {
+        source.connector_type.value
+        for _run, source in db.session.execute(
+            select(SyncRun, Source)
+            .join(Source, Source.id == SyncRun.source_id)
+            .where(SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]))
+        )
+    }
+    metadata = get_enrichment_executor(current_app).snapshot
+    images = get_image_executor(current_app).snapshot
+    watch_active = get_executor(current_app).watch_sync_active
+    states = {
+        "sync_plex": "running" if "plex" in active_syncs else "idle",
+        "sync_jellyfin": "running" if "jellyfin" in active_syncs else "idle",
+        "metadata": "running" if metadata["active"] else "idle",
+        "catalog_images": "running" if images["active"] else "idle",
+        "watched_plex_to_jellyfin": "running" if watch_active else "idle",
+        "watched_jellyfin_to_plex": "running" if watch_active else "idle",
+    }
+    sync_runs: dict[str, SyncRun] = {}
+    for job_id, connector_type in (
+        ("sync_plex", ConnectorType.PLEX),
+        ("sync_jellyfin", ConnectorType.JELLYFIN),
     ):
-        enabled_plex_val = legacy_enabled
-        enabled_jelly_val = False
+        latest_sync = db.session.scalar(
+            select(SyncRun)
+            .join(Source, Source.id == SyncRun.source_id)
+            .where(Source.connector_type == connector_type)
+            .order_by(SyncRun.created_at.desc(), SyncRun.id.desc())
+        )
+        if latest_sync is not None:
+            sync_runs[job_id] = latest_sync
     return render_template(
-        "settings_sync.html",
-        mode=mode_val,
-        enabled_plex=enabled_plex_val,
-        enabled_jellyfin=enabled_jelly_val,
-        watch_sync_enabled=values.get("watch_sync.enabled", "false") == "true",
-        time_shared=values.get("sync.schedule.time", legacy_time),
-        time_plex=values.get("sync.schedule.time.plex", values.get("sync.schedule.time", "03:00")),
-        time_jellyfin=values.get(
-            "sync.schedule.time.jellyfin", values.get("sync.schedule.time", "03:00")
-        ),
-        timezone=current_app.config["TIMEZONE"],
+        "jobs.html",
+        jobs=JOBS,
+        values=values,
         errors=errors,
-        legacy_enabled=legacy_enabled,
-        legacy_time=legacy_time,
+        states=states,
+        metadata=metadata,
+        images=images,
+        latest_runs=_latest_job_runs(),
+        sync_runs=sync_runs,
+        recent_runs=db.session.scalars(
+            select(JobRun).order_by(JobRun.created_at.desc(), JobRun.id.desc()).limit(20)
+        ).all(),
+        timezone=current_app.config["TIMEZONE"],
     )
+
+
+@blueprint.post("/jobs/<job_id>/run")
+def job_run(job_id: str) -> Any:
+    if job_id not in {job.id for job in JOBS}:
+        return render_template("errors/404.html"), 404
+    try:
+        started = submit_job(current_app, job_id)
+    except (SyncAlreadyRunningError, SyncSourceUnavailableError):
+        started = False
+    if started:
+        flash("Job iniciado em segundo plano.", "success")
+    else:
+        flash("O job já está ativo ou sua fonte não está disponível.", "warning")
+    return redirect(url_for("web.jobs"))
+
+
+@blueprint.get("/jobs/<job_id>/status-fragment")
+def job_status_fragment(job_id: str) -> Any:
+    job = next((item for item in JOBS if item.id == job_id), None)
+    if job is None:
+        return Response("Job não encontrado.", 404)
+    run = db.session.scalar(
+        select(JobRun)
+        .where(JobRun.job_id == job_id)
+        .order_by(JobRun.created_at.desc(), JobRun.id.desc())
+    )
+    return render_template("fragments/job_status.html", job=job, run=run)
+
+
+@blueprint.get("/jobs/dashboard-fragment")
+def dashboard_jobs_fragment() -> Any:
+    return render_template(
+        "fragments/dashboard_jobs.html",
+        job_definitions=JOBS,
+        job_runs=_latest_job_runs(),
+    )
+
+
+@blueprint.get("/jobs/<job_id>/history")
+def job_history(job_id: str) -> Any:
+    job = next((item for item in JOBS if item.id == job_id), None)
+    if job is None:
+        return render_template("errors/404.html"), 404
+    runs = db.session.scalars(
+        select(JobRun)
+        .where(JobRun.job_id == job_id)
+        .order_by(JobRun.created_at.desc(), JobRun.id.desc())
+        .limit(500)
+    ).all()
+    return render_template("job_history.html", job=job, runs=runs)
+
+
+@blueprint.get("/job-runs/<int:run_id>/log")
+def job_log(run_id: int) -> Any:
+    run = db.session.get(JobRun, run_id)
+    if run is None or not run.log_filename:
+        return Response("Log não encontrado.", 404, mimetype="text/plain")
+    log_dir = (Path(current_app.instance_path) / "job-logs").resolve()
+    path = (log_dir / run.log_filename).resolve()
+    if path.parent != log_dir or not path.is_file():
+        return Response("Log não encontrado.", 404, mimetype="text/plain")
+    return send_file(path, mimetype="text/plain", as_attachment=False, conditional=True)
+
+
+def _latest_job_runs() -> dict[str, JobRun]:
+    result: dict[str, JobRun] = {}
+    rows = db.session.scalars(select(JobRun).order_by(JobRun.created_at.desc(), JobRun.id.desc()))
+    for run in rows:
+        result.setdefault(run.job_id, run)
+        if len(result) == len(JOBS):
+            break
+    return result
 
 
 @blueprint.route("/settings/metadata", methods=["GET", "POST"])
@@ -1211,7 +1232,33 @@ def plex_webhook(token: str) -> Any:
     raw_account: dict[str, Any] = account if isinstance(account, dict) else {}
     playback_user = str(raw_account.get("title") or raw_account.get("id") or "").strip() or None
     active = event_type in {"media.play", "media.resume"}
-    completed = event_type == "media.scrobble" and _plex_webhook_user_matches(raw_account)
+    progress_percent = _playback_percent(metadata.get("viewOffset"), metadata.get("duration"))
+    plex_view_number: int | None = None
+    completed = (
+        event_type == "media.scrobble"
+        or (event_type == "media.stop" and progress_percent is not None and progress_percent >= 90)
+    ) and _plex_webhook_user_matches(raw_account)
+    if event_type == "media.stop" and not completed and _plex_webhook_user_matches(raw_account):
+        try:
+            connector = connector_for(source)
+            if not isinstance(connector, PlexConnector):
+                raise TypeError("configured Plex source returned an unexpected connector")
+            try:
+                stored_item = connector.get_media_item(external_id, library_external_id)
+            finally:
+                connector.close()
+            plex_view_number = stored_item.view_count
+            if stored_item.last_viewed_at is not None and (stored_item.view_count or 0) > 0:
+                stored_at = stored_item.last_viewed_at
+                if stored_at.tzinfo is None:
+                    stored_at = stored_at.replace(tzinfo=UTC)
+                completed = abs((stored_at - watched_at).total_seconds()) <= 600
+                if completed:
+                    watched_at = stored_at
+        except (ConnectorError, TypeError, ValueError):
+            current_app.logger.exception(
+                "Plex webhook completion could not be verified for media %s", external_id
+            )
     _record_webhook_activity(
         source,
         external_id=external_id,
@@ -1221,7 +1268,7 @@ def plex_webhook(token: str) -> Any:
         media_kind=media_kind,
         event_type=event_type,
         occurred_at=watched_at,
-        progress_percent=_playback_percent(metadata.get("viewOffset"), metadata.get("duration")),
+        progress_percent=progress_percent,
         completed=completed,
         active=active,
         event_key=str(payload.get("event_id") or "").strip() or None,
@@ -1239,6 +1286,8 @@ def plex_webhook(token: str) -> Any:
         watched_at=watched_at,
         source_event_id=None,
         duration_ms=_safe_integer(metadata.get("duration")),
+        playback_user=_configured_source_user(source),
+        view_number=plex_view_number,
     )
     db.session.commit()
     _request_watch_propagation()
@@ -1340,6 +1389,14 @@ def jellyfin_webhook(token: str) -> Any:
             watched_at=watched_at,
             source_event_id=str(payload.get("NotificationId") or "").strip() or None,
             duration_ms=_ticks_to_ms(payload.get("RunTimeTicks")),
+            playback_user=str(credentials.get("user_id") or "").strip() or None,
+            view_number=None,
+        )
+        enqueue_watch_update(
+            db.session(),
+            source_id=source.id,
+            external_id=external_id,
+            watched_at=watched_at,
         )
         source_id = source.id
         db.session.commit()
@@ -1360,6 +1417,8 @@ def jellyfin_webhook(token: str) -> Any:
         watched_at=watched_at,
         source_event_id=str(payload.get("NotificationId") or "").strip() or None,
         duration_ms=_ticks_to_ms(payload.get("RunTimeTicks")),
+        playback_user=str(credentials.get("user_id") or "").strip() or None,
+        view_number=None,
     )
     db.session.commit()
     _request_watch_propagation()
@@ -1419,97 +1478,16 @@ def library_selection(library_id: int) -> Any:
     return redirect(url_for("web.libraries"))
 
 
-@blueprint.route("/sync", methods=["GET", "POST"])
-def sync_list() -> Any:
-    if request.method == "POST":
-        target = (request.form.get("targets") or "both").strip().lower()
-        allowed_targets = {"plex", "jellyfin", "both"}
-        if target not in allowed_targets:
-            target = "both"
-        type_filter = None
-        if target == "plex":
-            type_filter = ConnectorType.PLEX
-        elif target == "jellyfin":
-            type_filter = ConnectorType.JELLYFIN
-        stmt = select(Source.id).where(
-            Source.enabled.is_(True),
-            exists().where(
-                Library.source_id == Source.id,
-                Library.enabled.is_(True),
-                Library.available.is_(True),
-            ),
-        )
-        if type_filter is not None:
-            stmt = stmt.where(Source.connector_type == type_filter)
-        source_ids = tuple(db.session.scalars(stmt.order_by(Source.id)).all())
-        if not source_ids:
-            flash("Selecione ao menos uma biblioteca disponível antes de sincronizar.", "warning")
-            return redirect(url_for("web.libraries"))
-        try:
-            executor = get_executor(current_app)
-            submit_all = getattr(executor, "submit_all", None)
-            run_id = (
-                submit_all(source_ids) if callable(submit_all) else executor.submit(source_ids[0])
-            )
-        except (SyncAlreadyRunningError, SyncSourceUnavailableError):
-            flash("Uma sincronização já está ativa ou a fonte está indisponível.", "warning")
-            return redirect(url_for("web.sync_list"))
-        flash("Sincronização das fontes iniciada em segundo plano.", "success")
-        return redirect(url_for("web.sync_detail", run_id=run_id))
-    runs = db.session.execute(
-        select(SyncRun, Source)
-        .join(Source, Source.id == SyncRun.source_id)
-        .order_by(SyncRun.created_at.desc(), SyncRun.id.desc())
-        .limit(50)
-    ).all()
-    active = db.session.execute(
-        select(SyncRun, Source)
-        .join(Source, Source.id == SyncRun.source_id)
-        .where(SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]))
-        .order_by(SyncRun.id.desc())
-    ).first()
-    watch_sync_run = next(
-        (run for run, _source_value in runs if run.status is SyncStatus.SUCCEEDED),
-        None,
-    )
-    return render_template(
-        "sync_list.html",
-        runs=runs,
-        active_run=active[0] if active else None,
-        active_source=active[1] if active else None,
-        watch_sync_run=watch_sync_run,
-    )
-
-
-@blueprint.get("/sync/active-fragment")
-def sync_active_fragment() -> Any:
-    active = db.session.execute(
-        select(SyncRun, Source)
-        .join(Source, Source.id == SyncRun.source_id)
-        .where(SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]))
-        .order_by(SyncRun.id.desc())
-    ).first()
-    return render_template(
-        "fragments/sync_active.html",
-        run=active[0] if active else None,
-        source=active[1] if active else None,
-    )
-
-
-@blueprint.get("/sync/<int:run_id>")
-def sync_detail(run_id: int) -> Any:
-    context = _sync_detail_context(run_id)
-    if context is None:
-        return render_template("errors/404.html"), 404
-    return render_template("sync_detail.html", **context)
-
-
-@blueprint.get("/sync/<int:run_id>/fragment")
-def sync_detail_fragment(run_id: int) -> Any:
+@blueprint.get("/jobs/sync-runs/<int:run_id>/fragment")
+def job_sync_detail_fragment(run_id: int) -> Any:
     context = _sync_detail_context(run_id)
     if context is None:
         return Response("Sincronização não encontrada.", 404)
-    return render_template("fragments/sync_detail_content.html", **context)
+    return render_template(
+        "fragments/sync_detail_content.html",
+        **context,
+        poll_url=url_for("web.job_sync_detail_fragment", run_id=run_id),
+    )
 
 
 def _sync_detail_context(run_id: int) -> dict[str, Any] | None:
@@ -1536,13 +1514,11 @@ def _sync_detail_context(run_id: int) -> dict[str, Any] | None:
         "source": db.session.get(Source, run.source_id),
         "libraries": libraries,
         "errors": errors,
-        "watch_sync_enabled": _settings("watch_sync.enabled").get("watch_sync.enabled", "false")
-        == "true",
     }
 
 
-@blueprint.post("/sync/<int:run_id>/cancel")
-def sync_cancel(run_id: int) -> Any:
+@blueprint.post("/jobs/sync-runs/<int:run_id>/cancel")
+def job_sync_cancel(run_id: int) -> Any:
     run = db.session.get(SyncRun, run_id)
     if run is None:
         return Response("Sincronização não encontrada.", 404)
@@ -1551,19 +1527,7 @@ def sync_cancel(run_id: int) -> Any:
     else:
         get_executor(current_app).cancel(run_id)
         flash("Cancelamento solicitado. Os dados já confirmados serão preservados.", "warning")
-    return redirect(url_for("web.sync_detail", run_id=run_id))
-
-
-@blueprint.post("/sync/<int:run_id>/watch-sync")
-def sync_watch_sync(run_id: int) -> Any:
-    run = db.session.get(SyncRun, run_id)
-    if run is None:
-        return Response("Sincronização não encontrada.", 404)
-    if get_executor(current_app).submit_watch_sync(run_id):
-        flash("Propagação de conclusões iniciada.", "success")
-    else:
-        flash("A propagação não pode ser iniciada para esta sincronização.", "warning")
-    return redirect(url_for("web.sync_detail", run_id=run_id))
+    return redirect(url_for("web.jobs"))
 
 
 @blueprint.get("/history")
@@ -1879,8 +1843,7 @@ def catalog() -> Any:
     merged_rows = [deduped[k] for k in ordered_keys]
     has_more = len(merged_rows) > 40
     merged_rows = merged_rows[:40]
-    return render_template(
-        "catalog.html",
+    template_values = dict(
         rows=merged_rows,
         page=page,
         has_more=has_more,
@@ -1897,6 +1860,15 @@ def catalog() -> Any:
         genres=db.session.scalars(select(Genre).order_by(Genre.name)).all(),
         series_titles=_series_titles([row[0] for row in merged_rows]),
     )
+    if request.args.get("fragment") == "1":
+        return render_template("fragments/catalog_results.html", **template_values)
+    refresh_values = {
+        key: value for key, value in request.args.items() if key != "fragment"
+    }
+    template_values["catalog_refresh_url"] = url_for(
+        "web.catalog", **refresh_values, fragment="1"
+    )
+    return render_template("catalog.html", **template_values)
 
 
 @blueprint.get("/media/<int:media_id>/image")
@@ -1928,7 +1900,26 @@ def media_image(media_id: int) -> Any:
         return _placeholder_image(item.kind)
     connector = connector_for(source)
     square = item.kind in {MediaKind.ARTIST, MediaKind.ALBUM, MediaKind.TRACK}
+    available = db.session.scalar(
+        select(SourceMediaRef.id).where(
+            SourceMediaRef.media_item_id == media_id,
+            SourceMediaRef.source_id == source.id,
+            SourceMediaRef.available.is_(True),
+        )
+    )
     try:
+        if available is not None:
+            if image.source_path is None:
+                return _placeholder_image(item.kind)
+            content, mime_type = connector.fetch_image(
+                image.source_path,
+                width=400 if square else 300,
+                height=400 if square else 450,
+            )
+            response = Response(content, mimetype=mime_type)
+            response.headers["Cache-Control"] = "private, max-age=86400"
+            response.set_etag(hashlib.sha256(content).hexdigest())
+            return response.make_conditional(request)
         path = ensure_cached(
             image,
             connector,
@@ -1939,6 +1930,12 @@ def media_image(media_id: int) -> Any:
         db.session.commit()
     except (ConnectorError, OSError):
         db.session.rollback()
+        if image.local_filename:
+            existing = cache_directory / image.local_filename
+            if existing.is_file():
+                return send_file(
+                    existing, mimetype=image.mime_type, conditional=True, max_age=86400
+                )
         return _placeholder_image(item.kind)
     finally:
         close = getattr(connector, "close", None)
@@ -2286,6 +2283,8 @@ def _persist_webhook_event(
     watched_at: datetime,
     source_event_id: str | None,
     duration_ms: int | None,
+    playback_user: str | None,
+    view_number: int | None,
 ) -> bool:
     reference = db.session.scalar(
         select(SourceMediaRef).where(
@@ -2302,6 +2301,8 @@ def _persist_webhook_event(
         completed=True,
         source_event_id=source_event_id,
         duration_ms=duration_ms,
+        playback_user=playback_user,
+        view_number=view_number,
     )
     with UnitOfWork(db.session()) as work:
         inserted = MediaPersistenceService(
@@ -2312,10 +2313,10 @@ def _persist_webhook_event(
 
 
 def _request_watch_propagation() -> None:
-    _save_setting("watch_sync.pending", "true")
-    db.session.commit()
+    if current_app.config.get("TESTING"):
+        return
     with contextlib.suppress(Exception):
-        get_executor(current_app).submit_pending_watch_sync()
+        get_async_task_executor(current_app).submit(force=True)
 
 
 def _queue_source_sync(source_id: int) -> None:

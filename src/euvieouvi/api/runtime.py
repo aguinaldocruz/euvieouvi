@@ -6,7 +6,6 @@ import json
 import threading
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
 from importlib.metadata import version
 
 from flask import Flask
@@ -64,6 +63,13 @@ class LocalSyncExecutor:
         self._tokens: dict[int, CancellationToken] = {}
         self._lock = threading.Lock()
         self._watch_sync_running = False
+        self._watch_snapshot: dict[str, int | bool | str] = {
+            "active": False,
+            "processed": 0,
+            "updated": 0,
+            "failed": 0,
+            "summary": "ainda não executado",
+        }
 
     def submit(
         self,
@@ -92,14 +98,14 @@ class LocalSyncExecutor:
                 try:
                     auto_enrich = db.session.get(Setting, "metadata.auto_after_sync")
                     enrich_after_sync = auto_enrich is not None and auto_enrich.value == "true"
-                    orchestrator = SyncOrchestrator(lambda: db.session(), self._factory(source))
+                    orchestrator = SyncOrchestrator(
+                        lambda: db.session(), self._factory(source), page_size=1000
+                    )
                     result = orchestrator.run_queued(
                         run_id,
                         cancellation=token,
                         finalize_on_success=not enrich_after_sync,
                     )
-                    watch_sync = db.session.get(Setting, "watch_sync.enabled")
-                    watch_sync_enabled = watch_sync is not None and watch_sync.value == "true"
                     if result.status is SyncStatus.SUCCEEDED and enrich_after_sync:
                         from euvieouvi.enrichment.service import enrich_catalog
 
@@ -131,8 +137,6 @@ class LocalSyncExecutor:
                             f"{counters['updated']} atualizados e "
                             f"{counters['failed']} falhas seguras.",
                         )
-                    if result.status is SyncStatus.SUCCEEDED and watch_sync_enabled:
-                        self._run_watch_sync(run_id)
                 except Exception as error:
                     self._app.logger.exception("background synchronization failed")
                     db.session.rollback()
@@ -200,54 +204,76 @@ class LocalSyncExecutor:
         threading.Thread(target=execute_pending, name="euvieouvi-watch-events", daemon=True).start()
         return True
 
-    def submit_watch_sync(self, run_id: int) -> bool:
-        run = db.session.get(SyncRun, run_id)
-        if run is None or run.status is not SyncStatus.SUCCEEDED:
-            return False
-        if run.watch_sync_status in {SyncStatus.QUEUED, SyncStatus.RUNNING}:
-            return False
-        run.watch_sync_status = SyncStatus.QUEUED
-        run.watch_sync_started_at = None
-        run.watch_sync_finished_at = None
-        run.watch_sync_scanned = 0
-        run.watch_sync_updated = 0
-        run.watch_sync_skipped = 0
-        run.watch_sync_failed = 0
-        run.watch_sync_summary = "Propagação aguardando início."
-        db.session.commit()
+    @property
+    def watch_sync_active(self) -> bool:
+        with self._lock:
+            return self._watch_sync_running
 
-        def execute_watch_sync() -> None:
-            with self._app.app_context():
-                self._run_watch_sync(run_id)
+    @property
+    def watch_sync_snapshot(self) -> dict[str, int | bool | str]:
+        with self._lock:
+            return dict(self._watch_snapshot)
 
-        threading.Thread(
-            target=execute_watch_sync, name="euvieouvi-watch-sync", daemon=True
-        ).start()
+    def submit_directional_watch_sync(self, source_type: ConnectorType) -> bool:
+        """Run watched-state propagation as an independent directional job."""
+        with self._lock:
+            if self._watch_sync_running:
+                return False
+            self._watch_sync_running = True
+            self._watch_snapshot = {
+                "active": True,
+                "processed": 0,
+                "updated": 0,
+                "failed": 0,
+                "percent": 1,
+                "summary": "Analisando o catálogo e calculando apenas as diferenças.",
+            }
+
+        def execute() -> None:
+            try:
+                with self._app.app_context():
+                    def report(scanned: int, updated: int, skipped: int, failed: int) -> None:
+                        processed = min(scanned, updated + skipped + failed)
+                        percent = 100 if scanned == 0 else processed * 100 // scanned
+                        with self._lock:
+                            self._watch_snapshot.update(
+                                processed=processed,
+                                updated=updated,
+                                failed=failed,
+                                percent=percent,
+                                summary=(
+                                    f"{processed} de {scanned} comparações processadas; "
+                                    f"{skipped} já alinhadas."
+                                ),
+                            )
+
+                    result = WatchSyncService(
+                        lambda: db.session(), self._factory, progress=report
+                    ).run(
+                        None, source_type=source_type
+                    )
+                    with self._lock:
+                        self._watch_snapshot.update(
+                            processed=result.scanned,
+                            updated=result.updated,
+                            failed=result.failed,
+                            percent=100,
+                            summary=(
+                                f"{result.updated} atualizados, {result.skipped} ignorados e "
+                                f"{result.failed} falhas."
+                            ),
+                        )
+            except Exception:
+                self._app.logger.exception("directional watched-state propagation failed")
+                with self._lock:
+                    self._watch_snapshot.update(summary="Propagação falhou.", failed=1)
+            finally:
+                with self._lock:
+                    self._watch_sync_running = False
+                    self._watch_snapshot["active"] = False
+
+        threading.Thread(target=execute, name="euvieouvi-watch-direction", daemon=True).start()
         return True
-
-    def _run_watch_sync(self, run_id: int) -> None:
-        try:
-            WatchSyncService(lambda: db.session(), self._factory).run(run_id)
-        except Exception:
-            self._app.logger.exception("watched-state propagation failed")
-            db.session.rollback()
-            run = db.session.get(SyncRun, run_id)
-            if run is not None:
-                run.watch_sync_status = SyncStatus.FAILED
-                run.watch_sync_finished_at = datetime.now(UTC)
-                run.watch_sync_summary = "Propagação de conclusões falhou com segurança."
-                db.session.commit()
-
-    def submit_all(
-        self, source_ids: tuple[int, ...], *, trigger: SyncTrigger = SyncTrigger.MANUAL
-    ) -> int:
-        if not source_ids:
-            raise LookupError("No source available")
-        return self.submit(
-            source_ids[0],
-            trigger=trigger,
-            remaining_source_ids=source_ids[1:],
-        )
 
     def cancel(self, run_id: int) -> bool:
         with self._lock:

@@ -19,7 +19,7 @@ mídias que posteriormente deixam de existir no servidor.
 - Histórico concluído com servidor de origem e forma de aquisição (`webhook` ou
   `sincronização`).
 - Webhooks Plex/Jellyfin, retenção de eventos recentes e mídia em reprodução.
-- Agendamento diário compartilhado ou separado por fonte.
+- Jobs manuais/diários independentes com progresso, resultado e logs rotativos persistentes.
 - Enriquecimento opcional via TMDB, MusicBrainz e Cover Art Archive por IDs exatos.
 - Cache local de imagens e preservação histórica de mídias indisponíveis.
 - Temas claro/escuro, interface responsiva renderizada no servidor e API REST.
@@ -34,10 +34,11 @@ sincronização reconciliam e persistem os dados por repositories e unidade de t
 uma sincronização pode permanecer ativa.
 
 ```text
-instance/
+data/
 ├── euvieouvi.db
 ├── backups/
-└── images/
+├── images/
+└── job-logs/
 ```
 
 Consulte a [documentação do projeto](docs/README.pt-BR.md) para componentes, comportamento dos
@@ -89,7 +90,7 @@ Para atualização, backup, restauração, proxy reverso e diagnóstico, consult
 | `EUVIEOUVI_SECRET_KEY` | nenhum | Segredo obrigatório de sessão/Flask; use valor longo e aleatório. |
 | `EUVIEOUVI_HOST` | `0.0.0.0` | Endereço de escuta. |
 | `EUVIEOUVI_PORT` | `8000` | Porta, 1–65535. |
-| `EUVIEOUVI_INSTANCE_PATH` | `./instance` | Diretório do banco, imagens e backups. |
+| `EUVIEOUVI_INSTANCE_PATH` | `./instance` (`/data` no Docker) | Diretório do banco, imagens, logs de jobs e backups. |
 | `EUVIEOUVI_DATABASE_URI` | SQLite no diretório instance | URI SQLite; outros bancos não são suportados. |
 | `EUVIEOUVI_LOG_LEVEL` | `INFO` | `CRITICAL`, `ERROR`, `WARNING`, `INFO` ou `DEBUG`. |
 | `EUVIEOUVI_TIMEZONE` | `America/Sao_Paulo` | Fuso IANA usado na exibição e agendamentos. |

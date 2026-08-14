@@ -35,6 +35,11 @@ SUPPORTED_DATABASE_REVISIONS = {
     "20260812_0013",
     "20260812_0014",
     "20260813_0015",
+    "20260814_0016",
+    "20260814_0017",
+    "20260814_0018",
+    "20260814_0019",
+    "20260814_0020",
 }
 Progress = Callable[[str], None]
 
@@ -755,6 +760,7 @@ def _validate_database(connection: sqlite3.Connection) -> None:
         supported = ", ".join(sorted(SUPPORTED_DATABASE_REVISIONS))
         current = str(revision[0]) if revision is not None else "ausente"
         raise ImportFailure(f"Revisão do banco incompatível: {current}; esperada: {supported}.")
+
 
 def _configured_plex_user(connection: sqlite3.Connection) -> str:
     row = connection.execute(

@@ -25,7 +25,9 @@ from euvieouvi.database.models import (
 
 ConnectorFactory = Callable[[Source], MediaConnector]
 SessionFactory = Callable[[], Session]
+ProgressCallback = Callable[[int, int, int, int], None]
 _SYNCABLE_KINDS = {MediaKind.MOVIE, MediaKind.EPISODE, MediaKind.TRACK}
+_PERSIST_BATCH_SIZE = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,16 +97,26 @@ class WatchSyncService:
         connector_factory: ConnectorFactory,
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        progress: ProgressCallback | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._connector_factory = connector_factory
         self._clock = clock
+        self._progress = progress
 
-    def run(self, run_id: int | None) -> WatchSyncResult:
-        candidates, scanned, skipped = self._prepare(run_id)
+    def run(
+        self,
+        run_id: int | None,
+        *,
+        source_type: ConnectorType | None = None,
+    ) -> WatchSyncResult:
+        """Propagate completions, optionally in one explicit source direction."""
+        candidates, scanned, skipped = self._prepare(run_id, source_type=source_type)
         connectors: dict[int, MediaConnector] = {}
+        pending_successes: list[WatchSyncCandidate] = []
         updated = 0
         failed = 0
+        self._update_progress(run_id, scanned, updated, skipped, failed)
         try:
             for candidate in candidates:
                 try:
@@ -113,13 +125,19 @@ class WatchSyncService:
                         connector = self._connector(candidate.target_source_id)
                         connectors[candidate.target_source_id] = connector
                     connector.mark_watched(candidate.target_external_id)
-                    self._record_success(run_id, candidate)
-                    updated += 1
                 except Exception:
                     failed += 1
-                    self._update_progress(run_id, scanned, updated, skipped, failed)
+                else:
+                    pending_successes.append(candidate)
+                    updated += 1
+                    if len(pending_successes) >= _PERSIST_BATCH_SIZE:
+                        self._record_successes(run_id, pending_successes)
+                        pending_successes.clear()
+                self._update_progress(run_id, scanned, updated, skipped, failed)
+            if pending_successes:
+                self._record_successes(run_id, pending_successes)
             result = WatchSyncResult(scanned, updated, skipped, failed)
-            self._finish(run_id, result)
+            self._finish(run_id, result, clear_pending=source_type is None)
             return result
         finally:
             for connector in connectors.values():
@@ -127,7 +145,12 @@ class WatchSyncService:
                 if callable(close):
                     close()
 
-    def _prepare(self, run_id: int | None) -> tuple[tuple[WatchSyncCandidate, ...], int, int]:
+    def _prepare(
+        self,
+        run_id: int | None,
+        *,
+        source_type: ConnectorType | None = None,
+    ) -> tuple[tuple[WatchSyncCandidate, ...], int, int]:
         session = self._session_factory()
         try:
             run = session.get(SyncRun, run_id) if run_id is not None else None
@@ -174,6 +197,15 @@ class WatchSyncService:
                 for item in session.scalars(select(MediaItem).where(MediaItem.id.in_(item_ids)))
             }
             watched: set[tuple[int, int]] = set()
+            watched.update(
+                session.execute(
+                    select(WatchState.media_item_id, WatchState.source_id).where(
+                        WatchState.source_id.in_(source_ids),
+                        WatchState.media_item_id.in_(item_ids),
+                        WatchState.completed.is_(True),
+                    )
+                ).all()
+            )
             for source_id, configured_user in configured_users.items():
                 watched.update(
                     session.execute(
@@ -210,6 +242,11 @@ class WatchSyncService:
                 if not completed_sources or completed_sources == source_ids:
                     skipped += 1
                     continue
+                if source_type is not None:
+                    requested_source = by_type[source_type].id
+                    if requested_source not in completed_sources:
+                        skipped += 1
+                        continue
                 target_source_id = next(iter(source_ids - completed_sources))
                 target_ref = grouped_refs[target_source_id][0]
                 candidates.append(
@@ -256,36 +293,48 @@ class WatchSyncService:
         finally:
             session.close()
 
-    def _record_success(self, run_id: int | None, candidate: WatchSyncCandidate) -> None:
+    def _record_successes(
+        self, run_id: int | None, candidates: list[WatchSyncCandidate]
+    ) -> None:
+        """Persist a successful remote delta in one local transaction."""
         session = self._session_factory()
         try:
             now = self._clock()
-            state = session.scalar(
-                select(WatchState).where(
-                    WatchState.media_item_id == candidate.media_item_id,
-                    WatchState.source_id == candidate.target_source_id,
+            item_ids = {candidate.media_item_id for candidate in candidates}
+            source_ids = {candidate.target_source_id for candidate in candidates}
+            states = {
+                (state.media_item_id, state.source_id): state
+                for state in session.scalars(
+                    select(WatchState).where(
+                        WatchState.media_item_id.in_(item_ids),
+                        WatchState.source_id.in_(source_ids),
+                    )
                 )
-            )
-            if state is None:
-                state = WatchState(
-                    media_item_id=candidate.media_item_id,
-                    source_id=candidate.target_source_id,
-                    view_count=1,
-                    completed=True,
-                    last_watched_at=now,
-                    observed_at=now,
-                )
-                session.add(state)
-            else:
-                state.completed = True
-                state.last_watched_at = now
-                state.view_count = max(1, state.view_count)
-                state.progress_ms = None
-                state.observed_at = now
+            }
+            for candidate in candidates:
+                key = (candidate.media_item_id, candidate.target_source_id)
+                state = states.get(key)
+                if state is None:
+                    state = WatchState(
+                        media_item_id=candidate.media_item_id,
+                        source_id=candidate.target_source_id,
+                        view_count=1,
+                        completed=True,
+                        last_watched_at=now,
+                        observed_at=now,
+                    )
+                    session.add(state)
+                    states[key] = state
+                else:
+                    state.completed = True
+                    state.last_watched_at = now
+                    state.view_count = max(1, state.view_count)
+                    state.progress_ms = None
+                    state.observed_at = now
             if run_id is not None:
                 run = session.get(SyncRun, run_id)
                 if run is not None:
-                    run.watch_sync_updated += 1
+                    run.watch_sync_updated += len(candidates)
             session.commit()
         finally:
             session.close()
@@ -293,6 +342,8 @@ class WatchSyncService:
     def _update_progress(
         self, run_id: int | None, scanned: int, updated: int, skipped: int, failed: int
     ) -> None:
+        if self._progress is not None:
+            self._progress(scanned, updated, skipped, failed)
         if run_id is None:
             return
         session = self._session_factory()
@@ -307,7 +358,9 @@ class WatchSyncService:
         finally:
             session.close()
 
-    def _finish(self, run_id: int | None, result: WatchSyncResult) -> None:
+    def _finish(
+        self, run_id: int | None, result: WatchSyncResult, *, clear_pending: bool = True
+    ) -> None:
         session = self._session_factory()
         try:
             if run_id is not None:
@@ -326,7 +379,7 @@ class WatchSyncService:
                     f"Propagação concluída: {result.updated} atualizados, "
                     f"{result.skipped} já alinhados e {result.failed} falhas."
                 )
-            if result.failed == 0:
+            if result.failed == 0 and clear_pending:
                 pending = session.get(Setting, "watch_sync.pending")
                 if pending is not None:
                     pending.value = "false"

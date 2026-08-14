@@ -1,0 +1,6 @@
+<div hx-get="{{ url_for('web.job_status_fragment', job_id=job.id) }}" hx-trigger="every 2s" hx-swap="outerHTML">
+  {% if run %}<span class="status-dot status-{{ run.status.value }}"></span>{{ run.status.value }}
+  {% if run.status.value in ['queued','running'] %}<div class="progress mt-1" style="width:9rem;height:.4rem"><div class="progress-bar" role="progressbar" aria-label="Progresso de {{ job.name }}" aria-valuenow="{{ run.progress_percent }}" aria-valuemin="0" aria-valuemax="100" style="width:{{ run.progress_percent }}%"></div></div>{% endif %}
+  <div class="small text-secondary">{{ run.progress_percent }}% · {{ run.processed }} processados · {{ run.updated }} atualizados · {{ run.failed }} falhas</div>
+  {% else %}<span class="badge text-bg-secondary">Nunca executado</span>{% endif %}
+</div>

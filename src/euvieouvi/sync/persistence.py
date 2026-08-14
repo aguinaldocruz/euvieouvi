@@ -31,6 +31,7 @@ from euvieouvi.database.models import (
     WebhookEvent,
 )
 from euvieouvi.database.unit_of_work import UnitOfWork
+from euvieouvi.sync.async_tasks import enqueue_watch_update
 
 
 class ItemClassification(StrEnum):
@@ -210,7 +211,49 @@ class MediaPersistenceService:
                 origin=origin,
             )
         )
+        self.work.session.flush()
+        self._apply_event_to_watch_state(reference.media_item_id, event)
+        if origin == "webhook":
+            enqueue_watch_update(
+                self.work.session,
+                source_id=self.source_id,
+                external_id=event.media_external_id,
+                watched_at=event.watched_at,
+            )
         return True
+
+    def _apply_event_to_watch_state(
+        self, media_item_id: int, event: ExternalWatchEvent
+    ) -> None:
+        """Make a completed event visible as current state in the same transaction."""
+        state = self.work.watch_states.by_item_and_source(media_item_id, self.source_id)
+        event_count = max(
+            event.view_number or 0,
+            int(
+            self.work.session.scalar(
+                select(func.count(WatchEvent.id)).where(
+                    WatchEvent.media_item_id == media_item_id,
+                    WatchEvent.source_id == self.source_id,
+                    WatchEvent.completed.is_(True),
+                )
+            )
+            or 0
+            ),
+        )
+        if state is None:
+            state = WatchState(
+                media_item_id=media_item_id,
+                source_id=self.source_id,
+                view_count=event_count,
+                completed=True,
+                observed_at=event.watched_at,
+            )
+            self.work.watch_states.add(state)
+        state.view_count = max(state.view_count, event_count)
+        state.completed = True
+        state.last_watched_at = _latest_datetime(state.last_watched_at, event.watched_at)
+        state.progress_ms = event.progress_ms
+        state.observed_at = event.watched_at
 
     def rebuild_container_watch_states(self, observed_at: datetime) -> None:
         """Derive season/show and album/artist state from their playable children."""
@@ -824,7 +867,13 @@ def _aggregate_completion(
 
 def _latest_datetime(*values: datetime | None) -> datetime | None:
     known = [value for value in values if value is not None]
-    return max(known, default=None)
+    return max(
+        known,
+        key=lambda value: (
+            value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        ),
+        default=None,
+    )
 
 
 def event_dedup_key(source_id: int, event: ExternalWatchEvent) -> str:

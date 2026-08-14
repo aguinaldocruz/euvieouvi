@@ -420,6 +420,65 @@ class SyncRun(TimestampMixin, Base):
     watch_sync_summary: Mapped[str | None] = mapped_column(Text)
 
 
+class JobRun(TimestampMixin, Base):
+    """Persistent execution and log metadata for one operational job."""
+
+    __tablename__ = "job_runs"
+    __table_args__ = (
+        Index("ix_job_runs_job_created", "job_id", "created_at"),
+        Index("ix_job_runs_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    trigger: Mapped[SyncTrigger] = mapped_column(
+        Enum(
+            SyncTrigger,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=lambda enum: [item.value for item in enum],
+        ),
+        nullable=False,
+    )
+    status: Mapped[SyncStatus] = mapped_column(
+        Enum(
+            SyncStatus,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=lambda enum: [item.value for item in enum],
+        ),
+        nullable=False,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    progress_percent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    processed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    log_filename: Mapped[str | None] = mapped_column(String(255))
+
+
+class AsyncTask(TimestampMixin, Base):
+    """Durable idempotent work triggered by webhooks or other instant events."""
+
+    __tablename__ = "async_tasks"
+    __table_args__ = (
+        UniqueConstraint("dedup_key", name="uq_async_tasks_dedup"),
+        Index("ix_async_tasks_due", "status", "next_attempt_at", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    dedup_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(1000))
+
+
 class SyncRunLibrary(Base):
     __tablename__ = "sync_run_libraries"
     __table_args__ = (
@@ -481,6 +540,7 @@ class SyncCheckpoint(Base):
     strategy: Mapped[str] = mapped_column(String(64), nullable=False)
     cursor: Mapped[str | None] = mapped_column(Text)
     watermark_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_full_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_external_id: Mapped[str | None] = mapped_column(String(255))
     last_successful_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("sync_runs.id", ondelete="SET NULL")
