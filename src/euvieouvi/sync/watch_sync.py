@@ -35,6 +35,7 @@ class WatchSyncCandidate:
     media_item_id: int
     target_source_id: int
     target_external_id: str
+    watched_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +125,9 @@ class WatchSyncService:
                     if connector is None:
                         connector = self._connector(candidate.target_source_id)
                         connectors[candidate.target_source_id] = connector
-                    connector.mark_watched(candidate.target_external_id)
+                    connector.mark_watched(
+                        candidate.target_external_id, watched_at=candidate.watched_at
+                    )
                 except Exception:
                     failed += 1
                 else:
@@ -196,27 +199,46 @@ class WatchSyncService:
                 item.id: item.kind
                 for item in session.scalars(select(MediaItem).where(MediaItem.id.in_(item_ids)))
             }
-            watched: set[tuple[int, int]] = set()
-            watched.update(
-                session.execute(
-                    select(WatchState.media_item_id, WatchState.source_id).where(
-                        WatchState.source_id.in_(source_ids),
-                        WatchState.media_item_id.in_(item_ids),
-                        WatchState.completed.is_(True),
-                    )
-                ).all()
-            )
-            for source_id, configured_user in configured_users.items():
-                watched.update(
-                    session.execute(
-                        select(WatchEvent.media_item_id, WatchEvent.source_id).where(
-                            WatchEvent.source_id == source_id,
-                            WatchEvent.media_item_id.in_(item_ids),
-                            WatchEvent.completed.is_(True),
-                            WatchEvent.playback_user == configured_user,
-                        )
-                    ).all()
+            watched: dict[tuple[int, int], datetime] = {}
+
+            def remember(media_item_id: int, source_id: int, watched_at: datetime | None) -> None:
+                if watched_at is None:
+                    return
+                normalized = (
+                    watched_at.replace(tzinfo=UTC)
+                    if watched_at.tzinfo is None
+                    else watched_at.astimezone(UTC)
                 )
+                key = (media_item_id, source_id)
+                if key not in watched or normalized > watched[key]:
+                    watched[key] = normalized
+
+            for state in session.scalars(
+                select(WatchState).where(
+                    WatchState.source_id.in_(source_ids),
+                    WatchState.media_item_id.in_(item_ids),
+                    WatchState.completed.is_(True),
+                )
+            ):
+                remember(
+                    state.media_item_id,
+                    state.source_id,
+                    state.last_watched_at or state.observed_at,
+                )
+            for source_id, configured_user in configured_users.items():
+                for media_item_id, event_source_id, watched_at in session.execute(
+                    select(
+                        WatchEvent.media_item_id,
+                        WatchEvent.source_id,
+                        WatchEvent.watched_at,
+                    ).where(
+                        WatchEvent.source_id == source_id,
+                        WatchEvent.media_item_id.in_(item_ids),
+                        WatchEvent.completed.is_(True),
+                        WatchEvent.playback_user == configured_user,
+                    )
+                ):
+                    remember(media_item_id, event_source_id, watched_at)
             refs_by_item: dict[int, dict[int, SourceMediaRef]] = {}
             for ref in refs:
                 refs_by_item.setdefault(ref.media_item_id, {}).setdefault(ref.source_id, ref)
@@ -234,12 +256,21 @@ class WatchSyncService:
                 ):
                     continue
                 scanned += 1
-                completed_sources = {
-                    source_id
+                watched_by_source = {
+                    source_id: max(
+                        (
+                            watched[(media_item_id, source_id)]
+                            for media_item_id in group
+                            if (media_item_id, source_id) in watched
+                        ),
+                        default=None,
+                    )
                     for source_id in source_ids
-                    if any((media_item_id, source_id) in watched for media_item_id in group)
                 }
-                if not completed_sources or completed_sources == source_ids:
+                completed_sources = {
+                    source_id for source_id, value in watched_by_source.items() if value is not None
+                }
+                if not completed_sources:
                     skipped += 1
                     continue
                 if source_type is not None:
@@ -247,13 +278,43 @@ class WatchSyncService:
                     if requested_source not in completed_sources:
                         skipped += 1
                         continue
-                target_source_id = next(iter(source_ids - completed_sources))
+                    target_source_id = next(iter(source_ids - {requested_source}))
+                    source_watched_at = watched_by_source[requested_source]
+                    target_watched_at = watched_by_source[target_source_id]
+                    if source_watched_at is None or (
+                        source_type is ConnectorType.JELLYFIN
+                        and target_watched_at is not None
+                        and target_watched_at >= source_watched_at
+                    ) or (
+                        source_type is ConnectorType.PLEX
+                        and target_watched_at == source_watched_at
+                    ):
+                        skipped += 1
+                        continue
+                else:
+                    plex_source_id = by_type[ConnectorType.PLEX].id
+                    jellyfin_source_id = by_type[ConnectorType.JELLYFIN].id
+                    plex_watched_at = watched_by_source[plex_source_id]
+                    jellyfin_watched_at = watched_by_source[jellyfin_source_id]
+                    if plex_watched_at is not None:
+                        if plex_watched_at == jellyfin_watched_at:
+                            skipped += 1
+                            continue
+                        target_source_id = jellyfin_source_id
+                        source_watched_at = plex_watched_at
+                    else:
+                        target_source_id = plex_source_id
+                        source_watched_at = jellyfin_watched_at
+                    if source_watched_at is None:
+                        skipped += 1
+                        continue
                 target_ref = grouped_refs[target_source_id][0]
                 candidates.append(
                     WatchSyncCandidate(
                         target_ref.media_item_id,
                         target_source_id,
                         target_ref.external_id,
+                        source_watched_at,
                     )
                 )
             now = self._clock()
@@ -320,14 +381,14 @@ class WatchSyncService:
                         source_id=candidate.target_source_id,
                         view_count=1,
                         completed=True,
-                        last_watched_at=now,
+                        last_watched_at=candidate.watched_at,
                         observed_at=now,
                     )
                     session.add(state)
                     states[key] = state
                 else:
                     state.completed = True
-                    state.last_watched_at = now
+                    state.last_watched_at = candidate.watched_at
                     state.view_count = max(1, state.view_count)
                     state.progress_ms = None
                     state.observed_at = now

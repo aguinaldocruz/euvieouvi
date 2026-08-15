@@ -22,6 +22,8 @@ A experiência será simples, responsiva e renderizada no servidor. HTMX será u
 8. A primeira versão evita gráficos, rankings e estatísticas avançadas.
 9. A sincronização nunca mantém uma requisição HTTP longa aberta.
 10. Operações destrutivas não serão apresentadas.
+11. O resultado de ações é exibido como notificação popup temporária; alertas dentro da página
+    ficam reservados a orientações e avisos que precisam permanecer visíveis.
 
 ## 3. Tecnologia visual
 
@@ -513,14 +515,15 @@ Capas e imagens de mídia não integram a primeira versão, evitando proxy, cach
 ## 24. Aparência
 
 - Visual limpo, discreto e funcional.
-- Tema claro como padrão inicial.
+- Tema claro, escuro ou conforme o sistema, com preferência persistente.
+- Interface completa em inglês e português brasileiro, com inglês como padrão.
+- Idioma persistido em `ui.language` e aplicado também a fragments HTMX, mensagens,
+  títulos auxiliares e atributos de acessibilidade.
 - Paleta com contraste adequado.
 - Uso moderado de cor para estados e ações.
 - Tipografia de sistema para carregamento rápido e privacidade.
 - Bordas e sombras discretas.
 - Densidade suficiente para bibliotecas grandes, sem aparência de painel corporativo excessivamente carregado.
-
-Tema escuro não integra o requisito da primeira versão e poderá ser avaliado depois.
 
 ## 25. Tratamento de erros por página
 
@@ -618,8 +621,7 @@ A interface estará concluída quando:
 - incluir capas por serviço externo;
 - criar gráficos ou estatísticas avançadas;
 - adicionar WebSocket ou SSE;
-- adicionar tema escuro como requisito;
-- adicionar outros idiomas completos;
+- adicionar outros idiomas além de inglês e português brasileiro;
 - incluir agendamento automático.
 
 ## 29. Critérios de aprovação desta entrega
@@ -627,7 +629,7 @@ A interface estará concluída quando:
 Esta entrega estará aprovada quando houver concordância explícita sobre:
 
 - Jinja, HTMX e Bootstrap com assets locais;
-- idioma inicial pt-BR;
+- idioma inicial inglês, com português brasileiro selecionável e persistente;
 - estrutura e navegação;
 - fluxo de primeiro acesso;
 - dashboard básico;

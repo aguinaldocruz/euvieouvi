@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from datetime import datetime
 
 from euvieouvi.connectors.dtos import (
     ConnectionInfo,
@@ -62,7 +63,10 @@ class PlexConnector:
         self.last_unsupported_libraries = rejected
         return libraries
 
-    def mark_watched(self, external_id: str) -> None:
+    def mark_watched(
+        self, external_id: str, *, watched_at: datetime | None = None
+    ) -> None:
+        del watched_at  # Plex's scrobble endpoint does not accept a historical play date.
         if not external_id.strip():
             raise ConnectorConfigurationError("Plex media id must not be empty.")
         self._client.get(

@@ -178,6 +178,14 @@ class AsyncTaskExecutor:
         source_id = int(raw_source_id)
         external_id = str(payload["external_id"])
         watched_at = datetime.fromisoformat(str(payload["watched_at"]))
+        watched_at = (
+            watched_at.replace(tzinfo=UTC)
+            if watched_at.tzinfo is None
+            else watched_at.astimezone(UTC)
+        )
+        origin = db.session.get(Source, source_id)
+        if origin is None:
+            raise LookupError("watch update source is not available")
         reference = db.session.scalar(
             select(SourceMediaRef).where(
                 SourceMediaRef.source_id == source_id,
@@ -206,10 +214,24 @@ class AsyncTaskExecutor:
                 WatchState.source_id == target.source_id,
             )
         )
-        if state is None or not state.completed:
+        target_watched_at = state.last_watched_at if state is not None else None
+        if target_watched_at is not None:
+            target_watched_at = (
+                target_watched_at.replace(tzinfo=UTC)
+                if target_watched_at.tzinfo is None
+                else target_watched_at.astimezone(UTC)
+            )
+        should_apply = (
+            target_watched_at != watched_at
+            if origin.connector_type.value == "plex"
+            else target_watched_at is None or watched_at > target_watched_at
+        )
+        if not should_apply:
+            return
+        if state is None or not state.completed or target_watched_at != watched_at:
             connector = connector_for(source)
             try:
-                connector.mark_watched(target.external_id)
+                connector.mark_watched(target.external_id, watched_at=watched_at)
             finally:
                 close = getattr(connector, "close", None)
                 if callable(close):

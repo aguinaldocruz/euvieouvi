@@ -65,6 +65,7 @@ class Source(TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_connection_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_connection_status: Mapped[str | None] = mapped_column(String(64))
+    server_identifier: Mapped[str | None] = mapped_column(String(255))
 
 
 class Library(TimestampMixin, Base):

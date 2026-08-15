@@ -40,6 +40,8 @@ SUPPORTED_DATABASE_REVISIONS = {
     "20260814_0018",
     "20260814_0019",
     "20260814_0020",
+    "20260815_0021",
+    "20260815_0022",
 }
 Progress = Callable[[str], None]
 

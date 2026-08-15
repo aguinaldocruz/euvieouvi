@@ -30,7 +30,10 @@ NOW = datetime(2026, 8, 11, 19, tzinfo=UTC)
 
 
 class FailingConnector:
-    def mark_watched(self, external_id: str) -> None:
+    def mark_watched(
+        self, external_id: str, *, watched_at: datetime | None = None
+    ) -> None:
+        del watched_at
         raise RuntimeError(external_id)
 
     def close(self) -> None:
@@ -42,7 +45,10 @@ class RecordingConnector:
         self.source = source
         self.calls = calls
 
-    def mark_watched(self, external_id: str) -> None:
+    def mark_watched(
+        self, external_id: str, *, watched_at: datetime | None = None
+    ) -> None:
+        assert watched_at == NOW
         self.calls.append((self.source.connector_type, external_id))
 
     def close(self) -> None:
@@ -180,6 +186,7 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
             .one()
         )
         assert target_state.completed is True
+        assert target_state.last_watched_at == NOW.replace(tzinfo=None)
         persisted_run = db.session.get(SyncRun, run_id)
         assert persisted_run is not None
         assert persisted_run.watch_sync_status is SyncStatus.SUCCEEDED

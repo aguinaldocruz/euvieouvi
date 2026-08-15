@@ -1,9 +1,26 @@
 {% extends 'base.html' %}{% block title %}Aparência · euvieouvi{% endblock %}{% block content %}
 <div class="mb-4"><h1 class="h2">Aparência</h1><p class="text-secondary mb-0">Defina o tema padrão da interface. O botão no menu continua permitindo uma preferência local neste navegador.</p></div>
 <div class="card"><div class="card-body"><form id="appearanceForm" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<fieldset class="mb-4"><legend class="h5">Idioma</legend>
+{% for value,label,help in [('en','English','Use English throughout the interface.'),('pt-BR','Português (Brasil)','Usar português brasileiro em toda a interface.')] %}
+<div class="form-check mb-3"><input class="form-check-input" type="radio" name="language" id="language_{{ value|replace('-', '_') }}" value="{{ value }}" {% if language==value %}checked{% endif %}><label class="form-check-label" for="language_{{ value|replace('-', '_') }}"><strong>{{ label }}</strong><span class="d-block text-secondary small">{{ help }}</span></label></div>
+{% endfor %}
+</fieldset>
 <fieldset><legend class="h5">Tema</legend>
 {% for value, label, help in [('system', 'Usar preferência do sistema', 'Acompanha a configuração clara ou escura do dispositivo.'), ('light', 'Claro', 'Mantém a aparência clara atual.'), ('dark', 'Escuro', 'Mantém a aparência escura atual.')] %}
 <div class="form-check mb-3"><input class="form-check-input" type="radio" name="theme" id="theme_{{ value }}" value="{{ value }}" {% if theme == value %}checked{% endif %}><label class="form-check-label" for="theme_{{ value }}"><strong>{{ label }}</strong><span class="d-block text-secondary small">{{ help }}</span></label></div>
 {% endfor %}
 </fieldset><button class="btn btn-primary">Salvar aparência</button></form></div></div>
+<div class="card mt-4"><div class="card-body">
+<h2 class="h5">Informações sobre as capas do catálogo</h2>
+<p class="text-secondary">Escolha quais identificadores podem aparecer sobre as imagens. Todos permanecem ocultos por padrão.</p>
+{% for key,label,help in [
+  ('catalog.overlay.media_type','Faixa do tipo de mídia','Exibe Filme, Série ou Música na lateral da capa.'),
+  ('catalog.overlay.plex','Disponibilidade no Plex','Exibe o selo P quando o item está disponível no Plex.'),
+  ('catalog.overlay.jellyfin','Disponibilidade no Jellyfin','Exibe o selo J quando o item está disponível no Jellyfin.'),
+  ('catalog.overlay.played','Estado assistido ou ouvido','Exibe o selo de conclusão sobre a capa.')
+] %}
+<div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" role="switch" name="{{ key }}" id="{{ key|replace('.', '_') }}" form="appearanceForm" {% if appearance.get(key)=='true' %}checked{% endif %}><label class="form-check-label" for="{{ key|replace('.', '_') }}"><strong>{{ label }}</strong><span class="d-block text-secondary small">{{ help }}</span></label></div>
+{% endfor %}
+</div></div>
 {% endblock %}

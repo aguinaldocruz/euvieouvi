@@ -3,6 +3,52 @@ document.body.addEventListener("htmx:configRequest", function (event) {
   if (token) event.detail.headers["X-CSRF-Token"] = token.content;
 });
 (function(){
+  var notifications=document.querySelectorAll(".toast");
+  notifications.forEach(function(element){
+    bootstrap.Toast.getOrCreateInstance(element).show();
+  });
+  if(notifications.length){
+    document.addEventListener("click",function(event){
+      if(event.target instanceof Element&&event.target.closest(".toast"))return;
+      notifications.forEach(function(element){
+        bootstrap.Toast.getOrCreateInstance(element).hide();
+      });
+    });
+  }
+})();
+(function(){
+  var form=document.getElementById("catalog-filter-form");
+  if(form){
+    form.querySelectorAll(".catalog-auto-submit").forEach(function(control){
+      control.addEventListener("change",function(){
+        if(control.name==="sort"&&control.value==="last_played"){
+          var descending=form.querySelector('#direction_desc');if(descending)descending.checked=true;
+        }
+        form.requestSubmit();
+      });
+    });
+  }
+  var sidebar=document.querySelector(".catalog-sidebar");
+  if(!sidebar)return;
+  var key="euvieouvi.catalog.type-order",dragged=null;
+  try{
+    var order=JSON.parse(localStorage.getItem(key)||"[]");
+    order.forEach(function(kind){var item=sidebar.querySelector('[data-catalog-kind="'+kind+'"]');if(item)sidebar.appendChild(item);});
+  }catch(error){}
+  sidebar.querySelectorAll("[data-catalog-kind]").forEach(function(item){
+    item.addEventListener("dragstart",function(){dragged=item;item.classList.add("catalog-dragging");});
+    item.addEventListener("dragend",function(){
+      item.classList.remove("catalog-dragging");dragged=null;
+      try{localStorage.setItem(key,JSON.stringify(Array.from(sidebar.querySelectorAll("[data-catalog-kind]")).map(function(link){return link.dataset.catalogKind;})));}catch(error){}
+    });
+    item.addEventListener("dragover",function(event){
+      event.preventDefault();if(!dragged||dragged===item)return;
+      var box=item.getBoundingClientRect(),after=event.clientY>box.top+box.height/2;
+      sidebar.insertBefore(dragged,after?item.nextSibling:item);
+    });
+  });
+})();
+(function(){
   var form=document.getElementById("traktImportForm");
   if(form){
     var box=document.getElementById("traktImportProgress"),bar=document.getElementById("traktImportBar"),pct=document.getElementById("traktImportPercent"),phase=document.getElementById("traktImportPhase"),msg=document.getElementById("traktImportMessage"),button=document.getElementById("traktImportButton");

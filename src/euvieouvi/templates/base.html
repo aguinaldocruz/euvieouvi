@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pt-BR" data-default-theme="{{ ui_theme }}">
+<html lang="{{ ui_language }}" data-default-theme="{{ ui_theme }}" data-ui-language="{{ ui_language }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -29,12 +29,15 @@
     </ul></div>
   </div>
 </nav>
+<div class="toast-container position-fixed top-0 end-0 p-3 mt-5" aria-live="polite" aria-atomic="true">
+  {% for category,message in get_flashed_messages(with_categories=true) %}<div class="toast action-toast border-{{ category }}" role="status" aria-live="polite" aria-atomic="true" data-bs-delay="7000"><div class="toast-header"><span class="status-dot status-{{ 'succeeded' if category == 'success' else 'failed' if category == 'danger' else 'running' }} me-2" aria-hidden="true"></span><strong>{{ 'Sucesso' if category == 'success' else 'Erro' if category == 'danger' else 'Atenção' if category == 'warning' else 'Informação' }}</strong></div><div class="toast-body">{{ message }}</div></div>{% endfor %}
+</div>
 <main id="conteudo" class="container page-shell py-4" tabindex="-1">
-  <div aria-live="polite">{% for category,message in get_flashed_messages(with_categories=true) %}<div class="alert alert-{{ category }}" role="status">{{ message }}</div>{% endfor %}</div>
   {% block content %}{% endblock %}
 </main>
 <footer class="container page-shell border-top py-3 mt-4 d-flex justify-content-between small"><span>euvieouvi {{ app_version }}</span><a href="{{ url_for('web.about') }}">Sobre esta instalação</a></footer>
 <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.e4fd4918.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/htmx.22283ef6.min.js') }}"></script>
+<script src="{{ url_for('static', filename='i18n.4f6d2c1a.js') }}"></script>
 <script src="{{ url_for('static', filename='app.9c71d4a2.js') }}"></script>
 </body></html>

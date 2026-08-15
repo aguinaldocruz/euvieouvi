@@ -60,12 +60,22 @@ class JellyfinHttpClient:
             raise ConnectorResponseError("Jellyfin returned an unexpected JSON value.")
         return value
 
-    def post_empty(self, path: str) -> None:
+    def post_empty(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, str | int | bool] | None = None,
+    ) -> None:
         if not path.startswith("/") or path.startswith("//"):
             raise ConnectorConfigurationError("Jellyfin path must be server-local.")
         url = urljoin(self.base_url, path.lstrip("/"))
         try:
-            response = self._client.post(url, headers=self._headers, timeout=self._timeout)
+            response = self._client.post(
+                url,
+                params=params,
+                headers=self._headers,
+                timeout=self._timeout,
+            )
         except httpx.TimeoutException as error:
             raise ConnectorTimeoutError("Jellyfin request timed out.") from error
         except httpx.RequestError as error:

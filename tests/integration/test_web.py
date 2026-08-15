@@ -54,7 +54,7 @@ from euvieouvi.database.models import (
     WebhookEvent,
 )
 from euvieouvi.extensions import db
-from euvieouvi.web.formatting import duration_ms, local_datetime
+from euvieouvi.web.formatting import duration_ms, elapsed_time, local_datetime
 
 NOW = datetime(2026, 8, 4, 18, tzinfo=UTC)
 
@@ -102,6 +102,8 @@ def test_jobs_page_lists_independent_operations_and_saves_schedules(app: Flask) 
     assert "Baixar imagens do catálogo" in body
     assert "Otimizar dados" in body
     assert "Última execução" in body
+    assert 'title="Ver execuções"' in body
+    assert 'title="Executar agora"' in body
     assert "Jobs e agendamentos" not in body
     assert client.get("/settings/sync").status_code == 404
     assert "Agendamento sync" not in client.get("/settings/backup").get_data(as_text=True)
@@ -134,6 +136,35 @@ def test_jobs_page_lists_independent_operations_and_saves_schedules(app: Flask) 
         assert db.session.get(Setting, "jobs.sync_plex.time").value == "02:15"  # type: ignore[union-attr]
         assert db.session.get(Setting, "jobs.retention.keep_last").value == "7"  # type: ignore[union-attr]
         assert db.session.get(Setting, "watch_sync.enabled").value == "true"  # type: ignore[union-attr]
+
+
+def test_job_status_repairs_completed_sync_left_running(app: Flask) -> None:
+    with app.app_context():
+        source_id, _, _, sync_run_id = seed_web()
+        sync_run = db.session.get(SyncRun, sync_run_id)
+        assert sync_run is not None
+        job_run = JobRun(
+            job_id="sync_plex",
+            trigger=SyncTrigger.MANUAL,
+            status=SyncStatus.RUNNING,
+            started_at=NOW - timedelta(seconds=1),
+            created_at=NOW - timedelta(seconds=1),
+            progress_percent=99,
+            summary="Execução em andamento.",
+        )
+        db.session.add(job_run)
+        db.session.commit()
+        job_run_id = job_run.id
+        assert source_id == sync_run.source_id
+
+    body = app.test_client().get("/jobs/sync_plex/status-fragment").get_data(as_text=True)
+    assert "status-succeeded" in body
+    assert "100%" in body
+    with app.app_context():
+        repaired = db.session.get(JobRun, job_run_id)
+        assert repaired is not None
+        assert repaired.status is SyncStatus.SUCCEEDED
+        assert repaired.finished_at == NOW.replace(tzinfo=None)
 
 
 def test_maintenance_job_persists_result_and_readable_log(app: Flask) -> None:
@@ -181,20 +212,56 @@ def test_watched_state_propagation_is_disabled_by_default_and_configurable(app: 
 
 def test_appearance_setting_is_persisted_and_used_as_page_default(app: Flask) -> None:
     client = app.test_client()
+    default_page = client.get("/settings/appearance").get_data(as_text=True)
+    assert 'lang="en"' in default_page
+    assert 'value="en" checked' in default_page
+    assert 'i18n.4f6d2c1a.js' in default_page
     token = csrf(client, "/settings/appearance")
     response = client.post(
         "/settings/appearance",
-        data={"csrf_token": token, "theme": "dark"},
+        data={
+            "csrf_token": token,
+            "theme": "dark",
+            "catalog.overlay.media_type": "on",
+            "catalog.overlay.plex": "on",
+            "catalog.overlay.jellyfin": "on",
+            "catalog.overlay.played": "on",
+        },
         follow_redirects=True,
     )
     text = response.get_data(as_text=True)
     assert response.status_code == 200
     assert "Preferência de aparência atualizada" in text
+    assert 'class="toast ' in text
+    assert 'class="alert alert-success"' not in text
+    assert 'class="btn-close"' not in text
+    assert "Sucesso" in text
+    assert "Preferência de aparência atualizada." in text
     assert 'data-default-theme="dark"' in text
     assert 'value="dark" checked' in text
     with app.app_context():
         setting = db.session.get(Setting, "ui.theme")
         assert setting is not None and setting.value == "dark"
+        language = db.session.get(Setting, "ui.language")
+        assert language is not None and language.value == "en"
+        assert all(
+            db.session.get(Setting, key).value == "true"  # type: ignore[union-attr]
+            for key in (
+                "catalog.overlay.media_type",
+                "catalog.overlay.plex",
+                "catalog.overlay.jellyfin",
+                "catalog.overlay.played",
+            )
+        )
+
+    token = csrf(client, "/settings/appearance")
+    portuguese = client.post(
+        "/settings/appearance",
+        data={"csrf_token": token, "theme": "dark", "language": "pt-BR"},
+        follow_redirects=True,
+    ).get_data(as_text=True)
+    assert 'lang="pt-BR"' in portuguese
+    assert 'value="pt-BR" checked' in portuguese
 
 
 def test_metadata_settings_and_manual_enrichment(
@@ -538,6 +605,7 @@ def test_connection_discovery_selection_htmx_and_fallback(
     with app.app_context():
         library_id = db.session.scalar(db.select(Library.id))
         assert library_id
+        assert db.session.scalar(db.select(Source)).server_identifier == "machine"
     response = client.post(
         f"/libraries/{library_id}/selection",
         data={"csrf_token": token, "enabled": "true"},
@@ -553,6 +621,74 @@ def test_connection_discovery_selection_htmx_and_fallback(
         ).status_code
         == 302
     )
+
+
+@pytest.mark.parametrize("connector_type", [ConnectorType.PLEX, ConnectorType.JELLYFIN])
+def test_discovery_isolates_libraries_when_physical_server_changes(
+    app: Flask, monkeypatch: pytest.MonkeyPatch, connector_type: ConnectorType
+) -> None:
+    class ReplacementConnector(WebConnector):
+        def test_connection(self) -> ConnectionInfo:
+            return ConnectionInfo("replacement", "new-machine", True)
+
+        def list_libraries(self) -> list[ExternalLibrary]:
+            # Server-local IDs are commonly reused by different installations.
+            return [ExternalLibrary("1", "New server library", ExternalLibraryType.MOVIE)]
+
+    with app.app_context():
+        source = Source(
+            connector_type=connector_type,
+            name=connector_type.value,
+            base_url="http://replacement",
+            secret="x",
+            enabled=True,
+            server_identifier="old-machine",
+        )
+        db.session.add(source)
+        db.session.flush()
+        old_library = Library(
+            source_id=source.id,
+            external_id="1",
+            name="Old server library",
+            media_type=LibraryMediaType.MOVIE,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
+        )
+        db.session.add(old_library)
+        db.session.commit()
+        source_id = source.id
+        old_library_id = old_library.id
+
+    monkeypatch.setattr(
+        "euvieouvi.web.routes.connector_for", lambda source: ReplacementConnector()
+    )
+    client = app.test_client()
+    token = csrf(client, "/libraries")
+    response = client.post(
+        f"/libraries/{source_id}/discover", data={"csrf_token": token}, follow_redirects=True
+    )
+    assert response.status_code == 200
+    page = response.get_data(as_text=True)
+    assert "New server library" in page
+    assert "Old server library" not in page
+
+    with app.app_context():
+        source = db.session.get(Source, source_id)
+        old_library = db.session.get(Library, old_library_id)
+        new_library = db.session.scalar(
+            db.select(Library).where(
+                Library.source_id == source_id,
+                Library.external_id == "1",
+            )
+        )
+        assert source is not None and source.server_identifier == "new-machine"
+        assert old_library is not None
+        assert old_library.external_id.startswith("retired:library:")
+        assert old_library.available is False and old_library.enabled is False
+        assert new_library is not None and new_library.available is True
+        assert new_library.enabled is False
 
 
 def test_failed_connection_and_discovery_preserve_local_pages(
@@ -700,11 +836,46 @@ def test_formatters(app: Flask) -> None:
         assert duration_ms(6_960_000) == "1h 56min"
         assert duration_ms(120_000) == "2 min"
         assert duration_ms(None) == "—"
+        assert elapsed_time(NOW, NOW + timedelta(seconds=125)) == "2m 05s"
 
 
 def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     with app.app_context():
-        _, library_id, _, _ = seed_web()
+        source_id, library_id, _, _ = seed_web()
+        partial = MediaItem(kind=MediaKind.MOVIE, title="Newest partial playback")
+        observed_only = MediaItem(kind=MediaKind.MOVIE, title="Observed but never played")
+        db.session.add_all([partial, observed_only])
+        db.session.flush()
+        db.session.add_all(
+            [
+                SourceMediaRef(
+                    source_id=source_id,
+                    library_id=library_id,
+                    media_item_id=partial.id,
+                    external_id="partial-movie",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+                WatchState(
+                    media_item_id=partial.id,
+                    source_id=source_id,
+                    view_count=0,
+                    last_watched_at=NOW + timedelta(days=1),
+                    completed=False,
+                    progress_ms=1_000,
+                    observed_at=NOW + timedelta(days=1),
+                ),
+                WatchState(
+                    media_item_id=observed_only.id,
+                    source_id=source_id,
+                    view_count=0,
+                    last_watched_at=NOW + timedelta(days=2),
+                    completed=False,
+                    observed_at=NOW + timedelta(days=2),
+                ),
+            ]
+        )
+        db.session.commit()
     client = app.test_client()
     response = client.get(
         "/catalog?kind=movie&availability=available&played=played&sort=last_played&direction=desc"
@@ -712,10 +883,51 @@ def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     text = response.get_data(as_text=True)
     assert response.status_code == 200
     assert "Arrival" in text
-    assert "Disponível no Plex" in text
-    assert "Assistido 2 vezes" in text
+    assert "Disponível no Plex" not in text
+    assert "Assistido 2 vezes" not in text
+    assert "Tipos do catálogo" in text
+    assert "Visão geral" not in text
+    assert 'aria-current="page"' in text
+    assert 'name="kind" type="hidden"' not in text
+    assert 'type="hidden" name="kind" value="movie"' in text
+    assert 'name="library"' not in text
+    assert 'name="decade"' not in text
+    assert 'title="Ordem crescente"' in text
+    assert "Gênero de filmes" in text
+    assert 'id="catalog-filter-form"' in text
+    assert "Aplicar filtros" not in text
+    assert 'draggable="true"' in text
+    with app.app_context():
+        for key in (
+            "catalog.overlay.media_type",
+            "catalog.overlay.plex",
+            "catalog.overlay.jellyfin",
+            "catalog.overlay.played",
+        ):
+            db.session.add(Setting(key=key, value="true"))
+        db.session.commit()
+    overlays = client.get(
+        "/catalog?kind=movie&availability=available&played=played"
+    ).get_data(as_text=True)
+    assert "Disponível no Plex" in overlays
+    assert "Assistido 2 vezes" in overlays
+    assert 'class="media-type-tab is-movie">Filme' in overlays
+    last_played = client.get(
+        "/catalog?kind=movie&availability=all&played=all&sort=last_played&direction=desc"
+    ).get_data(as_text=True)
+    assert last_played.index("Newest partial playback") < last_played.index("Arrival")
+    assert last_played.index("Arrival") < last_played.index("Observed but never played")
+
+    client.get("/catalog?kind=show&availability=unavailable&played=unplayed&sort=year&direction=desc&query=Arrival")
+    revisited = client.get("/catalog").get_data(as_text=True)
+    assert 'type="hidden" name="kind" value="show"' in revisited
+    assert 'id="availability_unavailable" value="unavailable" checked' in revisited
+    assert 'id="played_unplayed" value="unplayed" checked' in revisited
+    assert 'id="direction_desc" value="desc" checked' in revisited
+    assert 'id="query" name="query" value=""' in revisited
     advanced = client.get(
-        f"/catalog?kind=movie&library={library_id}&genre=ficção+científica&decade=2010&sort=rating&direction=desc"
+        f"/catalog?kind=movie&library={library_id}&genre=ficção+científica&decade=2010"
+        "&availability=all&played=all&sort=rating&direction=desc"
     )
     assert advanced.status_code == 200 and "Arrival" in advanced.get_data(as_text=True)
     assert client.get("/catalog?kind=track&played=unplayed&sort=year").status_code == 200
@@ -768,6 +980,12 @@ def test_catalog_badges_follow_shared_provider_identity_across_localized_titles(
                 ),
             ]
         )
+        db.session.add_all(
+            [
+                Setting(key="catalog.overlay.plex", value="true"),
+                Setting(key="catalog.overlay.jellyfin", value="true"),
+            ]
+        )
         db.session.commit()
 
     text = app.test_client().get("/catalog?query=Arrival&kind=movie").get_data(as_text=True)
@@ -787,7 +1005,6 @@ def test_state_without_history_still_marks_media_as_watched(app: Flask) -> None:
     history = client.get("/history?kind=movie&watched=watched").get_data(as_text=True)
 
     assert "Arrival" in catalog
-    assert "Assistido 2 vezes" in catalog
     assert "Arrival" in history
 
 
@@ -951,13 +1168,13 @@ def test_series_detail_groups_episodes_by_season(app: Flask) -> None:
                     last_seen_at=NOW,
                     available=True,
                 ),
-                WatchState(
-                    media_item_id=episode.id,
-                    source_id=source_id,
-                    view_count=1,
-                    last_watched_at=NOW,
-                    completed=True,
-                    observed_at=NOW,
+                    WatchState(
+                        media_item_id=episode.id,
+                        source_id=source_id,
+                        view_count=1,
+                        last_watched_at=NOW + timedelta(days=1),
+                        completed=True,
+                        observed_at=NOW + timedelta(days=1),
                 ),
                 WatchEvent(
                     media_item_id=episode.id,
@@ -970,6 +1187,7 @@ def test_series_detail_groups_episodes_by_season(app: Flask) -> None:
                 ),
             ]
         )
+        db.session.add(Setting(key="catalog.overlay.media_type", value="true"))
         db.session.commit()
         show_id = show.id
         episode_id = episode.id
@@ -981,6 +1199,8 @@ def test_series_detail_groups_episodes_by_season(app: Flask) -> None:
     assert "Space Pilot 3000</strong>" in text
     assert "reprodução 1" in text
     assert "Disponível no Plex" in text
+    assert "Última vez: 04/08/2026 15:00" in text
+    assert "Última vez: 05/08/2026 15:00" not in text
 
     client = app.test_client()
     episode_detail = client.get(f"/media/{episode_id}").get_data(as_text=True)

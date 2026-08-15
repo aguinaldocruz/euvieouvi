@@ -105,6 +105,19 @@ def test_mark_watched_posts_played_item_for_configured_user() -> None:
     connector.mark_watched("movie-1")
 
 
+def test_mark_watched_preserves_original_played_date() -> None:
+    watched_at = datetime(2026, 8, 5, 21, tzinfo=UTC)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path.endswith("/Users/user-1/PlayedItems/movie-1")
+        assert request.url.params["datePlayed"] == "2026-08-05T21:00:00Z"
+        return httpx.Response(204, request=request)
+
+    connector = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1")
+    connector.mark_watched("movie-1", watched_at=watched_at)
+
+
 def test_connector_fetches_and_caches_parent_series_provider_ids() -> None:
     series_requests = 0
 

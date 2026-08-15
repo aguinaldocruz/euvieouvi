@@ -26,6 +26,7 @@ from flask import (
     render_template,
     request,
     send_file,
+    session,
     url_for,
 )
 from sqlalchemy import and_, case, delete, exists, func, or_, select, update
@@ -65,9 +66,16 @@ from euvieouvi.media_images import ensure_cached, ensure_external_cached
 from euvieouvi.sync.async_tasks import enqueue_watch_update, get_async_task_executor
 from euvieouvi.sync.discovery import LibraryDiscoveryService
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
-from euvieouvi.sync.jobs import JOBS, get_image_executor, setting_key, submit_job
+from euvieouvi.sync.jobs import (
+    JOBS,
+    get_image_executor,
+    reconcile_completed_sync_job,
+    setting_key,
+    submit_job,
+)
 from euvieouvi.sync.persistence import MediaPersistenceService
-from euvieouvi.web.formatting import duration_ms, local_datetime
+from euvieouvi.sync.source_identity import apply_server_identity
+from euvieouvi.web.formatting import duration_ms, elapsed_time, local_datetime
 
 blueprint = Blueprint("web", __name__)
 
@@ -104,12 +112,17 @@ def template_helpers() -> dict[str, Any]:
         .where(SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]))
         .order_by(SyncRun.id.desc())
     )
+    language = _settings("ui.language").get("ui.language", "en")
+    if language not in {"en", "pt-BR"}:
+        language = "en"
     return {
         "app_version": version("euvieouvi"),
         "active_sync": active,
         "format_datetime": local_datetime,
         "format_duration": duration_ms,
+        "format_elapsed": elapsed_time,
         "ui_theme": _settings("ui.theme").get("ui.theme", "system"),
+        "ui_language": language,
     }
 
 
@@ -366,19 +379,40 @@ def settings_jellyfin() -> Any:
 
 @blueprint.route("/settings/appearance", methods=["GET", "POST"])
 def settings_appearance() -> Any:
-    theme = _settings("ui.theme").get("ui.theme", "system")
+    overlay_keys = (
+        "catalog.overlay.media_type",
+        "catalog.overlay.plex",
+        "catalog.overlay.jellyfin",
+        "catalog.overlay.played",
+    )
+    appearance = _settings("ui.theme", "ui.language", *overlay_keys)
+    theme = appearance.get("ui.theme", "system")
     if theme not in {"system", "light", "dark"}:
         theme = "system"
     if request.method == "POST":
         selected = request.form.get("theme", "system").strip()
+        language = request.form.get("language", "en").strip()
         if selected not in {"system", "light", "dark"}:
             flash("Selecione uma preferência de tema válida.", "danger")
+        elif language not in {"en", "pt-BR"}:
+            flash("Selecione um idioma válido.", "danger")
         else:
             _save_setting("ui.theme", selected)
+            _save_setting("ui.language", language)
+            for key in overlay_keys:
+                _save_setting(key, "true" if request.form.get(key) == "on" else "false")
             db.session.commit()
             flash("Preferência de aparência atualizada.", "success")
             return redirect(url_for("web.settings_appearance"))
-    return render_template("settings_appearance.html", theme=theme)
+    language = appearance.get("ui.language", "en")
+    if language not in {"en", "pt-BR"}:
+        language = "en"
+    return render_template(
+        "settings_appearance.html",
+        theme=theme,
+        language=language,
+        appearance=appearance,
+    )
 
 
 @blueprint.route("/jobs", methods=["GET", "POST"])
@@ -505,6 +539,8 @@ def job_status_fragment(job_id: str) -> Any:
         .where(JobRun.job_id == job_id)
         .order_by(JobRun.created_at.desc(), JobRun.id.desc())
     )
+    if run is not None:
+        reconcile_completed_sync_job(run)
     return render_template("fragments/job_status.html", job=job, run=run)
 
 
@@ -634,6 +670,9 @@ def settings_plex_test() -> Any:
         return redirect(url_for("web.settings_plex"))
     try:
         info = connector_for(source).test_connection()
+        apply_server_identity(
+            db.session, source, info.server_identifier, now=datetime.now(UTC)
+        )
         source.last_connection_status = "succeeded"
         source.last_connection_test_at = datetime.now(UTC)
         db.session.commit()
@@ -654,6 +693,9 @@ def settings_jellyfin_test() -> Any:
         return redirect(url_for("web.settings_jellyfin"))
     try:
         info = connector_for(source).test_connection()
+        apply_server_identity(
+            db.session, source, info.server_identifier, now=datetime.now(UTC)
+        )
         source.last_connection_status = "succeeded"
         source.last_connection_test_at = datetime.now(UTC)
         db.session.commit()
@@ -1428,7 +1470,9 @@ def jellyfin_webhook(token: str) -> Any:
 @blueprint.get("/libraries")
 def libraries() -> Any:
     sources = db.session.scalars(select(Source).order_by(Source.name)).all()
-    values = db.session.scalars(select(Library).order_by(Library.name, Library.id)).all()
+    values = db.session.scalars(
+        select(Library).where(Library.available.is_(True)).order_by(Library.name, Library.id)
+    ).all()
     return render_template("libraries.html", sources=sources, libraries=values)
 
 
@@ -1616,15 +1660,18 @@ def history() -> Any:
 
 @blueprint.get("/catalog")
 def catalog() -> Any:
+    saved_filters = session.get("catalog.filters", {})
+    if not isinstance(saved_filters, dict):
+        saved_filters = {}
     query = request.args.get("query", "").strip()[:200]
-    kind = request.args.get("kind", "")
-    availability = request.args.get("availability", "all")
-    played = request.args.get("played", "all")
-    library = request.args.get("library", "")
-    genre = request.args.get("genre", "").strip().casefold()
-    decade = request.args.get("decade", "")
-    sort = request.args.get("sort", "title")
-    direction = request.args.get("direction", "asc")
+    kind = request.args.get("kind", str(saved_filters.get("kind", "movie")))
+    availability = request.args.get(
+        "availability", str(saved_filters.get("availability", "all"))
+    )
+    played = request.args.get("played", str(saved_filters.get("played", "all")))
+    genre = request.args.get("genre", str(saved_filters.get("genre", ""))).strip().casefold()
+    sort = request.args.get("sort", str(saved_filters.get("sort", "title")))
+    direction = request.args.get("direction", str(saved_filters.get("direction", "asc")))
     raw_page = request.args.get("page", "1")
     page = max(int(raw_page) if raw_page.isdigit() else 1, 1)
     allowed_kinds = {
@@ -1635,6 +1682,36 @@ def catalog() -> Any:
         MediaKind.ALBUM,
         MediaKind.TRACK,
     }
+    if kind not in {item.value for item in allowed_kinds}:
+        kind = "movie"
+    if availability not in {"all", "available", "unavailable"}:
+        availability = "all"
+    if played not in {"all", "played", "unplayed"}:
+        played = "all"
+    if direction not in {"asc", "desc"}:
+        direction = "asc"
+    allowed_sorts = {
+        "title", "original_title", "year", "last_played", "first_played", "play_count",
+        "added", "updated", "removed", "duration", "rating",
+    }
+    if sort not in allowed_sorts:
+        sort = "title"
+    persisted_kind = (
+        kind if kind in {"movie", "show", "artist"} else saved_filters.get("kind", "movie")
+    )
+    session["catalog.filters"] = {
+        "kind": persisted_kind,
+        "availability": availability,
+        "played": played,
+        "genre": genre,
+        "sort": sort,
+        "direction": direction,
+    }
+    active_kinds = (
+        [MediaKind(kind)]
+        if kind in {item.value for item in allowed_kinds}
+        else [MediaKind.MOVIE, MediaKind.SHOW, MediaKind.ARTIST]
+    )
     available_ref = exists().where(
         SourceMediaRef.media_item_id == MediaItem.id,
         SourceMediaRef.available.is_(True),
@@ -1664,12 +1741,83 @@ def catalog() -> Any:
     state_count = func.coalesce(state_stats.c.state_count, 0)
     completion_count = case((event_count >= state_count, event_count), else_=state_count)
     last_completed = case(
-        (event_stats.c.event_last.is_(None), state_stats.c.state_last),
-        (state_stats.c.state_last.is_(None), event_stats.c.event_last),
-        (event_stats.c.event_last >= state_stats.c.state_last, event_stats.c.event_last),
+        (event_stats.c.event_last.is_not(None), event_stats.c.event_last),
         else_=state_stats.c.state_last,
     )
     completed_known = completion_count > 0
+    activity_item = aliased(MediaItem)
+    activity_parent = aliased(MediaItem)
+    event_activity = (
+        select(
+            func.coalesce(
+                activity_parent.parent_id, activity_item.parent_id, activity_item.id
+            ).label("root_id"),
+            WatchEvent.watched_at.label("played_at"),
+        )
+        .join(activity_item, activity_item.id == WatchEvent.media_item_id)
+        .outerjoin(activity_parent, activity_parent.id == activity_item.parent_id)
+    ).subquery()
+    state_activity = (
+        select(
+            func.coalesce(
+                activity_parent.parent_id, activity_item.parent_id, activity_item.id
+            ).label("root_id"),
+            WatchState.last_watched_at.label("played_at"),
+            WatchState.completed.label("completed"),
+            WatchState.progress_ms.label("progress_ms"),
+        )
+        .join(activity_item, activity_item.id == WatchState.media_item_id)
+        .outerjoin(activity_parent, activity_parent.id == activity_item.parent_id)
+        .where(
+            WatchState.last_watched_at.is_not(None),
+            or_(
+                WatchState.completed.is_(True),
+                WatchState.progress_ms > 0,
+            ),
+        )
+    ).subquery()
+    event_activity_stats = (
+        select(
+            event_activity.c.root_id,
+            func.max(event_activity.c.played_at).label("event_last"),
+        )
+        .group_by(event_activity.c.root_id)
+        .subquery()
+    )
+    state_activity_stats = (
+        select(
+            state_activity.c.root_id,
+            func.max(state_activity.c.played_at).label("state_last"),
+            func.max(
+                case(
+                    (
+                        and_(
+                            state_activity.c.completed.is_(False),
+                            state_activity.c.progress_ms > 0,
+                        ),
+                        state_activity.c.played_at,
+                    ),
+                    else_=None,
+                )
+            ).label("partial_last"),
+        )
+        .group_by(state_activity.c.root_id)
+        .subquery()
+    )
+    last_played = case(
+        (
+            event_activity_stats.c.event_last.is_not(None),
+            case(
+                (state_activity_stats.c.partial_last.is_(None), event_activity_stats.c.event_last),
+                (
+                    event_activity_stats.c.event_last >= state_activity_stats.c.partial_last,
+                    event_activity_stats.c.event_last,
+                ),
+                else_=state_activity_stats.c.partial_last,
+            ),
+        ),
+        else_=state_activity_stats.c.state_last,
+    )
     statement = (
         select(
             MediaItem,
@@ -1678,6 +1826,8 @@ def catalog() -> Any:
         )
         .outerjoin(event_stats, event_stats.c.media_item_id == MediaItem.id)
         .outerjoin(state_stats, state_stats.c.media_item_id == MediaItem.id)
+        .outerjoin(event_activity_stats, event_activity_stats.c.root_id == MediaItem.id)
+        .outerjoin(state_activity_stats, state_activity_stats.c.root_id == MediaItem.id)
     )
     if kind in {item.value for item in allowed_kinds}:
         statement = statement.where(MediaItem.kind == MediaKind(kind))
@@ -1687,13 +1837,6 @@ def catalog() -> Any:
         )
     if query:
         statement = statement.where(MediaItem.title.ilike(f"%{query}%"))
-    if library.isdigit():
-        statement = statement.where(
-            exists().where(
-                SourceMediaRef.media_item_id == MediaItem.id,
-                SourceMediaRef.library_id == int(library),
-            )
-        )
     if genre:
         statement = statement.where(
             exists().where(
@@ -1702,13 +1845,6 @@ def catalog() -> Any:
                 Genre.normalized_name == genre,
             )
         )
-    if decade.isdigit():
-        decade_start = int(decade)
-        if 1800 <= decade_start <= 2200 and decade_start % 10 == 0:
-            statement = statement.where(
-                MediaItem.year >= decade_start,
-                MediaItem.year < decade_start + 10,
-            )
     if availability == "available":
         statement = statement.where(available_ref)
     elif availability == "unavailable":
@@ -1721,7 +1857,7 @@ def catalog() -> Any:
         "title": func.coalesce(MediaItem.sort_title, MediaItem.title),
         "original_title": func.coalesce(MediaItem.original_title, MediaItem.title),
         "year": MediaItem.year,
-        "last_played": last_completed,
+        "last_played": last_played,
         "first_played": event_stats.c.event_first,
         "play_count": completion_count,
         "added": func.coalesce(MediaItem.source_added_at, MediaItem.created_at),
@@ -1815,13 +1951,13 @@ def catalog() -> Any:
     ordered_keys: list[tuple[str, int | None, str]] = []
     for row in rows:
         item = row[0]
-        availability = availability_by_item[item.id]
+        source_availability = availability_by_item[item.id]
         display_row = (
             item,
             row[1],
             row[2],
-            ConnectorType.PLEX in availability,
-            ConnectorType.JELLYFIN in availability,
+            ConnectorType.PLEX in source_availability,
+            ConnectorType.JELLYFIN in source_availability,
         )
         identifier = canonical_identifier_by_item.get(item.id)
         key = (
@@ -1853,12 +1989,28 @@ def catalog() -> Any:
         played=played,
         sort=sort,
         direction=direction,
-        library=library,
         genre=genre,
-        decade=decade,
-        libraries=db.session.scalars(select(Library).order_by(Library.name)).all(),
-        genres=db.session.scalars(select(Genre).order_by(Genre.name)).all(),
+        genres=db.session.scalars(
+            select(Genre)
+            .where(
+                exists().where(
+                    MediaGenre.genre_id == Genre.id,
+                    MediaGenre.media_item_id == MediaItem.id,
+                    MediaItem.kind.in_(active_kinds),
+                )
+            )
+            .order_by(Genre.name)
+        ).all(),
         series_titles=_series_titles([row[0] for row in merged_rows]),
+        catalog_overlays={
+            key.removeprefix("catalog.overlay."): value == "true"
+            for key, value in _settings(
+                "catalog.overlay.media_type",
+                "catalog.overlay.plex",
+                "catalog.overlay.jellyfin",
+                "catalog.overlay.played",
+            ).items()
+        },
     )
     if request.args.get("fragment") == "1":
         return render_template("fragments/catalog_results.html", **template_values)
@@ -2010,10 +2162,7 @@ def media_detail(media_id: int) -> Any:
     }
     for child_id, (state_count, state_last) in child_state_facts.items():
         event_count, event_last = child_completions.get(child_id, (0, None))
-        known_last = max(
-            (value for value in (event_last, state_last) if value is not None),
-            default=None,
-        )
+        known_last = event_last if event_last is not None else state_last
         child_completions[child_id] = (max(event_count, state_count), known_last)
     playable = [
         child for child in children_for_states if child.kind in {MediaKind.EPISODE, MediaKind.TRACK}
@@ -2161,12 +2310,7 @@ def _completion_expressions(media_item_id: Any) -> tuple[Any, Any, Any]:
         .scalar_subquery()
     )
     known_count = case((event_count >= state_count, event_count), else_=state_count)
-    last_known = case(
-        (event_last.is_(None), state_last),
-        (state_last.is_(None), event_last),
-        (event_last >= state_last, event_last),
-        else_=state_last,
-    )
+    last_known = case((event_last.is_not(None), event_last), else_=state_last)
     completed_known = or_(
         exists().where(
             WatchEvent.media_item_id == media_item_id,

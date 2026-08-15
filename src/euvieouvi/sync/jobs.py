@@ -573,11 +573,6 @@ class LocalImageExecutor:
                     summary = (
                         f"{processed} imagens processadas; {updated} baixadas; {failed} falhas."
                     )
-                    _save_runtime_setting("jobs.catalog_images.last_summary", summary)
-                    _save_runtime_setting(
-                        "jobs.catalog_images.last_finished_at", datetime.now(UTC).isoformat()
-                    )
-                    db.session.commit()
                     with self._lock:
                         self._active = False
                         self._snapshot.update(active=False, percent=100, summary=summary)
@@ -585,13 +580,6 @@ class LocalImageExecutor:
         threading.Thread(target=execute, name="euvieouvi-images", daemon=True).start()
         return True
 
-
-def _save_runtime_setting(key: str, value: str) -> None:
-    setting = db.session.get(Setting, key)
-    if setting is None:
-        db.session.add(Setting(key=key, value=value))
-    else:
-        setting.value = value
 
 
 def get_image_executor(app: Flask) -> LocalImageExecutor:
@@ -603,6 +591,42 @@ def get_image_executor(app: Flask) -> LocalImageExecutor:
     return executor
 
 
+def reconcile_completed_sync_job(run: JobRun) -> bool:
+    """Close a sync job whose underlying sync already reached a terminal state."""
+    if run.status not in {SyncStatus.QUEUED, SyncStatus.RUNNING}:
+        return False
+    connector_type = (
+        ConnectorType.PLEX
+        if run.job_id == "sync_plex"
+        else ConnectorType.JELLYFIN
+        if run.job_id == "sync_jellyfin"
+        else None
+    )
+    if connector_type is None:
+        return False
+    completed_sync = db.session.scalar(
+        select(SyncRun)
+        .join(Source, Source.id == SyncRun.source_id)
+        .where(
+            Source.connector_type == connector_type,
+            SyncRun.created_at >= run.created_at,
+            SyncRun.status.not_in([SyncStatus.QUEUED, SyncStatus.RUNNING]),
+        )
+        .order_by(SyncRun.created_at.desc(), SyncRun.id.desc())
+    )
+    if completed_sync is None:
+        return False
+    run.status = completed_sync.status
+    run.finished_at = completed_sync.finished_at or datetime.now(UTC)
+    run.progress_percent = 100
+    run.processed = completed_sync.items_read
+    run.updated = completed_sync.items_inserted + completed_sync.items_updated
+    run.failed = completed_sync.items_failed
+    run.summary = completed_sync.summary
+    db.session.commit()
+    return True
+
+
 def reconcile_interrupted_job_runs() -> int:
     """Close persisted active jobs left behind by a worker crash or restart."""
     runs = db.session.scalars(
@@ -610,35 +634,7 @@ def reconcile_interrupted_job_runs() -> int:
     ).all()
     now = datetime.now(UTC)
     for run in runs:
-        connector_type = (
-            ConnectorType.PLEX
-            if run.job_id == "sync_plex"
-            else ConnectorType.JELLYFIN
-            if run.job_id == "sync_jellyfin"
-            else None
-        )
-        completed_sync = (
-            db.session.scalar(
-                select(SyncRun)
-                .join(Source, Source.id == SyncRun.source_id)
-                .where(
-                    Source.connector_type == connector_type,
-                    SyncRun.created_at >= run.created_at,
-                    SyncRun.status.not_in([SyncStatus.QUEUED, SyncStatus.RUNNING]),
-                )
-                .order_by(SyncRun.created_at.desc(), SyncRun.id.desc())
-            )
-            if connector_type is not None
-            else None
-        )
-        if completed_sync is not None:
-            run.status = completed_sync.status
-            run.finished_at = completed_sync.finished_at or now
-            run.progress_percent = 100
-            run.processed = completed_sync.items_read
-            run.updated = completed_sync.items_inserted + completed_sync.items_updated
-            run.failed = completed_sync.items_failed
-            run.summary = completed_sync.summary
+        if reconcile_completed_sync_job(run):
             continue
         run.status = SyncStatus.INTERRUPTED
         run.finished_at = now

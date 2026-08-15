@@ -12,6 +12,7 @@ from euvieouvi.database.enums import LibraryMediaType
 from euvieouvi.database.models import Library
 from euvieouvi.database.unit_of_work import UnitOfWork
 from euvieouvi.sync.errors import SyncSourceUnavailableError
+from euvieouvi.sync.source_identity import apply_server_identity
 
 
 class LibraryDiscoveryService:
@@ -31,7 +32,7 @@ class LibraryDiscoveryService:
     def discover(self, source_id: int) -> int:
         self._ensure_source_enabled(source_id)
         try:
-            self._connector.test_connection()
+            connection = self._connector.test_connection()
             discovered = self._connector.list_libraries()
         except ConnectorError:
             self._record_connection(source_id, "failed")
@@ -43,6 +44,12 @@ class LibraryDiscoveryService:
             if source is None or not source.enabled:
                 raise SyncSourceUnavailableError("Source changed during discovery.")
             now = self._clock()
+            apply_server_identity(
+                session,
+                source,
+                connection.server_identifier,
+                now=now,
+            )
             seen: set[str] = set()
             for external in discovered:
                 seen.add(external.external_id)

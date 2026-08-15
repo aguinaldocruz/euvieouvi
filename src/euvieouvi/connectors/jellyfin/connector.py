@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 
 from euvieouvi.connectors.dtos import (
@@ -121,10 +122,19 @@ class JellyfinConnector:
             else None,
         )
 
-    def mark_watched(self, external_id: str) -> None:
+    def mark_watched(
+        self, external_id: str, *, watched_at: datetime | None = None
+    ) -> None:
         if not external_id.strip():
             raise ValueError("Jellyfin media id must not be empty")
-        self._client.post_empty(f"/Users/{self._user_id}/PlayedItems/{external_id}")
+        params = None
+        if watched_at is not None:
+            params = {
+                "datePlayed": watched_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+            }
+        self._client.post_empty(
+            f"/Users/{self._user_id}/PlayedItems/{external_id}", params=params
+        )
 
     def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]:
         return self._client.get_image(source_path, width=width, height=height)

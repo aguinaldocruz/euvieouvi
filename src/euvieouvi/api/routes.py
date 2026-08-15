@@ -64,6 +64,7 @@ from euvieouvi.errors import AppError
 from euvieouvi.extensions import db
 from euvieouvi.sync.discovery import LibraryDiscoveryService
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
+from euvieouvi.sync.source_identity import apply_server_identity
 
 blueprint = Blueprint("api_v1", __name__, url_prefix="/api/v1")
 
@@ -166,6 +167,12 @@ def source_connection_test(source_id: int) -> Response:
         raise _connector_error(error) from error
     entity.last_connection_test_at = datetime.now().astimezone()
     entity.last_connection_status = "succeeded"
+    apply_server_identity(
+        db.session,
+        entity,
+        info.server_identifier,
+        now=entity.last_connection_test_at,
+    )
     db.session.commit()
     return jsonify(
         {

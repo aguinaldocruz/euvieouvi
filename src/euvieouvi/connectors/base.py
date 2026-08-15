@@ -1,5 +1,6 @@
 """Database-independent media connector protocol."""
 
+from datetime import datetime
 from typing import Protocol
 
 from euvieouvi.connectors.dtos import (
@@ -36,4 +37,4 @@ class MediaConnector(Protocol):
 
     def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]: ...
 
-    def mark_watched(self, external_id: str) -> None: ...
+    def mark_watched(self, external_id: str, *, watched_at: datetime | None = None) -> None: ...
