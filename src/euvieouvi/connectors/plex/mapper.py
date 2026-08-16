@@ -138,8 +138,8 @@ def map_media_item(item: Mapping[str, Any], library_external_id: str) -> Externa
         show_external_id=_optional_text(item.get("grandparentRatingKey")),
         show_title=_optional_text(item.get("grandparentTitle")),
         season_external_id=_optional_text(item.get("parentRatingKey")),
-        season_number=_integer(item.get("parentIndex")),
-        episode_number=_integer(item.get("index")),
+        season_number=_index(item.get("parentIndex")),
+        episode_number=_index(item.get("index")),
         artist_external_id=artist_external_id,
         artist_title=_optional_text(item.get("grandparentTitle")),
         album_external_id=album_external_id,
@@ -147,8 +147,8 @@ def map_media_item(item: Mapping[str, Any], library_external_id: str) -> Externa
             _optional_text(item.get("parentTitle"))
             or ("Álbum desconhecido" if kind is ExternalMediaKind.TRACK else None)
         ),
-        disc_number=_integer(item.get("parentIndex")) if raw_kind == "track" else None,
-        track_number=_integer(item.get("index")) if raw_kind == "track" else None,
+        disc_number=_index(item.get("parentIndex")) if raw_kind == "track" else None,
+        track_number=_index(item.get("index")) if raw_kind == "track" else None,
         duration_ms=_integer(item.get("duration")),
         originally_available_on=_date(item.get("originallyAvailableAt")),
         summary=_optional_text(item.get("summary")),
@@ -237,6 +237,17 @@ def _integer(value: Any) -> int | None:
     if result < 0:
         raise ConnectorResponseError("Plex response contained a negative integer.")
     return result
+
+
+def _index(value: Any) -> int | None:
+    """Map Plex ordering fields, normalizing negative sentinel values to zero."""
+    if value is None or value == "":
+        return None
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as error:
+        raise ConnectorResponseError("Plex response contained an invalid integer.") from error
+    return max(result, 0)
 
 
 def _number(value: Any) -> float | None:

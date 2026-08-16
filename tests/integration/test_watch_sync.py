@@ -1,6 +1,6 @@
 """Cross-source watched-state propagation tests."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from flask import Flask
@@ -198,6 +198,19 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
             lambda: db.session(), lambda source: RecordingConnector(source, calls)
         ).run(None)
         assert aligned_result.updated == 0
+        assert calls == []
+
+        target_state = (
+            db.session.query(WatchState)
+            .filter_by(media_item_id=movie_id, source_id=target_source_id)
+            .one()
+        )
+        target_state.last_watched_at = NOW + timedelta(days=1)
+        db.session.commit()
+        conflict_result = WatchSyncService(
+            lambda: db.session(), lambda source: RecordingConnector(source, calls)
+        ).run(None, source_type=watched_source)
+        assert conflict_result.updated == 0
         assert calls == []
 
         target_state = (

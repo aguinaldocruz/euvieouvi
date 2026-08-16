@@ -74,7 +74,11 @@ from euvieouvi.sync.jobs import (
     submit_job,
 )
 from euvieouvi.sync.persistence import MediaPersistenceService
-from euvieouvi.sync.source_identity import apply_server_identity
+from euvieouvi.sync.source_identity import (
+    apply_server_identity,
+    reset_library_incremental_state,
+    reset_source_incremental_state,
+)
 from euvieouvi.web.formatting import duration_ms, elapsed_time, local_datetime
 
 blueprint = Blueprint("web", __name__)
@@ -244,14 +248,22 @@ def settings_plex() -> Any:
                 )
             finally:
                 connector.close()
-    selected_user = next(
+    selected_account = next(
         (
-            user.external_id
+            user
             for user in plex_users
             if configured_user.casefold() in {user.external_id.casefold(), user.name.casefold()}
         ),
-        configured_user,
+        None,
     )
+    selected_user = (
+        selected_account.external_id if selected_account is not None else configured_user
+    )
+    if selected_account is not None:
+        stored_name = _settings("plex.user_name").get("plex.user_name", "")
+        if stored_name != selected_account.name:
+            _save_setting("plex.user_name", selected_account.name)
+            db.session.commit()
     errors: dict[str, str] = {}
     if request.method == "POST":
         name = request.form.get("name", "").strip()
@@ -286,11 +298,18 @@ def settings_plex() -> Any:
                 )
                 db.session.add(source)
             else:
+                source_changed = (
+                    source.base_url != normalized_url
+                    or source.enabled != enabled
+                    or bool(secret.strip() and source.secret != secret.strip())
+                )
                 source.name = name
                 source.base_url = normalized_url
                 source.enabled = enabled
                 if secret.strip():
                     source.secret = secret.strip()
+                if source_changed:
+                    reset_source_incremental_state(db.session, source.id)
             if user_id:
                 selected = next((user for user in plex_users if user.external_id == user_id), None)
                 _save_setting("plex.user_id", user_id)
@@ -325,6 +344,24 @@ def settings_jellyfin() -> Any:
                 persisted = {key: str(value) for key, value in raw.items()}
         except (TypeError, ValueError, json.JSONDecodeError):
             persisted = {}
+    jellyfin_users = ()
+    if source is not None and source.last_connection_status == "succeeded":
+        connector = None
+        try:
+            connector = connector_for(source)
+            list_users = getattr(connector, "list_users", None)
+            if callable(list_users):
+                jellyfin_users = list_users()
+        except (ConnectorError, OSError, ValueError):
+            flash(
+                "Não foi possível carregar os usuários do Jellyfin. Teste a conexão novamente.",
+                "warning",
+            )
+        finally:
+            if connector is not None:
+                close = getattr(connector, "close", None)
+                if callable(close):
+                    close()
     if request.method == "POST":
         name = request.form.get("name", "").strip()
         base_url = request.form.get("base_url", "").strip()
@@ -342,6 +379,10 @@ def settings_jellyfin() -> Any:
             errors["api_key"] = "A API key é obrigatória no primeiro cadastro."
         if not user_id and not persisted.get("user_id"):
             errors["user_id"] = "Informe o ID do usuário Jellyfin acompanhado."
+        elif jellyfin_users and user_id not in {
+            user.external_id for user in jellyfin_users
+        }:
+            errors["user_id"] = "Selecione um usuário disponível no servidor Jellyfin."
         if not errors:
             credentials = {
                 "api_key": api_key or persisted.get("api_key", ""),
@@ -357,10 +398,18 @@ def settings_jellyfin() -> Any:
                 )
                 db.session.add(source)
             else:
+                serialized_credentials = json.dumps(credentials)
+                source_changed = (
+                    source.base_url != normalized_url
+                    or source.secret != serialized_credentials
+                    or source.enabled != enabled
+                )
                 source.name = name
                 source.base_url = normalized_url
-                source.secret = json.dumps(credentials)
+                source.secret = serialized_credentials
                 source.enabled = enabled
+                if source_changed:
+                    reset_source_incremental_state(db.session, source.id)
             try:
                 db.session.commit()
             except IntegrityError:
@@ -374,6 +423,7 @@ def settings_jellyfin() -> Any:
         source=source,
         errors=errors,
         persisted=persisted,
+        jellyfin_users=jellyfin_users,
     )
 
 
@@ -829,7 +879,7 @@ def settings_backup() -> Any:
                     ),
                     trakt_plex_user_id,
                 )
-            except ConnectorError:
+            except (ConnectorError, OSError, ValueError):
                 trakt_plex_user_name = trakt_plex_user_id
             finally:
                 connector.close()
@@ -1160,11 +1210,40 @@ def settings_webhooks() -> Any:
             changed = True
     if changed:
         db.session.commit()
+    plex_users = ()
+    plex_source = _source(ConnectorType.PLEX)
+    if plex_source is not None and plex_source.last_connection_status == "succeeded":
+        connector = None
+        try:
+            connector = connector_for(plex_source)
+            if isinstance(connector, PlexConnector):
+                plex_users = connector.list_users()
+        except (ConnectorError, OSError, ValueError):
+            flash("Não foi possível carregar os usuários do Plex.", "warning")
+        finally:
+            if connector is not None:
+                close = getattr(connector, "close", None)
+                if callable(close):
+                    close()
     if request.method == "POST":
         raw_limit = (request.form.get("history_limit") or "20").strip()
         if "plex_user_filter" in request.form:
             plex_user_filter = (request.form.get("plex_user_filter") or "").strip()[:255]
+            if plex_users and plex_user_filter not in {
+                user.external_id for user in plex_users
+            }:
+                flash("Selecione um usuário disponível no servidor Plex.", "danger")
+                return redirect(url_for("web.settings_webhooks"))
             _save_setting("webhook.plex.user_filter", plex_user_filter)
+            if plex_user_filter:
+                selected = next(
+                    (user for user in plex_users if user.external_id == plex_user_filter), None
+                )
+                _save_setting("plex.user_id", plex_user_filter)
+                _save_setting(
+                    "plex.user_name",
+                    selected.name if selected is not None else plex_user_filter,
+                )
             db.session.commit()
             flash("Filtro de usuário Plex atualizado.", "success")
             return redirect(url_for("web.settings_webhooks"))
@@ -1183,6 +1262,7 @@ def settings_webhooks() -> Any:
             "web.jellyfin_webhook", token=tokens["webhook.jellyfin.token"], _external=True
         ),
         plex_user_filter=tokens.get("webhook.plex.user_filter", ""),
+        plex_users=plex_users,
         history_limit=history_limit,
         recent_events=recent_events,
         current_events=current_events,
@@ -1262,10 +1342,23 @@ def plex_webhook(token: str) -> Any:
         if event_type == "media.scrobble":
             return Response("Metadata ausente.", 400)
         return Response(status=204)
+    if _plex_live_tv_metadata(metadata):
+        current_app.logger.info(
+            "Ignoring Plex Live TV webhook event=%s media=%s",
+            event_type,
+            str(metadata.get("ratingKey") or "")[:64],
+        )
+        return Response(status=204)
     external_id = str(metadata.get("ratingKey") or "").strip()
     library_external_id = str(metadata.get("librarySectionID") or "").strip()
     if not external_id:
         return Response("Identidade da mídia ausente.", 400)
+    has_catalog_reference = db.session.scalar(
+        select(SourceMediaRef.id).where(
+            SourceMediaRef.source_id == source.id,
+            SourceMediaRef.external_id == external_id,
+        )
+    ) is not None
     watched_at = _parse_webhook_datetime(payload.get("eventTime")) or datetime.now(UTC)
     title = str(metadata.get("title") or metadata.get("grandparentTitle") or external_id)
     media_kind = metadata.get("type")
@@ -1276,11 +1369,12 @@ def plex_webhook(token: str) -> Any:
     active = event_type in {"media.play", "media.resume"}
     progress_percent = _playback_percent(metadata.get("viewOffset"), metadata.get("duration"))
     plex_view_number: int | None = None
+    user_matches = _plex_webhook_user_matches(raw_account)
     completed = (
         event_type == "media.scrobble"
         or (event_type == "media.stop" and progress_percent is not None and progress_percent >= 90)
-    ) and _plex_webhook_user_matches(raw_account)
-    if event_type == "media.stop" and not completed and _plex_webhook_user_matches(raw_account):
+    ) and user_matches
+    if event_type == "media.stop" and not completed and user_matches and has_catalog_reference:
         try:
             connector = connector_for(source)
             if not isinstance(connector, PlexConnector):
@@ -1301,6 +1395,18 @@ def plex_webhook(token: str) -> Any:
             current_app.logger.exception(
                 "Plex webhook completion could not be verified for media %s", external_id
             )
+    if event_type in {"media.stop", "media.scrobble"}:
+        current_app.logger.info(
+            "Plex terminal webhook event=%s media=%s account_id=%s account_title=%s "
+            "progress=%s user_match=%s completed=%s",
+            event_type,
+            external_id,
+            str(raw_account.get("id") or "")[:64],
+            str(raw_account.get("title") or "")[:128],
+            progress_percent,
+            user_matches,
+            completed,
+        )
     _record_webhook_activity(
         source,
         external_id=external_id,
@@ -1321,7 +1427,7 @@ def plex_webhook(token: str) -> Any:
     if not library_external_id:
         return Response("Biblioteca da mídia ausente.", 400)
     # process even if source.enabled is False
-    _persist_webhook_event(
+    inserted = _persist_webhook_event(
         source,
         external_id=external_id,
         library_external_id=library_external_id,
@@ -1332,6 +1438,9 @@ def plex_webhook(token: str) -> Any:
         view_number=plex_view_number,
     )
     db.session.commit()
+    if not inserted:
+        _queue_source_sync(source.id)
+        return Response(status=204)
     _request_watch_propagation()
     return Response(status=204)
 
@@ -1353,6 +1462,13 @@ def jellyfin_webhook(token: str) -> Any:
     configured_user_matches = _jellyfin_webhook_user_matches(credentials, payload)
     payload_item = payload.get("Item")
     raw_item: dict[str, Any] = payload_item if isinstance(payload_item, dict) else {}
+    if _jellyfin_live_tv_payload(payload, raw_item):
+        current_app.logger.info(
+            "Ignoring Jellyfin Live TV webhook event=%s media=%s",
+            notification_type,
+            str(payload.get("ItemId") or raw_item.get("Id") or "")[:64],
+        )
+        return Response(status=204)
     external_id = str(payload.get("ItemId") or raw_item.get("Id") or "").strip()
     timestamp_value = payload.get("UtcTimestamp")
     watched_at = _parse_webhook_datetime(timestamp_value)
@@ -1514,6 +1630,8 @@ def library_selection(library_id: int) -> Any:
     if enabled and not library.available:
         flash("Uma biblioteca indisponível não pode ser selecionada.", "warning")
     else:
+        if library.enabled != enabled:
+            reset_library_incremental_state(db.session, library.id)
         library.enabled = enabled
         db.session.commit()
         flash("Seleção da biblioteca atualizada.", "success")
@@ -2408,15 +2526,44 @@ def _jellyfin_webhook_user_matches(credentials: dict[str, str], payload: dict[st
     return any(str(value or "").strip().casefold() == configured for value in webhook_users)
 
 
+def _jellyfin_live_tv_payload(payload: dict[str, Any], item: dict[str, Any]) -> bool:
+    if _truthy(_first_present(payload.get("IsLive"), item.get("IsLive"))):
+        return True
+    kinds = {
+        "".join(char for char in str(value or "").casefold() if char.isalnum())
+        for value in (
+            payload.get("ItemType"),
+            payload.get("MediaType"),
+            item.get("Type"),
+            item.get("MediaType"),
+        )
+    }
+    return bool(kinds & {"livetv", "livetvchannel", "livetvprogram", "tvchannel"})
+
+
 def _plex_webhook_user_matches(account: dict[str, Any]) -> bool:
-    configured = (
-        _settings("webhook.plex.user_filter").get("webhook.plex.user_filter", "").strip().casefold()
-    )
+    values = _settings("webhook.plex.user_filter", "plex.user_id", "plex.user_name")
+    configured = {
+        str(values.get(key) or "").strip().casefold()
+        for key in ("webhook.plex.user_filter", "plex.user_id", "plex.user_name")
+        if str(values.get(key) or "").strip()
+    }
     if not configured:
         return True
-    return any(
-        str(account.get(key) or "").strip().casefold() == configured for key in ("id", "title")
-    )
+    incoming = {
+        str(account.get(key) or "").strip().casefold()
+        for key in ("id", "title")
+        if str(account.get(key) or "").strip()
+    }
+    return bool(configured & incoming)
+
+
+def _plex_live_tv_metadata(metadata: dict[str, Any]) -> bool:
+    live = str(metadata.get("live") or "").strip().casefold()
+    if live in {"1", "true", "yes"}:
+        return True
+    section_type = str(metadata.get("librarySectionType") or "").strip().casefold()
+    return section_type in {"live", "livetv", "live-tv"}
 
 
 def _persist_webhook_event(
@@ -2517,7 +2664,7 @@ def _record_webhook_activity(
         return
     for row in same_user if active else matching:
         row.active = False
-    if not active and not completed:
+    if not active and not completed and event_type not in {"media.stop", "media.scrobble"}:
         return
     db.session.add(
         WebhookEvent(

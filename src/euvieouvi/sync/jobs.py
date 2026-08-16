@@ -22,6 +22,7 @@ from euvieouvi.database.models import (
     Setting,
     Source,
     SourceMediaRef,
+    SyncError,
     SyncRun,
     SyncRunLibrary,
 )
@@ -290,6 +291,24 @@ def _monitor_job(app: Flask, job_run_id: int, job_id: str, reference: int | str)
                 _write_log(app, run.log_filename or "", line)
                 last_line = line
             if not active:
+                if isinstance(reference, int):
+                    errors = db.session.scalars(
+                        select(SyncError)
+                        .where(SyncError.sync_run_id == reference)
+                        .order_by(SyncError.id)
+                        .limit(100)
+                    ).all()
+                    for error in errors:
+                        external = (
+                            f" · mídia={error.media_external_id}"
+                            if error.media_external_id
+                            else ""
+                        )
+                        _write_log(
+                            app,
+                            run.log_filename or "",
+                            f"ERRO [{error.category}]{external} · {error.message}",
+                        )
                 _rotate_job_runs(app, job_id)
                 return
             time.sleep(1)

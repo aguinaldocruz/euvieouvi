@@ -76,6 +76,23 @@ def apply_server_identity(
     return True
 
 
+def reset_source_incremental_state(session: Session, source_id: int) -> int:
+    """Force every library of a source to establish a new full baseline."""
+    library_ids = select(Library.id).where(Library.source_id == source_id)
+    result = session.execute(
+        delete(SyncCheckpoint).where(SyncCheckpoint.library_id.in_(library_ids))
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+def reset_library_incremental_state(session: Session, library_id: int) -> int:
+    """Force one library to establish a new full baseline when reselected."""
+    result = session.execute(
+        delete(SyncCheckpoint).where(SyncCheckpoint.library_id == library_id)
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 def _retired_identity(kind: str, row_id: int, external_id: str) -> str:
     digest = hashlib.sha256(external_id.encode()).hexdigest()[:16]
     return f"retired:{kind}:{row_id}:{digest}"

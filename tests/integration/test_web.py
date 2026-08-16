@@ -46,6 +46,7 @@ from euvieouvi.database.models import (
     Setting,
     Source,
     SourceMediaRef,
+    SyncCheckpoint,
     SyncError,
     SyncRun,
     SyncRunLibrary,
@@ -614,6 +615,9 @@ def test_connection_discovery_selection_htmx_and_fallback(
     assert response.status_code == 200 and f'id="library-{library_id}"' in response.get_data(
         as_text=True
     )
+    with app.app_context():
+        db.session.add(SyncCheckpoint(library_id=library_id, strategy="incremental_v2"))
+        db.session.commit()
     token = csrf(client, "/libraries")
     assert (
         client.post(
@@ -621,6 +625,56 @@ def test_connection_discovery_selection_htmx_and_fallback(
         ).status_code
         == 302
     )
+    with app.app_context():
+        assert db.session.scalar(
+            db.select(SyncCheckpoint).where(SyncCheckpoint.library_id == library_id)
+        ) is None
+
+
+def test_source_configuration_change_resets_all_incremental_checkpoints(app: Flask) -> None:
+    with app.app_context():
+        source = Source(
+            connector_type=ConnectorType.JELLYFIN,
+            name="Jellyfin",
+            base_url="http://old-jellyfin",
+            secret='{"api_key": "old", "user_id": "user"}',
+            enabled=True,
+        )
+        db.session.add(source)
+        db.session.flush()
+        library = Library(
+            source_id=source.id,
+            external_id="movies",
+            name="Movies",
+            media_type=LibraryMediaType.MOVIE,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
+        )
+        db.session.add(library)
+        db.session.flush()
+        db.session.add(SyncCheckpoint(library_id=library.id, strategy="incremental_v2"))
+        db.session.commit()
+        library_id = library.id
+
+    client = app.test_client()
+    token = csrf(client, "/settings/jellyfin")
+    response = client.post(
+        "/settings/jellyfin",
+        data={
+            "csrf_token": token,
+            "name": "Jellyfin",
+            "base_url": "http://new-jellyfin",
+            "api_key": "new",
+            "user_id": "user",
+        },
+    )
+    assert response.status_code == 302
+    with app.app_context():
+        assert db.session.scalar(
+            db.select(SyncCheckpoint).where(SyncCheckpoint.library_id == library_id)
+        ) is None
 
 
 @pytest.mark.parametrize("connector_type", [ConnectorType.PLEX, ConnectorType.JELLYFIN])
@@ -1447,6 +1501,50 @@ def test_plex_stop_verifies_authoritative_watch_state_when_progress_is_stale(
         assert state.completed is True and state.view_count == 4
 
 
+def test_plex_webhook_ignores_live_tv_before_activity_or_metadata_lookup(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with app.app_context():
+        seed_web()
+        db.session.add_all(
+            [
+                Setting(key="webhook.plex.token", value="plex-secret"),
+                Setting(key="plex.user_id", value="plex-user"),
+            ]
+        )
+        db.session.commit()
+
+    monkeypatch.setattr(
+        "euvieouvi.web.routes.connector_for",
+        lambda source: pytest.fail("transient media must not trigger a Plex metadata lookup"),
+    )
+    response = app.test_client().post(
+        "/webhooks/plex/plex-secret",
+        data={
+            "payload": json.dumps(
+                {
+                    "event": "media.stop",
+                    "Account": {"id": "plex-user"},
+                    "Metadata": {
+                        "ratingKey": "transient-live-tv",
+                        "librarySectionID": "2",
+                        "title": "Live TV",
+                        "live": "1",
+                        "parentIndex": -1,
+                    },
+                }
+            )
+        },
+    )
+
+    assert response.status_code == 204
+    with app.app_context():
+        terminal = db.session.query(WebhookEvent).filter_by(
+            external_id="transient-live-tv"
+        ).one_or_none()
+        assert terminal is None
+
+
 def test_webhook_settings_generate_secret_urls(app: Flask) -> None:
     response = app.test_client().get("/settings/webhooks")
     assert response.status_code == 200
@@ -1621,6 +1719,45 @@ def test_plex_activity_shows_all_users_but_completion_uses_filter(app: Flask) ->
         assert completed.playback_user == "alice"
 
 
+def test_plex_completion_matches_saved_user_name_when_account_id_is_absent(app: Flask) -> None:
+    with app.app_context():
+        seed_web()
+        db.session.add_all(
+            [
+                Setting(key="webhook.plex.token", value="plex-secret"),
+                Setting(key="webhook.plex.user_filter", value="1"),
+                Setting(key="plex.user_id", value="1"),
+                Setting(key="plex.user_name", value="aguinaldocruz"),
+            ]
+        )
+        db.session.commit()
+        original_watch_count = db.session.query(WatchEvent).count()
+
+    response = app.test_client().post(
+        "/webhooks/plex/plex-secret",
+        data={
+            "payload": json.dumps(
+                {
+                    "event": "media.scrobble",
+                    "Account": {"title": "aguinaldocruz"},
+                    "Metadata": {
+                        "ratingKey": "m1",
+                        "librarySectionID": "1",
+                        "title": "Matched by name",
+                        "type": "movie",
+                    },
+                }
+            )
+        },
+    )
+
+    assert response.status_code == 204
+    with app.app_context():
+        assert db.session.query(WatchEvent).count() == original_watch_count + 1
+        completed = db.session.query(WebhookEvent).filter_by(completed=True).one()
+        assert completed.playback_user == "aguinaldocruz"
+
+
 def test_jellyfin_progress_creates_and_updates_current_activity(app: Flask) -> None:
     with app.app_context():
         jellyfin = Source(
@@ -1673,6 +1810,36 @@ def test_jellyfin_progress_creates_and_updates_current_activity(app: Flask) -> N
         assert db.session.query(WebhookEvent).filter_by(active=True).count() == 1
 
 
+def test_jellyfin_webhook_ignores_live_tv_before_activity(app: Flask) -> None:
+    with app.app_context():
+        jellyfin = Source(
+            connector_type=ConnectorType.JELLYFIN,
+            name="Jellyfin",
+            base_url="http://jellyfin",
+            secret=json.dumps({"api_key": "key", "user_id": "user-1"}),
+            enabled=True,
+        )
+        db.session.add_all([jellyfin, Setting(key="webhook.jellyfin.token", value="jf-secret")])
+        db.session.commit()
+
+    response = app.test_client().post(
+        "/webhooks/jellyfin/jf-secret",
+        json={
+            "NotificationType": "PlaybackStop",
+            "PlayedToCompletion": True,
+            "ItemId": "live-channel-1",
+            "ItemType": "LiveTvProgram",
+            "IsLive": True,
+            "UserId": "user-1",
+        },
+    )
+
+    assert response.status_code == 204
+    with app.app_context():
+        assert db.session.query(WebhookEvent).filter_by(
+            external_id="live-channel-1"
+        ).one_or_none() is None
+        assert db.session.query(WatchEvent).filter_by(origin="webhook").count() == 0
 def test_webhook_page_deactivates_activity_older_than_one_hour(app: Flask) -> None:
     with app.app_context():
         source_id, _, _, _ = seed_web()

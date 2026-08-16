@@ -20,16 +20,17 @@ from euvieouvi.connectors.dtos import (
     PageRequest,
 )
 from euvieouvi.connectors.errors import ConnectorError
-from euvieouvi.database.enums import LibraryMediaType, SyncStatus, SyncTrigger
+from euvieouvi.database.enums import LibraryMediaType, MediaKind, SyncStatus, SyncTrigger
 from euvieouvi.database.models import Library, SyncCheckpoint, SyncError, SyncRun, SyncRunLibrary
 from euvieouvi.database.unit_of_work import UnitOfWork
 from euvieouvi.sync.cancellation import CancellationToken
+from euvieouvi.sync.catalog_reconcile import reconcile_matching_items
 from euvieouvi.sync.errors import (
     SyncAlreadyRunningError,
     SyncCancelledError,
     SyncSourceUnavailableError,
 )
-from euvieouvi.sync.persistence import ItemClassification, MediaPersistenceService
+from euvieouvi.sync.persistence import ItemClassification, MediaPersistenceService, PersistResult
 
 SessionFactory = Callable[[], Session]
 _FULL_SCAN_INTERVAL = timedelta(days=7)
@@ -327,16 +328,22 @@ class SyncOrchestrator:
             for item in items:
                 run.items_read += 1
                 detail.items_read += 1
-                try:
-                    with session.begin_nested():
-                        result = service.persist_media(item, self._clock())
-                        session.flush()
-                except Exception:
+                result, repaired, error = self._persist_media_with_repair(
+                    session, service, item
+                )
+                if result is None:
+                    assert error is not None
                     failures += 1
                     run.items_failed += 1
                     detail.items_failed += 1
-                    self._add_item_error(work, run_id, library_id, item.external_id)
+                    self._add_item_error(
+                        work, run_id, library_id, item.external_id, error
+                    )
                     continue
+                if repaired:
+                    self._add_auto_reconciliation(
+                        work, run_id, library_id, item.external_id, repaired
+                    )
                 if result.classification is ItemClassification.INSERTED:
                     run.items_inserted += 1
                     detail.items_inserted += 1
@@ -352,13 +359,10 @@ class SyncOrchestrator:
             detail.items_scanned = items_scanned
             detail.items_total = items_total
             run.heartbeat_at = self._clock()
-            if failures == 0:
-                self._set_checkpoint(work, library_id, run_id, next_stage, next_start)
+            self._set_checkpoint(work, library_id, run_id, next_stage, next_start)
             session.commit()
         finally:
             session.close()
-        if failures:
-            raise _PagePersistenceError("A media page contained invalid items.")
 
     def _persist_history_page(
         self,
@@ -381,27 +385,66 @@ class SyncOrchestrator:
                     with session.begin_nested():
                         inserted = service.persist_event(event)
                         session.flush()
-                except Exception:
+                except Exception as error:
                     failures += 1
                     run.items_failed += 1
-                    self._add_item_error(work, run_id, library_id, None)
+                    self._add_item_error(work, run_id, library_id, None, error)
                     continue
                 if inserted:
                     run.events_inserted += 1
             run.heartbeat_at = self._clock()
-            if failures == 0:
-                self._set_checkpoint(
-                    work,
-                    library_id,
-                    run_id,
-                    "complete" if complete else "history",
-                    next_start,
-                )
+            self._set_checkpoint(
+                work,
+                library_id,
+                run_id,
+                "complete" if complete else "history",
+                next_start,
+            )
             session.commit()
         finally:
             session.close()
-        if failures:
-            raise _PagePersistenceError("A history page contained invalid events.")
+
+    def _persist_media_with_repair(
+        self,
+        session: Session,
+        service: MediaPersistenceService,
+        item: ExternalMediaItem,
+    ) -> tuple[PersistResult | None, int, Exception | None]:
+        try:
+            with session.begin_nested():
+                result = service.persist_media(item, self._clock())
+                session.flush()
+            return result, 0, None
+        except Exception as original_error:
+            repaired = 0
+            try:
+                with session.begin_nested():
+                    repaired += reconcile_matching_items(
+                        session,
+                        MediaKind(item.kind.value),
+                        tuple((value.provider, value.external_id) for value in item.identifiers),
+                    )
+                    if item.kind is ExternalMediaKind.EPISODE:
+                        repaired += reconcile_matching_items(
+                            session,
+                            MediaKind.SHOW,
+                            tuple(
+                                (value.provider, value.external_id)
+                                for value in item.show_identifiers
+                            ),
+                        )
+                    session.flush()
+            except Exception:
+                repaired = 0
+            if not repaired:
+                return None, 0, original_error
+            try:
+                with session.begin_nested():
+                    result = service.persist_media(item, self._clock())
+                    session.flush()
+                return result, repaired, None
+            except Exception as retry_error:
+                return None, repaired, retry_error
 
     def _set_checkpoint(
         self,
@@ -566,7 +609,7 @@ class SyncOrchestrator:
                 SyncError(
                     sync_run_id=run_id,
                     category=type(error).__name__,
-                    message="Synchronization dependency failed.",
+                    message=_safe_error_message(error),
                     retryable=isinstance(error, ConnectorError),
                 )
             )
@@ -590,6 +633,7 @@ class SyncOrchestrator:
         run_id: int,
         library_id: int,
         external_id: str | None,
+        error: Exception,
     ) -> None:
         work.sync_errors.add(
             SyncError(
@@ -597,7 +641,26 @@ class SyncOrchestrator:
                 library_id=library_id,
                 media_external_id=external_id,
                 category="item_persistence",
-                message="Item could not be persisted.",
+                message=_safe_error_message(error),
+                retryable=False,
+            )
+        )
+
+    @staticmethod
+    def _add_auto_reconciliation(
+        work: UnitOfWork,
+        run_id: int,
+        library_id: int,
+        external_id: str,
+        merged: int,
+    ) -> None:
+        work.sync_errors.add(
+            SyncError(
+                sync_run_id=run_id,
+                library_id=library_id,
+                media_external_id=external_id,
+                category="catalog_auto_reconciled",
+                message=f"Catalog repaired automatically before retry; {merged} item(s) merged.",
                 retryable=False,
             )
         )
@@ -616,6 +679,11 @@ class SyncOrchestrator:
                 retryable=False,
             )
         )
+
+
+def _safe_error_message(error: Exception) -> str:
+    detail = " ".join(str(error).split()).strip()
+    return f"{type(error).__name__}: {detail or 'No detail was provided.'}"[:1000]
 
 
 def _resume_position(checkpoint: SyncCheckpoint | None) -> tuple[str, int]:

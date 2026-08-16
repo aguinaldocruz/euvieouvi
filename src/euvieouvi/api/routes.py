@@ -64,7 +64,11 @@ from euvieouvi.errors import AppError
 from euvieouvi.extensions import db
 from euvieouvi.sync.discovery import LibraryDiscoveryService
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
-from euvieouvi.sync.source_identity import apply_server_identity
+from euvieouvi.sync.source_identity import (
+    apply_server_identity,
+    reset_library_incremental_state,
+    reset_source_incremental_state,
+)
 
 blueprint = Blueprint("api_v1", __name__, url_prefix="/api/v1")
 
@@ -134,18 +138,27 @@ def sources_patch(source_id: int) -> Response:
     data = json_object(request, allowed={"name", "base_url", "secret", "enabled"})
     if not data:
         raise validation_error("body", "empty", "At least one field is required.")
+    reset_incremental = False
     if "name" in data:
         entity.name = string(data["name"], "name", maximum=255)
     if "base_url" in data:
-        entity.base_url = http_url(data["base_url"])
+        base_url = http_url(data["base_url"])
+        reset_incremental = reset_incremental or entity.base_url != base_url
+        entity.base_url = base_url
         entity.last_connection_status = None
     if "secret" in data:
         if data["secret"] is None:
             raise validation_error("secret", "null_not_allowed", "Secret cannot be null.")
-        entity.secret = string(data["secret"], "secret", maximum=4096)
+        secret = string(data["secret"], "secret", maximum=4096)
+        reset_incremental = reset_incremental or entity.secret != secret
+        entity.secret = secret
         entity.last_connection_status = None
     if "enabled" in data:
-        entity.enabled = boolean(data["enabled"], "enabled")
+        enabled = boolean(data["enabled"], "enabled")
+        reset_incremental = reset_incremental or entity.enabled != enabled
+        entity.enabled = enabled
+    if reset_incremental:
+        reset_source_incremental_state(db.session, entity.id)
     try:
         db.session.commit()
     except IntegrityError as error:
@@ -254,6 +267,8 @@ def libraries_patch(library_id: int) -> Response:
     enabled = boolean(data["enabled"], "enabled")
     if enabled and not entity.available:
         raise AppError("library_unavailable", "An unavailable library cannot be enabled.", 409)
+    if entity.enabled != enabled:
+        reset_library_incremental_state(db.session, entity.id)
     entity.enabled = enabled
     db.session.commit()
     return jsonify(library(entity))

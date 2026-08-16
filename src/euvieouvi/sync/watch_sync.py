@@ -281,14 +281,10 @@ class WatchSyncService:
                     target_source_id = next(iter(source_ids - {requested_source}))
                     source_watched_at = watched_by_source[requested_source]
                     target_watched_at = watched_by_source[target_source_id]
-                    if source_watched_at is None or (
-                        source_type is ConnectorType.JELLYFIN
-                        and target_watched_at is not None
-                        and target_watched_at >= source_watched_at
-                    ) or (
-                        source_type is ConnectorType.PLEX
-                        and target_watched_at == source_watched_at
-                    ):
+                    # Propagation only fills a missing completion. If both sides
+                    # are watched, Plex remains authoritative and neither server
+                    # is re-scrobbled merely to reconcile timestamps.
+                    if source_watched_at is None or target_watched_at is not None:
                         skipped += 1
                         continue
                 else:
@@ -296,16 +292,13 @@ class WatchSyncService:
                     jellyfin_source_id = by_type[ConnectorType.JELLYFIN].id
                     plex_watched_at = watched_by_source[plex_source_id]
                     jellyfin_watched_at = watched_by_source[jellyfin_source_id]
-                    if plex_watched_at is not None:
-                        if plex_watched_at == jellyfin_watched_at:
-                            skipped += 1
-                            continue
+                    if plex_watched_at is not None and jellyfin_watched_at is None:
                         target_source_id = jellyfin_source_id
                         source_watched_at = plex_watched_at
-                    else:
+                    elif plex_watched_at is None and jellyfin_watched_at is not None:
                         target_source_id = plex_source_id
                         source_watched_at = jellyfin_watched_at
-                    if source_watched_at is None:
+                    else:
                         skipped += 1
                         continue
                 target_ref = grouped_refs[target_source_id][0]

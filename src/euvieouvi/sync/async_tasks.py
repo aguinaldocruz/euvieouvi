@@ -221,12 +221,9 @@ class AsyncTaskExecutor:
                 if target_watched_at.tzinfo is None
                 else target_watched_at.astimezone(UTC)
             )
-        should_apply = (
-            target_watched_at != watched_at
-            if origin.connector_type.value == "plex"
-            else target_watched_at is None or watched_at > target_watched_at
-        )
-        if not should_apply:
+        # Instant propagation fills only an unwatched target. When both sources
+        # have a completion, Plex wins without rewriting either play timestamp.
+        if state is not None and state.completed:
             return
         if state is None or not state.completed or target_watched_at != watched_at:
             connector = connector_for(source)

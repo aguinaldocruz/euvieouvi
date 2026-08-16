@@ -105,6 +105,28 @@ def test_mark_watched_posts_played_item_for_configured_user() -> None:
     connector.mark_watched("movie-1")
 
 
+def test_list_users_returns_selectable_jellyfin_users() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/Users")
+        return httpx.Response(
+            200,
+            json=[
+                {"Id": "BBBB-BBBB", "Name": "Zoe"},
+                {"Id": "AAAA-AAAA", "Name": "Alice"},
+                {"Id": "missing-name"},
+            ],
+            request=request,
+        )
+
+    users = JellyfinConnector(
+        make_client(httpx.MockTransport(handler)), "user-1"
+    ).list_users()
+    assert [(user.external_id, user.name) for user in users] == [
+        ("aaaaaaaa", "Alice"),
+        ("bbbbbbbb", "Zoe"),
+    ]
+
+
 def test_mark_watched_preserves_original_played_date() -> None:
     watched_at = datetime(2026, 8, 5, 21, tzinfo=UTC)
 

@@ -605,7 +605,7 @@ class MediaPersistenceService:
                 self._merge_genres(media.id, genres)
             self._sync_identifier_values(media.id, identifiers)
             return media
-        historical = self._match_container_by_identifiers(kind, identifiers)
+        historical = self._match_container_by_identifiers(kind, title, identifiers)
         historical = historical or self._match_historical_container(
             kind=kind,
             title=title,
@@ -646,10 +646,20 @@ class MediaPersistenceService:
         return media
 
     def _match_container_by_identifiers(
-        self, kind: MediaKind, identifiers: tuple[ExternalIdentifier, ...]
+        self,
+        kind: MediaKind,
+        title: str,
+        identifiers: tuple[ExternalIdentifier, ...],
     ) -> MediaItem | None:
         identities = tuple((value.provider, value.external_id) for value in identifiers)
         matches = self.work.media_identifiers.media_ids_for_kind(kind.value, identities)
+        if len(matches) > 1:
+            normalized_title = _normalized_title(title)
+            matches = {
+                media_id
+                for media_id in matches
+                if _normalized_title(self._required_media(media_id).title) == normalized_title
+            }
         if len(matches) > 1:
             raise ValueError("Container identifiers match more than one media item.")
         return self._required_media(next(iter(matches))) if matches else None

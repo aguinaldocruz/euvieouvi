@@ -52,7 +52,7 @@
     <h2 class="h4">Erros seguros</h2>
     <ul class="list-group">
       {% for error in errors %}
-        <li class="list-group-item"><strong>{{ error.category }}</strong> — {{ error.message }}<br><span class="small text-secondary">{{ format_datetime(error.occurred_at) }}</span></li>
+        <li class="list-group-item"><strong>{{ error.category }}</strong>{% if error.media_external_id %} · mídia {{ error.media_external_id }}{% endif %} — {{ error.message }}<br><span class="small text-secondary">{{ format_datetime(error.occurred_at) }}</span></li>
       {% endfor %}
     </ul>
   {% endif %}

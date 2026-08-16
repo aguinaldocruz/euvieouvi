@@ -58,6 +58,28 @@ def test_orphan_track_uses_stable_fallback_labels_and_album_identity() -> None:
     assert track.album_title == "Álbum desconhecido"
 
 
+def test_negative_optional_episode_indices_are_treated_as_unassigned() -> None:
+    episode = map_media_item(
+        {
+            "ratingKey": "283983",
+            "type": "episode",
+            "title": "Plex special",
+            "grandparentRatingKey": "show-1",
+            "grandparentTitle": "Example show",
+            "parentRatingKey": "season-specials",
+            "parentIndex": "-1",
+            "index": "-1",
+            "viewCount": "1",
+            "lastViewedAt": "1786894859",
+        },
+        "2",
+    )
+
+    assert episode.season_number == 0
+    assert episode.episode_number == 0
+    assert episode.view_count == 1
+
+
 def test_track_without_album_identity_uses_library_scoped_synthetic_identity() -> None:
     track = map_media_item(
         {

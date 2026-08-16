@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, tuple_
 from sqlalchemy.orm import Session
 
 from euvieouvi.database.enums import ConnectorType, MediaKind
-from euvieouvi.database.models import MediaItem, Source, SourceMediaRef
+from euvieouvi.database.models import MediaIdentifier, MediaItem, Source, SourceMediaRef
 
 _STABLE_PROVIDERS = ("tmdb", "tvdb", "imdb", "musicbrainz")
 _KINDS = (MediaKind.SHOW, MediaKind.MOVIE, MediaKind.ARTIST, MediaKind.ALBUM, MediaKind.TRACK)
@@ -84,6 +84,43 @@ def merge_confirmed_items(session: Session, media_ids: tuple[int, ...]) -> int:
         _merge_item(session, canonical, duplicate)
         merged += 1
     session.commit()
+    return merged
+
+
+def reconcile_matching_items(
+    session: Session,
+    kind: MediaKind,
+    identifiers: tuple[tuple[str, str], ...],
+) -> int:
+    """Atomically merge one safe duplicate group implicated by incoming media."""
+    stable = tuple(
+        (provider, external_id)
+        for provider, external_id in identifiers
+        if provider in _STABLE_PROVIDERS and external_id
+    )
+    if not stable:
+        return 0
+    ids = set(
+        session.scalars(
+            select(MediaIdentifier.media_item_id)
+            .join(MediaItem, MediaItem.id == MediaIdentifier.media_item_id)
+            .where(
+                MediaItem.kind == kind,
+                tuple_(MediaIdentifier.provider, MediaIdentifier.external_id).in_(stable),
+            )
+        )
+    )
+    items = [item for item in (session.get(MediaItem, value) for value in ids) if item]
+    if len(items) < 2 or not _safe_sources(session, items):
+        return 0
+    canonical = _canonical(session, items)
+    merged = 0
+    for duplicate in items:
+        if duplicate.id == canonical.id:
+            continue
+        merged += _merge_hierarchy(session, canonical, duplicate)
+        _merge_item(session, canonical, duplicate)
+        merged += 1
     return merged
 
 

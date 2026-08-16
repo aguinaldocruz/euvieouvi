@@ -944,7 +944,7 @@ def test_full_success_marks_missing_refs_unavailable_but_failure_does_not(app: F
         assert stored_ref.unavailable_since is None
 
 
-def test_item_savepoint_preserves_valid_item_and_blocks_checkpoint(app: Flask) -> None:
+def test_noncritical_item_failure_is_logged_and_checkpoint_advances(app: Flask) -> None:
     with app.app_context():
         source_id, library_ids = seed_source(second_library=True)
         conflict = movie("shared")
@@ -966,7 +966,7 @@ def test_item_savepoint_preserves_valid_item_and_blocks_checkpoint(app: Flask) -
 
         result = orchestrator(connector).run(source_id)
 
-        assert result.status is SyncStatus.FAILED
+        assert result.status is SyncStatus.SUCCEEDED
         errors = db.session.scalars(
             select(SyncError).where(
                 SyncError.sync_run_id == result.run_id,
@@ -979,7 +979,9 @@ def test_item_savepoint_preserves_valid_item_and_blocks_checkpoint(app: Flask) -
         )
         assert checkpoint is not None
         assert checkpoint.cursor is None
-        assert checkpoint.last_successful_run_id == first_run.run_id
+        assert checkpoint.last_successful_run_id == result.run_id
+        run = db.session.get(SyncRun, result.run_id)
+        assert run is not None and run.items_failed == 1
 
 
 def test_snapshot_does_not_change_when_selection_changes_mid_run(app: Flask) -> None:

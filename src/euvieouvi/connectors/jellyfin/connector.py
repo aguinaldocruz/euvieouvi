@@ -13,6 +13,7 @@ from euvieouvi.connectors.dtos import (
     ExternalLibraryRef,
     ExternalMediaItem,
     ExternalMediaKind,
+    ExternalUser,
     ExternalWatchEvent,
     HistoryCheckpoint,
     Page,
@@ -74,6 +75,20 @@ class JellyfinConnector:
         if not isinstance(raw, dict) or not isinstance(raw.get("Items"), list):
             raise ConnectorResponseError("Jellyfin library response was invalid.")
         return map_libraries(raw["Items"])
+
+    def list_users(self) -> tuple[ExternalUser, ...]:
+        raw = self._client.get_json("/Users")
+        if not isinstance(raw, list):
+            raise ConnectorResponseError("Jellyfin user response was invalid.")
+        users: list[ExternalUser] = []
+        for value in raw:
+            if not isinstance(value, dict):
+                continue
+            external_id = str(value.get("Id") or "").strip().replace("-", "").lower()
+            name = str(value.get("Name") or "").strip()
+            if external_id and name:
+                users.append(ExternalUser(external_id, name))
+        return tuple(sorted(users, key=lambda user: user.name.casefold()))
 
     def get_media_page(
         self,
