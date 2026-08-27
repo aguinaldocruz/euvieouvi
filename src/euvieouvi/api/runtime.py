@@ -227,11 +227,14 @@ class LocalSyncExecutor:
                 "failed": 0,
                 "percent": 1,
                 "summary": "Analisando o catálogo e calculando apenas as diferenças.",
+                "failure_details": "",
             }
 
         def execute() -> None:
+            failure_details: list[str] = []
             try:
                 with self._app.app_context():
+
                     def report(scanned: int, updated: int, skipped: int, failed: int) -> None:
                         processed = min(scanned, updated + skipped + failed)
                         percent = 100 if scanned == 0 else processed * 100 // scanned
@@ -247,11 +250,17 @@ class LocalSyncExecutor:
                                 ),
                             )
 
+                    def report_failure(detail: str) -> None:
+                        failure_details.append(detail)
+                        with self._lock:
+                            self._watch_snapshot["failure_details"] = "\n".join(failure_details)
+
                     result = WatchSyncService(
-                        lambda: db.session(), self._factory, progress=report
-                    ).run(
-                        None, source_type=source_type
-                    )
+                        lambda: db.session(),
+                        self._factory,
+                        progress=report,
+                        failure=report_failure,
+                    ).run(None, source_type=source_type)
                     with self._lock:
                         self._watch_snapshot.update(
                             processed=result.scanned,
@@ -263,10 +272,16 @@ class LocalSyncExecutor:
                                 f"{result.failed} falhas."
                             ),
                         )
-            except Exception:
+            except Exception as error:
                 self._app.logger.exception("directional watched-state propagation failed")
                 with self._lock:
-                    self._watch_snapshot.update(summary="Propagação falhou.", failed=1)
+                    detail = f"operação=propagar assistido · erro={type(error).__name__}: {error}"
+                    failure_details.append(detail)
+                    self._watch_snapshot.update(
+                        summary=f"Propagação falhou: {type(error).__name__}: {error}",
+                        failed=1,
+                        failure_details="\n".join(failure_details),
+                    )
             finally:
                 with self._lock:
                     self._watch_sync_running = False

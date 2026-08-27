@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,6 +27,8 @@ from euvieouvi.database.models import (
 ConnectorFactory = Callable[[Source], MediaConnector]
 SessionFactory = Callable[[], Session]
 ProgressCallback = Callable[[int, int, int, int], None]
+FailureCallback = Callable[[str], None]
+logger = logging.getLogger(__name__)
 _SYNCABLE_KINDS = {MediaKind.MOVIE, MediaKind.EPISODE, MediaKind.TRACK}
 _PERSIST_BATCH_SIZE = 100
 
@@ -99,11 +102,13 @@ class WatchSyncService:
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         progress: ProgressCallback | None = None,
+        failure: FailureCallback | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._connector_factory = connector_factory
         self._clock = clock
         self._progress = progress
+        self._failure = failure
 
     def run(
         self,
@@ -128,8 +133,12 @@ class WatchSyncService:
                     connector.mark_watched(
                         candidate.target_external_id, watched_at=candidate.watched_at
                     )
-                except Exception:
+                except Exception as error:
                     failed += 1
+                    detail = self._failure_detail(candidate, error)
+                    logger.warning("Watched-state item failed: %s", detail, exc_info=True)
+                    if self._failure is not None:
+                        self._failure(detail)
                 else:
                     pending_successes.append(candidate)
                     updated += 1
@@ -147,6 +156,23 @@ class WatchSyncService:
                 close = getattr(connector, "close", None)
                 if callable(close):
                     close()
+
+    def _failure_detail(self, candidate: WatchSyncCandidate, error: Exception) -> str:
+        session = self._session_factory()
+        try:
+            item = session.get(MediaItem, candidate.media_item_id)
+            source = session.get(Source, candidate.target_source_id)
+            kind = item.kind.value if item is not None else "desconhecido"
+            title = item.title if item is not None else "item ausente"
+            target = source.name if source is not None else f"fonte {candidate.target_source_id}"
+            return (
+                f"operação=propagar assistido · tipo={kind} · título={title} · "
+                f"item={candidate.media_item_id} · destino={target} · "
+                f"externo={candidate.target_external_id} · "
+                f"erro={type(error).__name__}: {error}"
+            )
+        finally:
+            session.close()
 
     def _prepare(
         self,
@@ -347,9 +373,7 @@ class WatchSyncService:
         finally:
             session.close()
 
-    def _record_successes(
-        self, run_id: int | None, candidates: list[WatchSyncCandidate]
-    ) -> None:
+    def _record_successes(self, run_id: int | None, candidates: list[WatchSyncCandidate]) -> None:
         """Persist a successful remote delta in one local transaction."""
         session = self._session_factory()
         try:

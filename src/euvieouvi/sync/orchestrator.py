@@ -388,7 +388,7 @@ class SyncOrchestrator:
                 except Exception as error:
                     failures += 1
                     run.items_failed += 1
-                    self._add_item_error(work, run_id, library_id, None, error)
+                    self._add_item_error(work, run_id, library_id, event.media_external_id, error)
                     continue
                 if inserted:
                     run.events_inserted += 1

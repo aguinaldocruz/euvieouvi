@@ -172,7 +172,8 @@ class MediaPersistenceService:
                 if existing.media_item_id != reference.media_item_id:
                     raise ValueError("History event identity changed its referenced media.")
                 existing.dedup_key = dedup_key
-                existing.watched_at = event.watched_at
+                if not str(event.source_event_id).endswith(":played-undated"):
+                    existing.watched_at = event.watched_at
                 existing.completed = event.completed
                 existing.progress_ms = event.progress_ms
                 existing.duration_ms = event.duration_ms

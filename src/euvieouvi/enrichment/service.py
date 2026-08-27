@@ -34,6 +34,7 @@ def enrich_catalog(
     *,
     limit: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
+    failure: Callable[[str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, int]:
     """Enrich all eligible exact identifiers, or a bounded batch when requested."""
@@ -200,10 +201,26 @@ def enrich_catalog(
                 record.status = "not_found"
                 record.message = str(error)[:500]
                 counters["failed"] += 1
+                detail = (
+                    f"operação=metadados · tipo={item.kind.value} · título={item.title} · "
+                    f"item={item.id} · provedor={provider} · externo={identifier.external_id} · "
+                    f"erro={type(error).__name__}: {error}"
+                )
+                if failure is not None:
+                    failure(detail)
+                app.logger.warning("Metadata item failed: %s", detail, exc_info=True)
             except (EnrichmentError, ValueError) as error:
                 record.status = "failed"
                 record.message = str(error)[:500]
                 counters["failed"] += 1
+                detail = (
+                    f"operação=metadados · tipo={item.kind.value} · título={item.title} · "
+                    f"item={item.id} · provedor={provider} · externo={identifier.external_id} · "
+                    f"erro={type(error).__name__}: {error}"
+                )
+                if failure is not None:
+                    failure(detail)
+                app.logger.warning("Metadata item failed: %s", detail, exc_info=True)
             db.session.commit()
             if progress is not None:
                 progress(

@@ -26,7 +26,7 @@ from euvieouvi.connectors.dtos import (
     Page,
     PageRequest,
 )
-from euvieouvi.connectors.errors import ConnectorConnectionError
+from euvieouvi.connectors.errors import ConnectorConnectionError, ConnectorNotFoundError
 from euvieouvi.connectors.plex.connector import PlexConnector
 from euvieouvi.database.enums import (
     ConnectorType,
@@ -55,6 +55,7 @@ from euvieouvi.database.models import (
     WebhookEvent,
 )
 from euvieouvi.extensions import db
+from euvieouvi.sync.jobs import get_image_executor
 from euvieouvi.web.formatting import duration_ms, elapsed_time, local_datetime
 
 NOW = datetime(2026, 8, 4, 18, tzinfo=UTC)
@@ -216,7 +217,7 @@ def test_appearance_setting_is_persisted_and_used_as_page_default(app: Flask) ->
     default_page = client.get("/settings/appearance").get_data(as_text=True)
     assert 'lang="en"' in default_page
     assert 'value="en" checked' in default_page
-    assert 'i18n.4f6d2c1a.js' in default_page
+    assert "i18n.4f6d2c1a.js" in default_page
     token = csrf(client, "/settings/appearance")
     response = client.post(
         "/settings/appearance",
@@ -626,9 +627,12 @@ def test_connection_discovery_selection_htmx_and_fallback(
         == 302
     )
     with app.app_context():
-        assert db.session.scalar(
-            db.select(SyncCheckpoint).where(SyncCheckpoint.library_id == library_id)
-        ) is None
+        assert (
+            db.session.scalar(
+                db.select(SyncCheckpoint).where(SyncCheckpoint.library_id == library_id)
+            )
+            is None
+        )
 
 
 def test_source_configuration_change_resets_all_incremental_checkpoints(app: Flask) -> None:
@@ -672,9 +676,12 @@ def test_source_configuration_change_resets_all_incremental_checkpoints(app: Fla
     )
     assert response.status_code == 302
     with app.app_context():
-        assert db.session.scalar(
-            db.select(SyncCheckpoint).where(SyncCheckpoint.library_id == library_id)
-        ) is None
+        assert (
+            db.session.scalar(
+                db.select(SyncCheckpoint).where(SyncCheckpoint.library_id == library_id)
+            )
+            is None
+        )
 
 
 @pytest.mark.parametrize("connector_type", [ConnectorType.PLEX, ConnectorType.JELLYFIN])
@@ -715,9 +722,7 @@ def test_discovery_isolates_libraries_when_physical_server_changes(
         source_id = source.id
         old_library_id = old_library.id
 
-    monkeypatch.setattr(
-        "euvieouvi.web.routes.connector_for", lambda source: ReplacementConnector()
-    )
+    monkeypatch.setattr("euvieouvi.web.routes.connector_for", lambda source: ReplacementConnector())
     client = app.test_client()
     token = csrf(client, "/libraries")
     response = client.post(
@@ -869,9 +874,10 @@ def test_sync_start_cancel_and_polling_fragment(
     active = client.get(f"/jobs/sync-runs/{run_id}/fragment").get_data(as_text=True)
     assert 'hx-trigger="every 3s"' in active
     token = csrf(client, "/jobs")
-    assert client.post(
-        f"/jobs/sync-runs/{run_id}/cancel", data={"csrf_token": token}
-    ).status_code == 302
+    assert (
+        client.post(f"/jobs/sync-runs/{run_id}/cancel", data={"csrf_token": token}).status_code
+        == 302
+    )
     token = csrf(client, "/jobs")
     assert (
         client.post(
@@ -896,7 +902,11 @@ def test_formatters(app: Flask) -> None:
 def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     with app.app_context():
         source_id, library_id, _, _ = seed_web()
-        partial = MediaItem(kind=MediaKind.MOVIE, title="Newest partial playback")
+        partial = MediaItem(
+            kind=MediaKind.MOVIE,
+            title="Newest partial playback",
+            duration_ms=2_000,
+        )
         observed_only = MediaItem(kind=MediaKind.MOVIE, title="Observed but never played")
         db.session.add_all([partial, observed_only])
         db.session.flush()
@@ -960,11 +970,16 @@ def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
         ):
             db.session.add(Setting(key=key, value="true"))
         db.session.commit()
-    overlays = client.get(
-        "/catalog?kind=movie&availability=available&played=played"
-    ).get_data(as_text=True)
+    overlays = client.get("/catalog?kind=movie&availability=available&played=played").get_data(
+        as_text=True
+    )
     assert "Disponível no Plex" in overlays
     assert "Assistido 2 vezes" in overlays
+    movie_states = client.get("/catalog?kind=movie&played=all&availability=all").get_data(
+        as_text=True
+    )
+    assert "Assistindo · Progresso: 50%" in movie_states
+    assert "Não assistido · Progresso: 0%" in movie_states
     assert 'class="media-type-tab is-movie">Filme' in overlays
     last_played = client.get(
         "/catalog?kind=movie&availability=all&played=all&sort=last_played&direction=desc"
@@ -972,7 +987,9 @@ def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     assert last_played.index("Newest partial playback") < last_played.index("Arrival")
     assert last_played.index("Arrival") < last_played.index("Observed but never played")
 
-    client.get("/catalog?kind=show&availability=unavailable&played=unplayed&sort=year&direction=desc&query=Arrival")
+    client.get(
+        "/catalog?kind=show&availability=unavailable&played=unplayed&sort=year&direction=desc&query=Arrival"
+    )
     revisited = client.get("/catalog").get_data(as_text=True)
     assert 'type="hidden" name="kind" value="show"' in revisited
     assert 'id="availability_unavailable" value="unavailable" checked' in revisited
@@ -991,6 +1008,70 @@ def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     assert client.get("/catalog?sort=original_title").status_code == 200
     assert client.get("/catalog?sort=updated&direction=desc").status_code == 200
     assert client.get("/catalog?sort=removed&direction=desc").status_code == 200
+
+
+def test_catalog_show_badges_distinguish_unwatched_watching_and_watched(app: Flask) -> None:
+    with app.app_context():
+        source_id, library_id, _, _ = seed_web()
+        db.session.add(Setting(key="catalog.overlay.played", value="true"))
+        completion_counts = {
+            "Never Started": 0,
+            "In Progress": 1,
+            "Complete Show": 2,
+        }
+        for show_title, completed_count in completion_counts.items():
+            show = MediaItem(kind=MediaKind.SHOW, title=show_title)
+            db.session.add(show)
+            db.session.flush()
+            season = MediaItem(
+                kind=MediaKind.SEASON,
+                title="Season 1",
+                parent_id=show.id,
+                season_number=1,
+            )
+            db.session.add(season)
+            db.session.flush()
+            for episode_number in (1, 2):
+                episode = MediaItem(
+                    kind=MediaKind.EPISODE,
+                    title=f"Episode {episode_number}",
+                    parent_id=season.id,
+                    season_number=1,
+                    episode_number=episode_number,
+                )
+                db.session.add(episode)
+                db.session.flush()
+                db.session.add(
+                    SourceMediaRef(
+                        source_id=source_id,
+                        library_id=library_id,
+                        media_item_id=episode.id,
+                        external_id=f"{show.id}-{episode_number}",
+                        last_seen_at=NOW,
+                        available=True,
+                    )
+                )
+                if episode_number <= completed_count:
+                    db.session.add(
+                        WatchState(
+                            media_item_id=episode.id,
+                            source_id=source_id,
+                            view_count=1,
+                            last_watched_at=NOW,
+                            completed=True,
+                            observed_at=NOW,
+                        )
+                    )
+        db.session.commit()
+
+    catalog = app.test_client().get("/catalog?kind=show").get_data(as_text=True)
+
+    assert "Não assistida · 0 de 2 episódios · Progresso: 0%" in catalog
+    assert "Assistindo · 1 de 2 episódios · Progresso: 50%" in catalog
+    assert "Assistida · 2 de 2 episódios · Progresso: 100%" in catalog
+    assert 'class="media-badge is-unwatched"' in catalog
+    assert 'class="media-badge is-watching"' in catalog
+    assert 'class="media-badge is-watched"' in catalog
 
 
 def test_catalog_badges_follow_shared_provider_identity_across_localized_titles(app: Flask) -> None:
@@ -1222,13 +1303,13 @@ def test_series_detail_groups_episodes_by_season(app: Flask) -> None:
                     last_seen_at=NOW,
                     available=True,
                 ),
-                    WatchState(
-                        media_item_id=episode.id,
-                        source_id=source_id,
-                        view_count=1,
-                        last_watched_at=NOW + timedelta(days=1),
-                        completed=True,
-                        observed_at=NOW + timedelta(days=1),
+                WatchState(
+                    media_item_id=episode.id,
+                    source_id=source_id,
+                    view_count=1,
+                    last_watched_at=NOW + timedelta(days=1),
+                    completed=True,
+                    observed_at=NOW + timedelta(days=1),
                 ),
                 WatchEvent(
                     media_item_id=episode.id,
@@ -1539,9 +1620,9 @@ def test_plex_webhook_ignores_live_tv_before_activity_or_metadata_lookup(
 
     assert response.status_code == 204
     with app.app_context():
-        terminal = db.session.query(WebhookEvent).filter_by(
-            external_id="transient-live-tv"
-        ).one_or_none()
+        terminal = (
+            db.session.query(WebhookEvent).filter_by(external_id="transient-live-tv").one_or_none()
+        )
         assert terminal is None
 
 
@@ -1836,10 +1917,13 @@ def test_jellyfin_webhook_ignores_live_tv_before_activity(app: Flask) -> None:
 
     assert response.status_code == 204
     with app.app_context():
-        assert db.session.query(WebhookEvent).filter_by(
-            external_id="live-channel-1"
-        ).one_or_none() is None
+        assert (
+            db.session.query(WebhookEvent).filter_by(external_id="live-channel-1").one_or_none()
+            is None
+        )
         assert db.session.query(WatchEvent).filter_by(origin="webhook").count() == 0
+
+
 def test_webhook_page_deactivates_activity_older_than_one_hour(app: Flask) -> None:
     with app.app_context():
         source_id, _, _, _ = seed_web()
@@ -2034,3 +2118,132 @@ def test_jellyfin_test_handles_missing_and_failed_connection(
     with app.app_context():
         source = db.session.scalar(db.select(Source))
         assert source is not None and source.last_connection_status == "failed"
+
+
+def test_media_image_retires_orphaned_server_artwork(app: Flask) -> None:
+    with app.app_context():
+        source_id, _, movie_id, _ = seed_web()
+        reference = db.session.scalar(
+            select(SourceMediaRef).where(SourceMediaRef.media_item_id == movie_id)
+        )
+        assert reference is not None
+        reference.available = False
+        db.session.add(
+            MediaImage(
+                media_item_id=movie_id,
+                source_id=source_id,
+                image_type="poster",
+                provider="plex",
+                source_path=f"/library/metadata/{movie_id}/thumb",
+                cache_status="pending",
+            )
+        )
+        db.session.commit()
+
+    response = app.test_client().get(f"/media/{movie_id}/image")
+    assert response.status_code == 200
+    assert response.mimetype == "image/svg+xml"
+    with app.app_context():
+        assert (
+            db.session.scalar(select(MediaImage).where(MediaImage.media_item_id == movie_id))
+            is None
+        )
+
+
+def test_media_image_retires_server_artwork_after_not_found(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with app.app_context():
+        source_id, _, movie_id, _ = seed_web()
+        db.session.add(
+            MediaImage(
+                media_item_id=movie_id,
+                source_id=source_id,
+                image_type="poster",
+                provider="plex",
+                source_path=f"/library/metadata/{movie_id}/thumb",
+                cache_status="pending",
+            )
+        )
+        db.session.commit()
+
+    def missing(*args: object, **kwargs: object) -> tuple[bytes, str]:
+        del args, kwargs
+        raise ConnectorNotFoundError("gone")
+
+    monkeypatch.setattr(PlexConnector, "fetch_image", missing)
+    response = app.test_client().get(f"/media/{movie_id}/image")
+    assert response.status_code == 200
+    assert response.mimetype == "image/svg+xml"
+    with app.app_context():
+        assert (
+            db.session.scalar(select(MediaImage).where(MediaImage.media_item_id == movie_id))
+            is None
+        )
+
+
+def test_catalog_image_job_removes_orphans_and_downloads_only_external(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with app.app_context():
+        source_id, _, movie_id, _ = seed_web()
+        reference = db.session.scalar(
+            select(SourceMediaRef).where(SourceMediaRef.media_item_id == movie_id)
+        )
+        assert reference is not None
+        reference.available = False
+        external_item = MediaItem(kind=MediaKind.MOVIE, title="External")
+        db.session.add(external_item)
+        db.session.flush()
+        db.session.add_all(
+            [
+                MediaImage(
+                    media_item_id=movie_id,
+                    source_id=source_id,
+                    image_type="poster",
+                    provider="plex",
+                    source_path="/stale",
+                    cache_status="pending",
+                ),
+                MediaImage(
+                    media_item_id=external_item.id,
+                    source_id=None,
+                    image_type="poster",
+                    provider="tmdb",
+                    source_url="https://image.tmdb.org/t/p/w500/poster.jpg",
+                    cache_status="pending",
+                ),
+            ]
+        )
+        db.session.commit()
+        external_id = external_item.id
+
+    downloaded: list[int] = []
+
+    def cache(image: MediaImage, directory: Path) -> Path:
+        del directory
+        downloaded.append(image.id)
+        image.cache_status = "cached"
+        image.local_filename = "external.jpg"
+        image.mime_type = "image/jpeg"
+        return Path("external.jpg")
+
+    monkeypatch.setattr("euvieouvi.sync.jobs.ensure_external_cached", cache)
+    executor = get_image_executor(app)
+    assert executor.submit() is True
+    deadline = time.monotonic() + 3
+    while executor.snapshot["active"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert executor.snapshot["active"] is False
+    assert executor.snapshot["failed"] == 0
+    assert len(downloaded) == 1
+    assert "1 referências órfãs removidas" in str(executor.snapshot["summary"])
+    with app.app_context():
+        assert (
+            db.session.scalar(select(MediaImage).where(MediaImage.media_item_id == movie_id))
+            is None
+        )
+        external = db.session.scalar(
+            select(MediaImage).where(MediaImage.media_item_id == external_id)
+        )
+        assert external is not None and external.cache_status == "cached"

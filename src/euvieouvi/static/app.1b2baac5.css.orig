@@ -36,7 +36,7 @@ footer { color:var(--evo-muted); }
 .media-title { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .media-badges { position:absolute; right:.45rem; top:.45rem; display:flex; gap:.3rem; }
 .media-badge { display:grid; place-items:center; width:1.65rem; height:1.65rem; border-radius:50%; color:#fff; font-size:.75rem; font-weight:800; box-shadow:0 1px 4px rgb(0 0 0 / 30%); }
-.is-available { background:#d67a00; }.is-jellyfin { background:#7b3ff2; }.is-played,.is-watched { background:#198754; }.is-watching { background:#d67a00; }.is-unwatched { background:#65727e; }
+.is-available { background:#d67a00; }.is-jellyfin { background:#7b3ff2; }.is-played { background:#198754; }
 .media-type-badge { display:grid; place-items:center; flex:0 0 1.8rem; width:1.8rem; height:1.8rem; margin-top:.1rem; border-radius:.4rem; color:#fff; font-size:.78rem; font-weight:800; box-shadow:0 1px 3px rgb(0 0 0 / 20%); }
 .media-type-tab { position:absolute; top:.45rem; left:0; padding:.22rem .48rem .22rem .4rem; border-radius:0 .3rem .3rem 0; color:#fff; font-size:.67rem; font-weight:800; line-height:1.2; letter-spacing:.025em; text-transform:uppercase; box-shadow:0 1px 3px rgb(0 0 0 / 28%); }
 .media-type-badge.is-movie,.media-type-tab.is-movie { background:#2367a8; }

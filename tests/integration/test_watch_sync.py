@@ -30,9 +30,7 @@ NOW = datetime(2026, 8, 11, 19, tzinfo=UTC)
 
 
 class FailingConnector:
-    def mark_watched(
-        self, external_id: str, *, watched_at: datetime | None = None
-    ) -> None:
+    def mark_watched(self, external_id: str, *, watched_at: datetime | None = None) -> None:
         del watched_at
         raise RuntimeError(external_id)
 
@@ -45,9 +43,7 @@ class RecordingConnector:
         self.source = source
         self.calls = calls
 
-    def mark_watched(
-        self, external_id: str, *, watched_at: datetime | None = None
-    ) -> None:
+    def mark_watched(self, external_id: str, *, watched_at: datetime | None = None) -> None:
         assert watched_at == NOW
         self.calls.append((self.source.connector_type, external_id))
 
@@ -142,9 +138,7 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
                     dedup_key="webhook:completed",
                     watched_at=NOW,
                     completed=True,
-                    playback_user=(
-                        "plex-user" if watched_source is ConnectorType.PLEX else "user"
-                    ),
+                    playback_user=("plex-user" if watched_source is ConnectorType.PLEX else "user"),
                     origin="webhook",
                 ),
             ]
@@ -240,11 +234,18 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
         target_state.completed = False
         pending.value = "true"
         db.session.commit()
+        failure_details: list[str] = []
         failed_result = WatchSyncService(
-            lambda: db.session(), lambda source: FailingConnector()
+            lambda: db.session(),
+            lambda source: FailingConnector(),
+            failure=failure_details.append,
         ).run(None)
 
         assert failed_result.failed == 1
+        assert "tipo=movie" in failure_details[0]
+        assert "título=Arrival" in failure_details[0]
+        assert f"externo={target_external_id}" in failure_details[0]
+        assert "erro=RuntimeError" in failure_details[0]
         persisted_pending = db.session.get(Setting, "watch_sync.pending")
         assert persisted_pending is not None and persisted_pending.value == "true"
 

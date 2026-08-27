@@ -95,6 +95,63 @@ def test_connector_discovers_reads_history_and_images() -> None:
     connector.close()
 
 
+def test_history_does_not_use_unreliable_jellyfin_user_date_filter() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/Users/user-1/Items")
+        assert "MinDateLastSavedForUser" not in request.url.params
+        assert "MinDateLastSaved" not in request.url.params
+        return httpx.Response(200, json={"TotalRecordCount": 0, "Items": []}, request=request)
+
+    connector = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1")
+    library = ExternalLibraryRef("lib-1", ExternalLibraryType.SHOW)
+    checkpoint = type(
+        "Checkpoint",
+        (),
+        {"watermark_at": datetime(2026, 8, 16, tzinfo=UTC), "last_external_id": None},
+    )()
+
+    connector.get_history_page(library, checkpoint, PageRequest(size=10))
+
+
+def test_played_flag_wins_over_inconsistent_zero_play_count() -> None:
+    item = map_item(
+        {
+            "Id": "episode-5",
+            "Type": "Episode",
+            "Name": "Marked watched",
+            "SeriesId": "show-1",
+            "SeriesName": "Show",
+            "SeasonId": "season-1",
+            "ParentIndexNumber": 1,
+            "IndexNumber": 5,
+            "UserData": {"Played": True, "PlayCount": 0},
+        },
+        "shows",
+    )
+
+    assert item.view_count == 1
+    assert item.last_viewed_at is None
+    observed_at = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+    event = map_history_item(
+        {
+            "Id": "episode-5",
+            "Type": "Episode",
+            "Name": "Marked watched",
+            "SeriesId": "show-1",
+            "SeriesName": "Show",
+            "SeasonId": "season-1",
+            "ParentIndexNumber": 1,
+            "IndexNumber": 5,
+            "UserData": {"Played": True, "PlayCount": 0},
+        },
+        "shows",
+        fallback_watched_at=observed_at,
+    )
+    assert event is not None
+    assert event.watched_at == observed_at
+    assert event.source_event_id == "jellyfin:episode-5:played-undated"
+
+
 def test_mark_watched_posts_played_item_for_configured_user() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"

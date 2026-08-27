@@ -23,6 +23,7 @@ class LocalEnrichmentExecutor:
             "total": 0,
             "percent": 0,
         }
+        self._failure_details: list[str] = []
 
     @property
     def active(self) -> bool:
@@ -30,9 +31,13 @@ class LocalEnrichmentExecutor:
             return self._active
 
     @property
-    def snapshot(self) -> dict[str, int | bool]:
+    def snapshot(self) -> dict[str, int | str | bool]:
         with self._lock:
-            return {"active": self._active, **self._progress}
+            return {
+                "active": self._active,
+                **self._progress,
+                "failure_details": "\n".join(self._failure_details),
+            }
 
     def submit(self) -> bool:
         with self._lock:
@@ -47,15 +52,25 @@ class LocalEnrichmentExecutor:
                 "total": 0,
                 "percent": 0,
             }
+            self._failure_details = []
 
         def execute() -> None:
             def report(counters: dict[str, int]) -> None:
                 with self._lock:
                     self._progress.update(counters)
 
+            def report_failure(detail: str) -> None:
+                with self._lock:
+                    self._failure_details.append(detail)
+
             try:
                 with self._app.app_context():
-                    enrich_catalog(self._app, progress=report, cancelled=self._cancel.is_set)
+                    enrich_catalog(
+                        self._app,
+                        progress=report,
+                        failure=report_failure,
+                        cancelled=self._cancel.is_set,
+                    )
             finally:
                 with self._lock:
                     self._active = False

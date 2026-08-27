@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from flask import Flask
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from werkzeug.local import LocalProxy
 
 from euvieouvi.api.runtime import connector_for, get_executor
@@ -19,6 +19,7 @@ from euvieouvi.database.models import (
     JobRun,
     Library,
     MediaImage,
+    MediaItem,
     Setting,
     Source,
     SourceMediaRef,
@@ -291,24 +292,56 @@ def _monitor_job(app: Flask, job_run_id: int, job_id: str, reference: int | str)
                 _write_log(app, run.log_filename or "", line)
                 last_line = line
             if not active:
+                if not isinstance(reference, int):
+                    failure_details = str(snapshot.get("failure_details", ""))
+                    for detail in failure_details.splitlines():
+                        if detail.strip():
+                            _write_log(app, run.log_filename or "", f"ERRO · {detail}")
                 if isinstance(reference, int):
                     errors = db.session.scalars(
                         select(SyncError)
                         .where(SyncError.sync_run_id == reference)
                         .order_by(SyncError.id)
-                        .limit(100)
                     ).all()
                     for error in errors:
-                        external = (
-                            f" · mídia={error.media_external_id}"
-                            if error.media_external_id
-                            else ""
+                        library = db.session.get(Library, error.library_id)
+                        source = (
+                            db.session.get(Source, library.source_id)
+                            if library is not None
+                            else None
                         )
-                        _write_log(
-                            app,
-                            run.log_filename or "",
-                            f"ERRO [{error.category}]{external} · {error.message}",
+                        ref = (
+                            db.session.scalar(
+                                select(SourceMediaRef).where(
+                                    SourceMediaRef.source_id == source.id,
+                                    SourceMediaRef.external_id == error.media_external_id,
+                                )
+                            )
+                            if source is not None and error.media_external_id
+                            else None
                         )
+                        item = (
+                            db.session.get(MediaItem, ref.media_item_id)
+                            if ref is not None
+                            else None
+                        )
+                        parts = [f"categoria={error.category}"]
+                        if source is not None:
+                            parts.append(f"fonte={source.name}")
+                        if library is not None:
+                            parts.append(f"biblioteca={library.name}")
+                        if item is not None:
+                            parts.extend(
+                                (
+                                    f"tipo={item.kind.value}",
+                                    f"título={item.title}",
+                                    f"item={item.id}",
+                                )
+                            )
+                        if error.media_external_id:
+                            parts.append(f"externo={error.media_external_id}")
+                        parts.append(f"erro={error.message}")
+                        _write_log(app, run.log_filename or "", "ERRO · " + " · ".join(parts))
                 _rotate_job_runs(app, job_id)
                 return
             time.sleep(1)
@@ -368,7 +401,7 @@ def _run_maintenance(app: Flask, job_run_id: int) -> None:
             return
         run.status = SyncStatus.FAILED
         run.failed = 1
-        run.summary = f"Otimização falhou: {type(error).__name__}."
+        run.summary = f"Otimização falhou: {type(error).__name__}: {error}"
     run.finished_at = datetime.now(UTC)
     db.session.commit()
     _write_log(app, run.log_filename or "", run.summary or "Otimização encerrada.")
@@ -476,6 +509,7 @@ class LocalImageExecutor:
             "updated": 0,
             "percent": 0,
             "summary": "ainda não executado",
+            "failure_details": "",
         }
 
     @property
@@ -495,24 +529,44 @@ class LocalImageExecutor:
                 "failed": 0,
                 "percent": 0,
                 "summary": "Contando imagens pendentes.",
+                "failure_details": "",
             }
 
         def execute() -> None:
             processed = updated = failed = 0
+            failure_details: list[str] = []
             with self._app.app_context():
+                orphan_condition = (
+                    ~select(SourceMediaRef.id)
+                    .where(
+                        SourceMediaRef.media_item_id == MediaImage.media_item_id,
+                        SourceMediaRef.source_id == MediaImage.source_id,
+                        SourceMediaRef.available.is_(True),
+                    )
+                    .exists()
+                )
+                cleanup = db.session.execute(
+                    delete(MediaImage).where(
+                        MediaImage.provider.in_(("plex", "jellyfin")),
+                        orphan_condition,
+                    )
+                )
+                retired = int(getattr(cleanup, "rowcount", 0) or 0)
+                db.session.commit()
                 image_ids = list(
                     db.session.scalars(
-                    select(MediaImage.id)
-                    .where(
-                        MediaImage.cache_status != "cached",
-                        ~select(SourceMediaRef.id)
+                        select(MediaImage.id)
                         .where(
-                            SourceMediaRef.media_item_id == MediaImage.media_item_id,
-                            SourceMediaRef.available.is_(True),
+                            MediaImage.cache_status != "cached",
+                            MediaImage.provider.in_(("tmdb", "coverartarchive")),
+                            ~select(SourceMediaRef.id)
+                            .where(
+                                SourceMediaRef.media_item_id == MediaImage.media_item_id,
+                                SourceMediaRef.available.is_(True),
+                            )
+                            .exists(),
                         )
-                        .exists(),
-                    )
-                    .order_by(MediaImage.id)
+                        .order_by(MediaImage.id)
                     )
                 )
                 total = len(image_ids)
@@ -525,7 +579,10 @@ class LocalImageExecutor:
                 with self._lock:
                     self._snapshot.update(
                         total=total,
-                        summary=f"Baixando {total} imagens com {workers} trabalhadores.",
+                        summary=(
+                            f"{retired} imagens órfãs removidas; "
+                            f"baixando {total} imagens externas com {workers} trabalhadores."
+                        ),
                         percent=100 if total == 0 else 0,
                     )
 
@@ -536,8 +593,36 @@ class LocalImageExecutor:
                         try:
                             for image_id in ids:
                                 succeeded = False
+                                detail_context = f"imagem={image_id}"
                                 try:
                                     media_image = db.session.get(MediaImage, image_id)
+                                    if media_image is not None:
+                                        item = db.session.get(MediaItem, media_image.media_item_id)
+                                        source = (
+                                            db.session.get(Source, media_image.source_id)
+                                            if media_image.source_id is not None
+                                            else None
+                                        )
+                                        kind = (
+                                            item.kind.value if item is not None else "desconhecido"
+                                        )
+                                        title = item.title if item is not None else "item ausente"
+                                        source_name = (
+                                            source.name if source is not None else "indisponível"
+                                        )
+                                        origin = (
+                                            media_image.source_path
+                                            or media_image.source_url
+                                            or "ausente"
+                                        )
+                                        detail_context = (
+                                            f"imagem={image_id} · tipo={kind} · título={title} · "
+                                            f"item={media_image.media_item_id} · "
+                                            f"imagem_tipo={media_image.image_type} · "
+                                            f"provedor={media_image.provider} · "
+                                            f"fonte={source_name} · "
+                                            f"origem={origin}"
+                                        )
                                     if media_image is None or media_image.cache_status == "cached":
                                         succeeded = True
                                     elif media_image.provider in {"tmdb", "coverartarchive"}:
@@ -556,12 +641,28 @@ class LocalImageExecutor:
                                             connector = connector_for(source)
                                             connectors[source_id] = connector
                                         ensure_cached(
-                                            media_image, connector, cache, width=500, height=750  # type: ignore[arg-type]
+                                            media_image,
+                                            connector,
+                                            cache,
+                                            width=500,
+                                            height=750,  # type: ignore[arg-type]
                                         )
                                         db.session.commit()
                                         succeeded = True
-                                except Exception:
+                                except Exception as error:
                                     db.session.rollback()
+                                    detail = (
+                                        f"operação=baixar imagem · {detail_context} · "
+                                        f"erro={type(error).__name__}: {error}"
+                                    )
+                                    self._app.logger.warning(
+                                        "Catalog image item failed: %s", detail, exc_info=True
+                                    )
+                                    with self._lock:
+                                        failure_details.append(detail)
+                                        self._snapshot["failure_details"] = "\n".join(
+                                            failure_details
+                                        )
                                 with self._lock:
                                     processed += 1
                                     if succeeded:
@@ -590,7 +691,8 @@ class LocalImageExecutor:
                         list(pool.map(process_chunk, chunks))
                 finally:
                     summary = (
-                        f"{processed} imagens processadas; {updated} baixadas; {failed} falhas."
+                        f"{processed} imagens processadas; {updated} baixadas; {failed} falhas; "
+                        f"{retired} referências órfãs removidas."
                     )
                     with self._lock:
                         self._active = False
@@ -598,7 +700,6 @@ class LocalImageExecutor:
 
         threading.Thread(target=execute, name="euvieouvi-images", daemon=True).start()
         return True
-
 
 
 def get_image_executor(app: Flask) -> LocalImageExecutor:

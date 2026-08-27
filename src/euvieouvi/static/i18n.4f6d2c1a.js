@@ -350,7 +350,13 @@
     [/^Agendar (.+)$/u, "Schedule $1"],
     [/^Horário de (.+)$/u, "Time for $1"],
     [/^Ações de (.+)$/u, "Actions for $1"],
-    [/^Progresso de (.+)$/u, "Progress for $1"]
+    [/^Progresso de (.+)$/u, "Progress for $1"],
+    [/^Não assistida · (\d+) de (\d+) episódios · Progresso: (\d+)%$/u, "Not watched · $1 of $2 episodes · Progress: $3%"],
+    [/^Assistindo · (\d+) de (\d+) episódios · Progresso: (\d+)%$/u, "Watching · $1 of $2 episodes · Progress: $3%"],
+    [/^Assistida · (\d+) de (\d+) episódios · Progresso: (\d+)%$/u, "Watched · $1 of $2 episodes · Progress: $3%"],
+    [/^Assistido (\d+) (?:vez|vezes) · Progresso: (\d+)%$/u, "Watched $1 time(s) · Progress: $2%"],
+    [/^Assistindo · Progresso: (\d+)%$/u, "Watching · Progress: $1%"],
+    [/^Não assistido · Progresso: (\d+)%$/u, "Not watched · Progress: $1%"]
   ];
 
   function translated(value) {

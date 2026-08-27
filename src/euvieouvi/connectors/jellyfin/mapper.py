@@ -49,6 +49,9 @@ def map_item(raw: dict[str, Any], library_id: str) -> ExternalMediaItem:
     title = _required(raw, "Name")
     raw_user_data = raw.get("UserData")
     user_data: dict[str, Any] = raw_user_data if isinstance(raw_user_data, dict) else {}
+    view_count = _integer(user_data.get("PlayCount"))
+    if user_data.get("Played") is True:
+        view_count = max(view_count or 0, 1)
     run_ticks = _integer(raw.get("RunTimeTicks"))
     raw_image_tags = raw.get("ImageTags")
     image_tags: dict[str, Any] = raw_image_tags if isinstance(raw_image_tags, dict) else {}
@@ -113,21 +116,36 @@ def map_item(raw: dict[str, Any], library_id: str) -> ExternalMediaItem:
         identifiers=_identifiers(raw.get("ProviderIds")),
         updated_at=_timestamp(raw.get("DateLastSaved") or raw.get("DateLastMediaAdded")),
         last_viewed_at=_timestamp(user_data.get("LastPlayedDate")),
-        view_count=_integer(user_data.get("PlayCount")),
+        view_count=view_count,
         view_offset_ms=_milliseconds(user_data.get("PlaybackPositionTicks")),
     )
 
 
-def map_history_item(raw: dict[str, Any], library_id: str) -> ExternalWatchEvent | None:
+def map_history_item(
+    raw: dict[str, Any],
+    library_id: str,
+    *,
+    fallback_watched_at: datetime | None = None,
+) -> ExternalWatchEvent | None:
     item = map_item(raw, library_id)
-    if item.last_viewed_at is None or not item.view_count:
+    if not item.view_count:
+        return None
+    watched_at = item.last_viewed_at
+    undated = watched_at is None and fallback_watched_at is not None
+    if watched_at is None:
+        watched_at = fallback_watched_at
+    if watched_at is None:
         return None
     return ExternalWatchEvent(
         media_external_id=item.external_id,
         library_external_id=library_id,
-        watched_at=item.last_viewed_at,
+        watched_at=watched_at,
         completed=True,
-        source_event_id=f"jellyfin:{item.external_id}:{item.last_viewed_at.isoformat()}",
+        source_event_id=(
+            f"jellyfin:{item.external_id}:played-undated"
+            if undated
+            else f"jellyfin:{item.external_id}:{watched_at.isoformat()}"
+        ),
         duration_ms=item.duration_ms,
         view_number=item.view_count,
     )

@@ -36,7 +36,7 @@ from sqlalchemy.orm import aliased
 from euvieouvi.api.runtime import connector_for, get_executor
 from euvieouvi.api.validation import http_url
 from euvieouvi.connectors.dtos import ExternalWatchEvent
-from euvieouvi.connectors.errors import ConnectorError
+from euvieouvi.connectors.errors import ConnectorError, ConnectorNotFoundError
 from euvieouvi.connectors.plex.connector import PlexConnector
 from euvieouvi.database.enums import ConnectorType, MediaKind, SyncStatus
 from euvieouvi.database.models import (
@@ -62,7 +62,7 @@ from euvieouvi.database.unit_of_work import UnitOfWork
 from euvieouvi.enrichment.runtime import get_enrichment_executor
 from euvieouvi.errors import AppError
 from euvieouvi.extensions import db
-from euvieouvi.media_images import ensure_cached, ensure_external_cached
+from euvieouvi.media_images import ensure_external_cached
 from euvieouvi.sync.async_tasks import enqueue_watch_update, get_async_task_executor
 from euvieouvi.sync.discovery import LibraryDiscoveryService
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
@@ -379,9 +379,7 @@ def settings_jellyfin() -> Any:
             errors["api_key"] = "A API key é obrigatória no primeiro cadastro."
         if not user_id and not persisted.get("user_id"):
             errors["user_id"] = "Informe o ID do usuário Jellyfin acompanhado."
-        elif jellyfin_users and user_id not in {
-            user.external_id for user in jellyfin_users
-        }:
+        elif jellyfin_users and user_id not in {user.external_id for user in jellyfin_users}:
             errors["user_id"] = "Selecione um usuário disponível no servidor Jellyfin."
         if not errors:
             credentials = {
@@ -720,9 +718,7 @@ def settings_plex_test() -> Any:
         return redirect(url_for("web.settings_plex"))
     try:
         info = connector_for(source).test_connection()
-        apply_server_identity(
-            db.session, source, info.server_identifier, now=datetime.now(UTC)
-        )
+        apply_server_identity(db.session, source, info.server_identifier, now=datetime.now(UTC))
         source.last_connection_status = "succeeded"
         source.last_connection_test_at = datetime.now(UTC)
         db.session.commit()
@@ -743,9 +739,7 @@ def settings_jellyfin_test() -> Any:
         return redirect(url_for("web.settings_jellyfin"))
     try:
         info = connector_for(source).test_connection()
-        apply_server_identity(
-            db.session, source, info.server_identifier, now=datetime.now(UTC)
-        )
+        apply_server_identity(db.session, source, info.server_identifier, now=datetime.now(UTC))
         source.last_connection_status = "succeeded"
         source.last_connection_test_at = datetime.now(UTC)
         db.session.commit()
@@ -1229,9 +1223,7 @@ def settings_webhooks() -> Any:
         raw_limit = (request.form.get("history_limit") or "20").strip()
         if "plex_user_filter" in request.form:
             plex_user_filter = (request.form.get("plex_user_filter") or "").strip()[:255]
-            if plex_users and plex_user_filter not in {
-                user.external_id for user in plex_users
-            }:
+            if plex_users and plex_user_filter not in {user.external_id for user in plex_users}:
                 flash("Selecione um usuário disponível no servidor Plex.", "danger")
                 return redirect(url_for("web.settings_webhooks"))
             _save_setting("webhook.plex.user_filter", plex_user_filter)
@@ -1353,12 +1345,15 @@ def plex_webhook(token: str) -> Any:
     library_external_id = str(metadata.get("librarySectionID") or "").strip()
     if not external_id:
         return Response("Identidade da mídia ausente.", 400)
-    has_catalog_reference = db.session.scalar(
-        select(SourceMediaRef.id).where(
-            SourceMediaRef.source_id == source.id,
-            SourceMediaRef.external_id == external_id,
+    has_catalog_reference = (
+        db.session.scalar(
+            select(SourceMediaRef.id).where(
+                SourceMediaRef.source_id == source.id,
+                SourceMediaRef.external_id == external_id,
+            )
         )
-    ) is not None
+        is not None
+    )
     watched_at = _parse_webhook_datetime(payload.get("eventTime")) or datetime.now(UTC)
     title = str(metadata.get("title") or metadata.get("grandparentTitle") or external_id)
     media_kind = metadata.get("type")
@@ -1783,9 +1778,7 @@ def catalog() -> Any:
         saved_filters = {}
     query = request.args.get("query", "").strip()[:200]
     kind = request.args.get("kind", str(saved_filters.get("kind", "movie")))
-    availability = request.args.get(
-        "availability", str(saved_filters.get("availability", "all"))
-    )
+    availability = request.args.get("availability", str(saved_filters.get("availability", "all")))
     played = request.args.get("played", str(saved_filters.get("played", "all")))
     genre = request.args.get("genre", str(saved_filters.get("genre", ""))).strip().casefold()
     sort = request.args.get("sort", str(saved_filters.get("sort", "title")))
@@ -1809,8 +1802,17 @@ def catalog() -> Any:
     if direction not in {"asc", "desc"}:
         direction = "asc"
     allowed_sorts = {
-        "title", "original_title", "year", "last_played", "first_played", "play_count",
-        "added", "updated", "removed", "duration", "rating",
+        "title",
+        "original_title",
+        "year",
+        "last_played",
+        "first_played",
+        "play_count",
+        "added",
+        "updated",
+        "removed",
+        "duration",
+        "rating",
     }
     if sort not in allowed_sorts:
         sort = "title"
@@ -2097,6 +2099,96 @@ def catalog() -> Any:
     merged_rows = [deduped[k] for k in ordered_keys]
     has_more = len(merged_rows) > 40
     merged_rows = merged_rows[:40]
+    watch_progress: dict[int, dict[str, int | str]] = {}
+    displayed_show_ids = {row[0].id for row in merged_rows if row[0].kind is MediaKind.SHOW}
+    if displayed_show_ids:
+        season_item = aliased(MediaItem)
+        episode_item = aliased(MediaItem)
+        episode_rows = db.session.execute(
+            select(
+                season_item.parent_id.label("show_id"),
+                episode_item.id.label("episode_id"),
+                or_(
+                    exists().where(
+                        WatchState.media_item_id == episode_item.id,
+                        WatchState.completed.is_(True),
+                    ),
+                    exists().where(
+                        WatchEvent.media_item_id == episode_item.id,
+                        WatchEvent.completed.is_(True),
+                    ),
+                ).label("completed"),
+            )
+            .join(season_item, season_item.id == episode_item.parent_id)
+            .where(
+                season_item.parent_id.in_(displayed_show_ids),
+                episode_item.kind == MediaKind.EPISODE,
+                exists().where(
+                    SourceMediaRef.media_item_id == episode_item.id,
+                    SourceMediaRef.available.is_(True),
+                ),
+            )
+        ).all()
+        totals = {show_id: [0, 0] for show_id in displayed_show_ids}
+        for show_id, _episode_id, completed in episode_rows:
+            totals[int(show_id)][0] += 1
+            totals[int(show_id)][1] += int(bool(completed))
+        for show_id, (total, completed) in totals.items():
+            percent = min(100, (completed * 100 + total // 2) // total) if total else 0
+            if completed == 0:
+                state, icon, label = "unwatched", "—", "Não assistida"
+            elif completed < total:
+                state, icon, label = "watching", "◐", "Assistindo"
+            else:
+                state, icon, label = "watched", "✓", "Assistida"
+            watch_progress[show_id] = {
+                "state": state,
+                "icon": icon,
+                "percent": percent,
+                "title": f"{label} · {completed} de {total} episódios · Progresso: {percent}%",
+            }
+
+    displayed_movies = {
+        row[0].id: (row[0], int(row[1])) for row in merged_rows if row[0].kind is MediaKind.MOVIE
+    }
+    movie_progress_ms = (
+        {
+            int(media_id): int(progress_ms or 0)
+            for media_id, progress_ms in db.session.execute(
+                select(WatchState.media_item_id, func.max(WatchState.progress_ms))
+                .where(WatchState.media_item_id.in_(displayed_movies))
+                .group_by(WatchState.media_item_id)
+            )
+        }
+        if displayed_movies
+        else {}
+    )
+    for media_id, (item, completions) in displayed_movies.items():
+        progress_ms = movie_progress_ms.get(media_id, 0)
+        if completions > 0:
+            state, icon, percent = "watched", "✓", 100
+            action = f"Assistido {completions} {'vez' if completions == 1 else 'vezes'}"
+        elif progress_ms > 0:
+            state, icon = "watching", "◐"
+            percent = (
+                min(99, max(1, round(progress_ms * 100 / item.duration_ms)))
+                if item.duration_ms
+                else 0
+            )
+            action = "Assistindo"
+        else:
+            state, icon, percent, action = "unwatched", "—", 0, "Não assistido"
+        progress_label = (
+            f"Progresso: {percent}%"
+            if item.duration_ms or percent in {0, 100}
+            else "Progresso indisponível"
+        )
+        watch_progress[media_id] = {
+            "state": state,
+            "icon": icon,
+            "percent": percent,
+            "title": f"{action} · {progress_label}",
+        }
     template_values = dict(
         rows=merged_rows,
         page=page,
@@ -2120,6 +2212,7 @@ def catalog() -> Any:
             .order_by(Genre.name)
         ).all(),
         series_titles=_series_titles([row[0] for row in merged_rows]),
+        watch_progress=watch_progress,
         catalog_overlays={
             key.removeprefix("catalog.overlay."): value == "true"
             for key, value in _settings(
@@ -2132,12 +2225,8 @@ def catalog() -> Any:
     )
     if request.args.get("fragment") == "1":
         return render_template("fragments/catalog_results.html", **template_values)
-    refresh_values = {
-        key: value for key, value in request.args.items() if key != "fragment"
-    }
-    template_values["catalog_refresh_url"] = url_for(
-        "web.catalog", **refresh_values, fragment="1"
-    )
+    refresh_values = {key: value for key, value in request.args.items() if key != "fragment"}
+    template_values["catalog_refresh_url"] = url_for("web.catalog", **refresh_values, fragment="1")
     return render_template("catalog.html", **template_values)
 
 
@@ -2168,8 +2257,6 @@ def media_image(media_id: int) -> Any:
     source = db.session.get(Source, image.source_id)
     if source is None or not source.enabled:
         return _placeholder_image(item.kind)
-    connector = connector_for(source)
-    square = item.kind in {MediaKind.ARTIST, MediaKind.ALBUM, MediaKind.TRACK}
     available = db.session.scalar(
         select(SourceMediaRef.id).where(
             SourceMediaRef.media_item_id == media_id,
@@ -2177,43 +2264,40 @@ def media_image(media_id: int) -> Any:
             SourceMediaRef.available.is_(True),
         )
     )
+    if available is None:
+        db.session.delete(image)
+        db.session.commit()
+        return _placeholder_image(item.kind)
+    if image.source_path is None:
+        db.session.delete(image)
+        db.session.commit()
+        return _placeholder_image(item.kind)
+    connector = connector_for(source)
+    square = item.kind in {MediaKind.ARTIST, MediaKind.ALBUM, MediaKind.TRACK}
     try:
-        if available is not None:
-            if image.source_path is None:
-                return _placeholder_image(item.kind)
-            content, mime_type = connector.fetch_image(
-                image.source_path,
-                width=400 if square else 300,
-                height=400 if square else 450,
-            )
-            response = Response(content, mimetype=mime_type)
-            response.headers["Cache-Control"] = "private, max-age=86400"
-            response.set_etag(hashlib.sha256(content).hexdigest())
-            return response.make_conditional(request)
-        path = ensure_cached(
-            image,
-            connector,
-            cache_directory,
+        content, mime_type = connector.fetch_image(
+            image.source_path,
             width=400 if square else 300,
             height=400 if square else 450,
         )
-        db.session.commit()
+        response = Response(content, mimetype=mime_type)
+        response.headers["Cache-Control"] = "private, max-age=86400"
+        response.set_etag(hashlib.sha256(content).hexdigest())
+        return response.make_conditional(request)
+    except ConnectorNotFoundError:
+        db.session.rollback()
+        stale = db.session.get(MediaImage, image.id)
+        if stale is not None:
+            db.session.delete(stale)
+            db.session.commit()
+        return _placeholder_image(item.kind)
     except (ConnectorError, OSError):
         db.session.rollback()
-        if image.local_filename:
-            existing = cache_directory / image.local_filename
-            if existing.is_file():
-                return send_file(
-                    existing, mimetype=image.mime_type, conditional=True, max_age=86400
-                )
         return _placeholder_image(item.kind)
     finally:
         close = getattr(connector, "close", None)
         if callable(close):
             close()
-    response = send_file(path, mimetype=image.mime_type, conditional=True, max_age=86400)
-    response.headers["Cache-Control"] = "private, max-age=86400"
-    return response
 
 
 @blueprint.get("/media/<int:media_id>")

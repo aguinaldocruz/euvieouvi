@@ -126,7 +126,10 @@ class JellyfinConnector:
         raw = self._items(
             library, kind, effective_page, played_only=True, updated_for_user=True
         )
-        mapped = tuple(self._map_valid_history(raw["items"], library.external_id))
+        observed_at = datetime.now(UTC)
+        mapped = tuple(
+            self._map_valid_history(raw["items"], library.external_id, observed_at=observed_at)
+        )
         return Page(
             mapped,
             page.start,
@@ -181,10 +184,8 @@ class JellyfinConnector:
             params["IsPlayed"] = True
             params["SortBy"] = "DatePlayed"
             params["SortOrder"] = "Ascending"
-        if page.updated_since is not None:
-            params[
-                "MinDateLastSavedForUser" if updated_for_user else "MinDateLastSaved"
-            ] = page.updated_since.isoformat().replace("+00:00", "Z")
+        if page.updated_since is not None and not updated_for_user:
+            params["MinDateLastSaved"] = page.updated_since.isoformat().replace("+00:00", "Z")
         raw = self._client.get_json(f"/Users/{self._user_id}/Items", params=params)
         if not isinstance(raw, dict) or not isinstance(raw.get("Items"), list):
             raise ConnectorResponseError("Jellyfin item response was invalid.")
@@ -215,11 +216,15 @@ class JellyfinConnector:
         return enriched
 
     def _map_valid_history(
-        self, items: list[dict[str, Any]], library_id: str
+        self,
+        items: list[dict[str, Any]],
+        library_id: str,
+        *,
+        observed_at: datetime,
     ) -> Iterator[ExternalWatchEvent]:
         for value in items:
             try:
-                event = map_history_item(value, library_id)
+                event = map_history_item(value, library_id, fallback_watched_at=observed_at)
             except (ConnectorResponseError, ValueError):
                 continue
             if event is not None:

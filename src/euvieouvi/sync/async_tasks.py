@@ -61,6 +61,7 @@ class AsyncTaskExecutor:
             "failed": 0,
             "percent": 100,
             "summary": "Fila aguardando eventos.",
+            "failure_details": "",
         }
 
     @property
@@ -82,24 +83,29 @@ class AsyncTaskExecutor:
                 failed=0,
                 percent=0,
                 summary="Processando atualizações instantâneas pendentes.",
+                failure_details="",
             )
         threading.Thread(target=self._execute, name="euvieouvi-async-tasks", daemon=True).start()
         return True
 
     def _execute(self) -> None:
         processed = updated = failed = 0
+        failure_details: list[str] = []
         try:
             with self._app.app_context():
                 while task_id := self._claim_due():
-                    succeeded = self._run_one(task_id)
+                    succeeded, changed, failure_detail = self._run_one(task_id)
                     processed += 1
-                    updated += int(succeeded)
+                    updated += int(changed)
                     failed += int(not succeeded)
+                    if failure_detail:
+                        failure_details.append(failure_detail)
                     with self._lock:
                         self._snapshot.update(
                             processed=processed,
                             updated=updated,
                             failed=failed,
+                            failure_details="\n".join(failure_details),
                             summary=f"{processed} itens da fila processados.",
                         )
         finally:
@@ -109,7 +115,8 @@ class AsyncTaskExecutor:
                     active=False,
                     percent=100,
                     summary=(
-                        f"Fila drenada: {updated} concluídos; "
+                        f"Fila drenada: {processed} processados; {updated} atualizados; "
+                        f"{processed - updated - failed} sem alteração; "
                         f"{failed} mantidos para nova tentativa."
                     ),
                 )
@@ -133,22 +140,22 @@ class AsyncTaskExecutor:
         db.session.commit()
         return int(task_id) if claimed else None
 
-    def _run_one(self, task_id: int) -> bool:
+    def _run_one(self, task_id: int) -> tuple[bool, bool, str | None]:
         task = db.session.get(AsyncTask, task_id)
         if task is None:
-            return True
+            return True, False, None
         try:
             if task.task_type != "watch_update":
                 raise ValueError(f"unsupported task type: {task.task_type}")
-            self._apply_watch_update(json.loads(task.payload))
+            changed = self._apply_watch_update(json.loads(task.payload))
             db.session.delete(task)
             db.session.commit()
-            return True
+            return True, changed, None
         except Exception as error:
             db.session.rollback()
             task = db.session.get(AsyncTask, task_id)
             if task is None:
-                return False
+                return False, False, f"task={task_id} · erro={type(error).__name__}: {error}"
             task.attempts += 1
             task.status = "pending"
             task.last_error = f"{type(error).__name__}: {error}"[:1000]
@@ -156,8 +163,25 @@ class AsyncTaskExecutor:
                 seconds=min(3600, 15 * (2 ** min(task.attempts - 1, 8)))
             )
             db.session.commit()
-            self._app.logger.warning("asynchronous task retained for retry", exc_info=True)
-            return False
+            detail = self._failure_detail(task, error)
+            self._app.logger.warning(
+                "asynchronous task retained for retry: %s", detail, exc_info=True
+            )
+            return False, False, detail
+
+    @staticmethod
+    def _failure_detail(task: AsyncTask, error: Exception) -> str:
+        try:
+            payload = json.loads(task.payload)
+        except (TypeError, ValueError):
+            payload = {}
+        source_id = str(payload.get("source_id") or "?")
+        external_id = str(payload.get("external_id") or "?")
+        return (
+            f"task={task.id} · tipo={task.task_type} · origem={source_id} · "
+            f"mídia={external_id} · tentativa={task.attempts} · "
+            f"erro={type(error).__name__}: {error}"
+        )[:2000]
 
     def retry_all(self) -> bool:
         with self._app.app_context():
@@ -169,7 +193,7 @@ class AsyncTaskExecutor:
             db.session.commit()
         return self.submit(force=True)
 
-    def _apply_watch_update(self, payload: dict[str, object]) -> None:
+    def _apply_watch_update(self, payload: dict[str, object]) -> bool:
         from euvieouvi.api.runtime import connector_for
 
         raw_source_id = payload["source_id"]
@@ -205,8 +229,10 @@ class AsyncTaskExecutor:
                 Source.enabled.is_(True),
             )
         ).all()
-        if len(targets) != 1:
-            raise LookupError("exactly one cross-server media reference is required")
+        if not targets:
+            return False
+        if len(targets) > 1:
+            raise LookupError(f"multiple cross-server media references found ({len(targets)})")
         target, source = targets[0]
         state = db.session.scalar(
             select(WatchState).where(
@@ -224,7 +250,7 @@ class AsyncTaskExecutor:
         # Instant propagation fills only an unwatched target. When both sources
         # have a completion, Plex wins without rewriting either play timestamp.
         if state is not None and state.completed:
-            return
+            return False
         if state is None or not state.completed or target_watched_at != watched_at:
             connector = connector_for(source)
             try:
@@ -248,6 +274,7 @@ class AsyncTaskExecutor:
         state.progress_ms = None
         state.observed_at = watched_at
         db.session.commit()
+        return True
 
 
 def get_async_task_executor(app: Flask) -> AsyncTaskExecutor:
