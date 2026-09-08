@@ -167,6 +167,7 @@ def map_media_item(item: Mapping[str, Any], library_external_id: str) -> Externa
         last_viewed_at=_timestamp(item.get("lastViewedAt")),
         view_count=_integer(item.get("viewCount")),
         view_offset_ms=_integer(item.get("viewOffset")),
+        completed=(_integer(item.get("viewCount")) or 0) > 0,
     )
 
 

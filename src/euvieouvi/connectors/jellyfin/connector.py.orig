@@ -146,17 +146,6 @@ class JellyfinConnector:
             params = {"datePlayed": watched_at.astimezone(UTC).isoformat().replace("+00:00", "Z")}
         self._client.post_empty(f"/Users/{self._user_id}/PlayedItems/{external_id}", params=params)
 
-    def set_progress(self, external_id: str, progress_ms: int) -> None:
-        if not external_id.strip():
-            raise ValueError("Jellyfin media id must not be empty")
-        if progress_ms < 0:
-            raise ValueError("Jellyfin progress must not be negative")
-        self._client.post_json(
-            f"/UserItems/{external_id}/UserData",
-            {"PlaybackPositionTicks": progress_ms * 10_000, "Played": False},
-            params={"userId": self._user_id},
-        )
-
     def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]:
         return self._client.get_image(source_path, width=width, height=height)
 

@@ -63,9 +63,7 @@ class PlexConnector:
         self.last_unsupported_libraries = rejected
         return libraries
 
-    def mark_watched(
-        self, external_id: str, *, watched_at: datetime | None = None
-    ) -> None:
+    def mark_watched(self, external_id: str, *, watched_at: datetime | None = None) -> None:
         del watched_at  # Plex's scrobble endpoint does not accept a historical play date.
         if not external_id.strip():
             raise ConnectorConfigurationError("Plex media id must not be empty.")
@@ -74,9 +72,22 @@ class PlexConnector:
             params={"key": external_id, "identifier": "com.plexapp.plugins.library"},
         )
 
-    def get_media_item(
-        self, external_id: str, library_external_id: str
-    ) -> ExternalMediaItem:
+    def set_progress(self, external_id: str, progress_ms: int) -> None:
+        if not external_id.strip():
+            raise ConnectorConfigurationError("Plex media id must not be empty.")
+        if progress_ms < 0:
+            raise ConnectorConfigurationError("Plex progress must not be negative.")
+        self._client.get(
+            "/:/progress",
+            params={
+                "key": external_id,
+                "time": progress_ms,
+                "state": "stopped",
+                "identifier": "com.plexapp.plugins.library",
+            },
+        )
+
+    def get_media_item(self, external_id: str, library_external_id: str) -> ExternalMediaItem:
         """Fetch one item so webhook handling can verify Plex's stored watch state."""
         if not external_id.strip():
             raise ConnectorConfigurationError("Plex media id must not be empty.")

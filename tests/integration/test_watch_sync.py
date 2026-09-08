@@ -34,6 +34,9 @@ class FailingConnector:
         del watched_at
         raise RuntimeError(external_id)
 
+    def set_progress(self, external_id: str, progress_ms: int) -> None:
+        raise RuntimeError(f"{external_id}:{progress_ms}")
+
     def close(self) -> None:
         pass
 
@@ -46,6 +49,9 @@ class RecordingConnector:
     def mark_watched(self, external_id: str, *, watched_at: datetime | None = None) -> None:
         assert watched_at == NOW
         self.calls.append((self.source.connector_type, external_id))
+
+    def set_progress(self, external_id: str, progress_ms: int) -> None:
+        self.calls.append((self.source.connector_type, f"{external_id}:{progress_ms}"))
 
     def close(self) -> None:
         pass
@@ -233,6 +239,18 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
         )
         target_state.completed = False
         pending.value = "true"
+        db.session.add(
+            WatchEvent(
+                media_item_id=movie_id,
+                source_id=target_source_id,
+                source_event_id="historical-target-completion",
+                dedup_key="historical-target-completion",
+                watched_at=NOW - timedelta(days=30),
+                completed=True,
+                playback_user=("plex-user" if target_source is ConnectorType.PLEX else "user"),
+                origin="synchronization",
+            )
+        )
         db.session.commit()
         failure_details: list[str] = []
         failed_result = WatchSyncService(
@@ -306,3 +324,114 @@ def test_separate_rows_are_grouped_by_provider_identity(app: Flask) -> None:
             db.session, item_ids, {media_id: MediaKind.EPISODE for media_id in item_ids}
         )
         assert groups == (frozenset(item_ids),)
+
+
+def test_partial_progress_syncs_with_plex_conflict_precedence(app: Flask) -> None:
+    calls: list[tuple[ConnectorType, str]] = []
+    with app.app_context():
+        plex = Source(
+            connector_type=ConnectorType.PLEX,
+            name="Plex progress",
+            base_url="http://plex.local",
+            secret="token",
+            enabled=True,
+        )
+        jellyfin = Source(
+            connector_type=ConnectorType.JELLYFIN,
+            name="Jellyfin progress",
+            base_url="http://jellyfin.local",
+            secret='{"api_key":"key","user_id":"user"}',
+            enabled=True,
+        )
+        db.session.add_all([plex, jellyfin, Setting(key="plex.user_id", value="plex-user")])
+        db.session.flush()
+        plex_library = Library(
+            source_id=plex.id,
+            external_id="plex-movies",
+            name="Movies",
+            media_type=LibraryMediaType.MOVIE,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
+        )
+        jellyfin_library = Library(
+            source_id=jellyfin.id,
+            external_id="jf-movies",
+            name="Movies",
+            media_type=LibraryMediaType.MOVIE,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
+        )
+        movie = MediaItem(kind=MediaKind.MOVIE, title="Resume me")
+        db.session.add_all([plex_library, jellyfin_library, movie])
+        db.session.flush()
+        db.session.add_all(
+            [
+                SourceMediaRef(
+                    source_id=plex.id,
+                    library_id=plex_library.id,
+                    media_item_id=movie.id,
+                    external_id="plex-resume",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+                SourceMediaRef(
+                    source_id=jellyfin.id,
+                    library_id=jellyfin_library.id,
+                    media_item_id=movie.id,
+                    external_id="jf-resume",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+                WatchState(
+                    media_item_id=movie.id,
+                    source_id=plex.id,
+                    view_count=0,
+                    completed=False,
+                    progress_ms=500_000,
+                    observed_at=NOW,
+                ),
+                WatchState(
+                    media_item_id=movie.id,
+                    source_id=jellyfin.id,
+                    view_count=0,
+                    completed=False,
+                    progress_ms=200_000,
+                    observed_at=NOW,
+                ),
+            ]
+        )
+        db.session.commit()
+        movie_id = movie.id
+        plex_source_id = plex.id
+        jellyfin_source_id = jellyfin.id
+
+        service = WatchSyncService(
+            lambda: db.session(), lambda source: RecordingConnector(source, calls)
+        )
+        result = service.run(None, source_type=ConnectorType.PLEX)
+
+        assert result.updated == 1
+        assert calls == [(ConnectorType.JELLYFIN, "jf-resume:500000")]
+        target = db.session.scalar(
+            db.select(WatchState).where(
+                WatchState.media_item_id == movie_id, WatchState.source_id == jellyfin_source_id
+            )
+        )
+        assert target is not None and target.completed is False and target.progress_ms == 500_000
+
+        plex_state = db.session.scalar(
+            db.select(WatchState).where(
+                WatchState.media_item_id == movie_id, WatchState.source_id == plex_source_id
+            )
+        )
+        assert plex_state is not None
+        plex_state.progress_ms = 600_000
+        target.progress_ms = 700_000
+        db.session.commit()
+        reverse = service.run(None, source_type=ConnectorType.JELLYFIN)
+        assert reverse.updated == 0
+        assert calls == [(ConnectorType.JELLYFIN, "jf-resume:500000")]

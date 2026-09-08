@@ -118,6 +118,7 @@ def map_item(raw: dict[str, Any], library_id: str) -> ExternalMediaItem:
         last_viewed_at=_timestamp(user_data.get("LastPlayedDate")),
         view_count=view_count,
         view_offset_ms=_milliseconds(user_data.get("PlaybackPositionTicks")),
+        completed=user_data.get("Played") is True,
     )
 
 

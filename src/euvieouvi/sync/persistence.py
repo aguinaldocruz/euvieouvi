@@ -223,22 +223,20 @@ class MediaPersistenceService:
             )
         return True
 
-    def _apply_event_to_watch_state(
-        self, media_item_id: int, event: ExternalWatchEvent
-    ) -> None:
+    def _apply_event_to_watch_state(self, media_item_id: int, event: ExternalWatchEvent) -> None:
         """Make a completed event visible as current state in the same transaction."""
         state = self.work.watch_states.by_item_and_source(media_item_id, self.source_id)
         event_count = max(
             event.view_number or 0,
             int(
-            self.work.session.scalar(
-                select(func.count(WatchEvent.id)).where(
-                    WatchEvent.media_item_id == media_item_id,
-                    WatchEvent.source_id == self.source_id,
-                    WatchEvent.completed.is_(True),
+                self.work.session.scalar(
+                    select(func.count(WatchEvent.id)).where(
+                        WatchEvent.media_item_id == media_item_id,
+                        WatchEvent.source_id == self.source_id,
+                        WatchEvent.completed.is_(True),
+                    )
                 )
-            )
-            or 0
+                or 0
             ),
         )
         if state is None:
@@ -310,11 +308,12 @@ class MediaPersistenceService:
                 continue
             state = states.get(int(row.id))
             event_count, event_last = event_facts.get(int(row.id), (0, None))
-            known_count = max(state.view_count if state is not None else 0, event_count)
-            last_watched = _latest_datetime(
-                state.last_watched_at if state is not None else None,
-                event_last,
-            )
+            if state is not None:
+                known_count = state.view_count if state.completed else 0
+                last_watched = state.last_watched_at if state.completed else None
+            else:
+                known_count = event_count
+                last_watched = event_last
             grouped.setdefault(int(row.parent_id), []).append(
                 (int(row.id), known_count, last_watched)
             )
@@ -462,6 +461,29 @@ class MediaPersistenceService:
         if len(matches) > 1:
             raise ValueError("External identifiers match more than one catalog item.")
         if not matches:
+            if item.kind is ExternalMediaKind.EPISODE:
+                assert item.show_external_id is not None
+                season_external_id = item.season_external_id or (
+                    f"{item.show_external_id}:season:{item.season_number}"
+                )
+                season_reference = self.work.source_media_refs.by_external_identity(
+                    self.source_id, season_external_id
+                )
+                if season_reference is None:
+                    return None
+                candidates = self.work.session.scalars(
+                    select(MediaItem)
+                    .join(SourceMediaRef, SourceMediaRef.media_item_id == MediaItem.id)
+                    .where(
+                        MediaItem.kind == MediaKind.EPISODE,
+                        MediaItem.parent_id == season_reference.media_item_id,
+                        MediaItem.season_number == item.season_number,
+                        MediaItem.episode_number == item.episode_number,
+                        SourceMediaRef.source_id != self.source_id,
+                    )
+                    .distinct()
+                ).all()
+                return candidates[0] if len(candidates) == 1 else None
             if item.kind is not ExternalMediaKind.MOVIE:
                 return None
             # Some Plex/Jellyfin installations omit provider ids. Exact movie
@@ -834,6 +856,7 @@ class MediaPersistenceService:
             return False
         state = self.work.watch_states.by_item_and_source(media_item_id, self.source_id)
         incoming_count = item.view_count or 0
+        incoming_completed = item.completed if item.completed is not None else incoming_count > 0
         regression = state is not None and incoming_count < state.view_count
         preserved_count = max(state.view_count if state else 0, incoming_count)
         if state is None:
@@ -841,13 +864,13 @@ class MediaPersistenceService:
                 media_item_id=media_item_id,
                 source_id=self.source_id,
                 view_count=preserved_count,
-                completed=incoming_count > 0,
+                completed=incoming_completed,
                 observed_at=observed_at,
             )
             self.work.watch_states.add(state)
         state.view_count = preserved_count
         state.last_watched_at = item.last_viewed_at or state.last_watched_at
-        state.completed = state.completed or incoming_count > 0
+        state.completed = incoming_completed
         state.progress_ms = item.view_offset_ms
         state.observed_at = observed_at
         return regression

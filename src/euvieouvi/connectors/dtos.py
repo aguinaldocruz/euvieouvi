@@ -130,6 +130,7 @@ class ExternalMediaItem:
     last_viewed_at: datetime | None = None
     view_count: int | None = None
     view_offset_ms: int | None = None
+    completed: bool | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.external_id, "external_id")

@@ -38,7 +38,9 @@ class WatchSyncCandidate:
     media_item_id: int
     target_source_id: int
     target_external_id: str
-    watched_at: datetime
+    watched_at: datetime | None
+    progress_ms: int | None
+    completed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,9 +132,12 @@ class WatchSyncService:
                     if connector is None:
                         connector = self._connector(candidate.target_source_id)
                         connectors[candidate.target_source_id] = connector
-                    connector.mark_watched(
-                        candidate.target_external_id, watched_at=candidate.watched_at
-                    )
+                    if candidate.completed:
+                        connector.mark_watched(
+                            candidate.target_external_id, watched_at=candidate.watched_at
+                        )
+                    elif candidate.progress_ms is not None:
+                        connector.set_progress(candidate.target_external_id, candidate.progress_ms)
                 except Exception as error:
                     failed += 1
                     detail = self._failure_detail(candidate, error)
@@ -166,7 +171,7 @@ class WatchSyncService:
             title = item.title if item is not None else "item ausente"
             target = source.name if source is not None else f"fonte {candidate.target_source_id}"
             return (
-                f"operação=propagar assistido · tipo={kind} · título={title} · "
+                f"operação=propagar estado de reprodução · tipo={kind} · título={title} · "
                 f"item={candidate.media_item_id} · destino={target} · "
                 f"externo={candidate.target_external_id} · "
                 f"erro={type(error).__name__}: {error}"
@@ -239,18 +244,27 @@ class WatchSyncService:
                 if key not in watched or normalized > watched[key]:
                     watched[key] = normalized
 
-            for state in session.scalars(
+            current_states = session.scalars(
                 select(WatchState).where(
                     WatchState.source_id.in_(source_ids),
                     WatchState.media_item_id.in_(item_ids),
-                    WatchState.completed.is_(True),
                 )
-            ):
-                remember(
-                    state.media_item_id,
-                    state.source_id,
-                    state.last_watched_at or state.observed_at,
-                )
+            ).all()
+            partial_progress: dict[tuple[int, int], int] = {}
+            current_state_keys = {
+                (state.media_item_id, state.source_id) for state in current_states
+            }
+            for state in current_states:
+                if not state.completed and (state.progress_ms or 0) > 0:
+                    partial_progress[(state.media_item_id, state.source_id)] = int(
+                        state.progress_ms or 0
+                    )
+                if state.completed:
+                    remember(
+                        state.media_item_id,
+                        state.source_id,
+                        state.last_watched_at or state.observed_at,
+                    )
             for source_id, configured_user in configured_users.items():
                 for media_item_id, event_source_id, watched_at in session.execute(
                     select(
@@ -264,7 +278,8 @@ class WatchSyncService:
                         WatchEvent.playback_user == configured_user,
                     )
                 ):
-                    remember(media_item_id, event_source_id, watched_at)
+                    if (media_item_id, event_source_id) not in current_state_keys:
+                        remember(media_item_id, event_source_id, watched_at)
             refs_by_item: dict[int, dict[int, SourceMediaRef]] = {}
             for ref in refs:
                 refs_by_item.setdefault(ref.media_item_id, {}).setdefault(ref.source_id, ref)
@@ -293,26 +308,42 @@ class WatchSyncService:
                     )
                     for source_id in source_ids
                 }
-                completed_sources = {
-                    source_id for source_id, value in watched_by_source.items() if value is not None
+                progress_by_source = {
+                    source_id: max(
+                        (
+                            partial_progress.get((media_item_id, source_id), 0)
+                            for media_item_id in group
+                        ),
+                        default=0,
+                    )
+                    for source_id in source_ids
                 }
-                if not completed_sources:
-                    skipped += 1
-                    continue
+                source_watched_at: datetime | None = None
+                source_progress: int | None = None
+                completed = False
                 if source_type is not None:
                     requested_source = by_type[source_type].id
-                    if requested_source not in completed_sources:
-                        skipped += 1
-                        continue
                     target_source_id = next(iter(source_ids - {requested_source}))
                     source_watched_at = watched_by_source[requested_source]
                     target_watched_at = watched_by_source[target_source_id]
-                    # Propagation only fills a missing completion. If both sides
-                    # are watched, Plex remains authoritative and neither server
-                    # is re-scrobbled merely to reconcile timestamps.
-                    if source_watched_at is None or target_watched_at is not None:
+                    requested_progress = progress_by_source[requested_source]
+                    target_progress = progress_by_source[target_source_id]
+                    if source_watched_at is not None and target_watched_at is None:
+                        completed = True
+                    elif (
+                        source_watched_at is not None
+                        or target_watched_at is not None
+                        or requested_progress <= 0
+                        or requested_progress == target_progress
+                    ):
                         skipped += 1
                         continue
+                    elif source_type is ConnectorType.JELLYFIN and target_progress > 0:
+                        # Plex owns conflicts: Jellyfin fills only an empty Plex resume position.
+                        skipped += 1
+                        continue
+                    else:
+                        source_progress = requested_progress
                 else:
                     plex_source_id = by_type[ConnectorType.PLEX].id
                     jellyfin_source_id = by_type[ConnectorType.JELLYFIN].id
@@ -321,9 +352,22 @@ class WatchSyncService:
                     if plex_watched_at is not None and jellyfin_watched_at is None:
                         target_source_id = jellyfin_source_id
                         source_watched_at = plex_watched_at
+                        completed = True
                     elif plex_watched_at is None and jellyfin_watched_at is not None:
                         target_source_id = plex_source_id
                         source_watched_at = jellyfin_watched_at
+                        completed = True
+                    elif plex_watched_at is not None or jellyfin_watched_at is not None:
+                        skipped += 1
+                        continue
+                    elif progress_by_source[plex_source_id] > 0 and (
+                        progress_by_source[plex_source_id] != progress_by_source[jellyfin_source_id]
+                    ):
+                        target_source_id = jellyfin_source_id
+                        source_progress = progress_by_source[plex_source_id]
+                    elif progress_by_source[jellyfin_source_id] > 0:
+                        target_source_id = plex_source_id
+                        source_progress = progress_by_source[jellyfin_source_id]
                     else:
                         skipped += 1
                         continue
@@ -334,6 +378,8 @@ class WatchSyncService:
                         target_source_id,
                         target_ref.external_id,
                         source_watched_at,
+                        source_progress,
+                        completed,
                     )
                 )
             now = self._clock()
@@ -396,18 +442,23 @@ class WatchSyncService:
                     state = WatchState(
                         media_item_id=candidate.media_item_id,
                         source_id=candidate.target_source_id,
-                        view_count=1,
-                        completed=True,
+                        view_count=1 if candidate.completed else 0,
+                        completed=candidate.completed,
                         last_watched_at=candidate.watched_at,
+                        progress_ms=candidate.progress_ms,
                         observed_at=now,
                     )
                     session.add(state)
                     states[key] = state
-                else:
+                elif candidate.completed:
                     state.completed = True
                     state.last_watched_at = candidate.watched_at
                     state.view_count = max(1, state.view_count)
                     state.progress_ms = None
+                    state.observed_at = now
+                else:
+                    state.completed = False
+                    state.progress_ms = candidate.progress_ms
                     state.observed_at = now
             if run_id is not None:
                 run = session.get(SyncRun, run_id)

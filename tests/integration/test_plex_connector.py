@@ -351,3 +351,14 @@ def test_invalid_payload_is_classified() -> None:
 
     with pytest.raises(ConnectorResponseError, match="invalid response"):
         make_connector(httpx.MockTransport(route)).list_libraries()
+
+
+def test_set_progress_uses_progress_endpoint() -> None:
+    def route(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/:/progress"
+        assert request.url.params["key"] == "101"
+        assert request.url.params["time"] == "123456"
+        assert request.url.params["state"] == "stopped"
+        return httpx.Response(200, content=b"", request=request)
+
+    make_connector(httpx.MockTransport(route)).set_progress("101", 123_456)

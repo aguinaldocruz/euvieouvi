@@ -36,7 +36,7 @@ class JellyfinHttpClient:
             "X-Emby-Token": api_key.strip(),
             "Authorization": (
                 'MediaBrowser Client="euvieouvi", Device="Server", '
-                'DeviceId="euvieouvi", Version="2"'
+                f'DeviceId="euvieouvi", Version="2", Token="{api_key.strip()}"'
             ),
         }
         self._timeout = httpx.Timeout(timeout, connect=min(timeout, 5.0))
@@ -75,6 +75,31 @@ class JellyfinHttpClient:
                 params=params,
                 headers=self._headers,
                 timeout=self._timeout,
+            )
+        except httpx.TimeoutException as error:
+            raise ConnectorTimeoutError("Jellyfin request timed out.") from error
+        except httpx.RequestError as error:
+            raise ConnectorConnectionError("Jellyfin request failed.") from error
+        if response.status_code in {401, 403}:
+            raise ConnectorAuthenticationError("Jellyfin rejected the API key.")
+        if response.status_code == 404:
+            raise ConnectorNotFoundError("Jellyfin resource was not found.")
+        if response.status_code >= 400:
+            raise ConnectorResponseError("Jellyfin returned an unsuccessful response.")
+
+    def post_json(
+        self,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        params: Mapping[str, str | int | bool] | None = None,
+    ) -> None:
+        if not path.startswith("/") or path.startswith("//"):
+            raise ConnectorConfigurationError("Jellyfin path must be server-local.")
+        url = urljoin(self.base_url, path.lstrip("/"))
+        try:
+            response = self._client.post(
+                url, params=params, json=dict(payload), headers=self._headers, timeout=self._timeout
             )
         except httpx.TimeoutException as error:
             raise ConnectorTimeoutError("Jellyfin request timed out.") from error

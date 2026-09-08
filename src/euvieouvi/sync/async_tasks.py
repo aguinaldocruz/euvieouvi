@@ -24,19 +24,36 @@ def enqueue_watch_update(
     source_id: int,
     external_id: str,
     watched_at: datetime,
+    progress_ms: int | None = None,
+    completed: bool = True,
 ) -> None:
-    identity = f"watch:{source_id}:{external_id}:{watched_at.astimezone(UTC).isoformat()}"
+    identity = (
+        f"watch:{source_id}:{external_id}:{watched_at.astimezone(UTC).isoformat()}"
+        if completed
+        else f"progress:{source_id}:{external_id}"
+    )
+    dedup_key = hashlib.sha256(identity.encode()).hexdigest()
+    serialized = json.dumps(
+        {
+            "source_id": source_id,
+            "external_id": external_id,
+            "watched_at": watched_at.astimezone(UTC).isoformat(),
+            "progress_ms": progress_ms,
+            "completed": completed,
+        },
+        separators=(",", ":"),
+    )
+    existing = session.scalar(
+        select(AsyncTask).where(AsyncTask.dedup_key == dedup_key, AsyncTask.status == "pending")
+    )
+    if existing is not None:
+        existing.payload = serialized
+        existing.next_attempt_at = datetime.now(UTC)
+        return
     task = AsyncTask(
         task_type="watch_update",
-        dedup_key=hashlib.sha256(identity.encode()).hexdigest(),
-        payload=json.dumps(
-            {
-                "source_id": source_id,
-                "external_id": external_id,
-                "watched_at": watched_at.astimezone(UTC).isoformat(),
-            },
-            separators=(",", ":"),
-        ),
+        dedup_key=dedup_key,
+        payload=serialized,
         status="pending",
         next_attempt_at=datetime.now(UTC),
     )
@@ -207,6 +224,11 @@ class AsyncTaskExecutor:
             if watched_at.tzinfo is None
             else watched_at.astimezone(UTC)
         )
+        completed = bool(payload.get("completed", True))
+        raw_progress = payload.get("progress_ms")
+        progress_ms = int(raw_progress) if raw_progress is not None else None
+        if not completed and (progress_ms is None or progress_ms <= 0):
+            return False
         origin = db.session.get(Source, source_id)
         if origin is None:
             raise LookupError("watch update source is not available")
@@ -247,10 +269,40 @@ class AsyncTaskExecutor:
                 if target_watched_at.tzinfo is None
                 else target_watched_at.astimezone(UTC)
             )
-        # Instant propagation fills only an unwatched target. When both sources
-        # have a completion, Plex wins without rewriting either play timestamp.
         if state is not None and state.completed:
             return False
+        if not completed:
+            assert progress_ms is not None
+            target_progress = state.progress_ms if state is not None else None
+            if target_progress == progress_ms:
+                return False
+            if (
+                origin.connector_type.value == "jellyfin"
+                and source.connector_type.value == "plex"
+                and (target_progress or 0) > 0
+            ):
+                return False
+            connector = connector_for(source)
+            try:
+                connector.set_progress(target.external_id, progress_ms)
+            finally:
+                close = getattr(connector, "close", None)
+                if callable(close):
+                    close()
+            if state is None:
+                state = WatchState(
+                    media_item_id=target.media_item_id,
+                    source_id=target.source_id,
+                    view_count=0,
+                    completed=False,
+                    observed_at=watched_at,
+                )
+                db.session.add(state)
+            state.completed = False
+            state.progress_ms = progress_ms
+            state.observed_at = watched_at
+            db.session.commit()
+            return True
         if state is None or not state.completed or target_watched_at != watched_at:
             connector = connector_for(source)
             try:

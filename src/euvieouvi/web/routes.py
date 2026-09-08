@@ -1417,7 +1417,13 @@ def plex_webhook(token: str) -> Any:
         event_key=str(payload.get("event_id") or "").strip() or None,
     )
     if not completed:
-        db.session.commit()
+        progress_ms = _safe_integer(metadata.get("viewOffset"))
+        if user_matches and progress_ms is not None and progress_ms > 0:
+            _persist_and_enqueue_progress(source, external_id, progress_ms, watched_at)
+            db.session.commit()
+            _request_watch_propagation()
+        else:
+            db.session.commit()
         return Response(status=204)
     if not library_external_id:
         return Response("Biblioteca da mídia ausente.", 400)
@@ -1487,6 +1493,13 @@ def jellyfin_webhook(token: str) -> Any:
         if media_kind and media_kind.casefold() == "episode"
         else None
     )
+    position_ticks = _first_present(
+        payload.get("PlaybackPositionTicks"),
+        payload.get("PositionTicks"),
+        raw_item.get("PlaybackPositionTicks"),
+        raw_item.get("PositionTicks"),
+    )
+    position_ms = _ticks_to_ms(position_ticks)
     _record_webhook_activity(
         source,
         external_id=external_id,
@@ -1507,12 +1520,7 @@ def jellyfin_webhook(token: str) -> Any:
         event_type=notification_type,
         occurred_at=watched_at,
         progress_percent=_playback_percent(
-            _first_present(
-                payload.get("PlaybackPositionTicks"),
-                payload.get("PositionTicks"),
-                raw_item.get("PlaybackPositionTicks"),
-                raw_item.get("PositionTicks"),
-            ),
+            position_ticks,
             _first_present(payload.get("RunTimeTicks"), raw_item.get("RunTimeTicks")),
         ),
         completed=completed,
@@ -1520,7 +1528,12 @@ def jellyfin_webhook(token: str) -> Any:
         event_key=str(payload.get("NotificationId") or "").strip() or None,
     )
     if not completed:
-        db.session.commit()
+        if configured_user_matches and position_ms is not None and position_ms > 0:
+            _persist_and_enqueue_progress(source, external_id, position_ms, watched_at)
+            db.session.commit()
+            _request_watch_propagation()
+        else:
+            db.session.commit()
         return Response(status=204)
     reference = db.session.scalar(
         select(SourceMediaRef).where(
@@ -2648,6 +2661,47 @@ def _plex_live_tv_metadata(metadata: dict[str, Any]) -> bool:
         return True
     section_type = str(metadata.get("librarySectionType") or "").strip().casefold()
     return section_type in {"live", "livetv", "live-tv"}
+
+
+def _persist_and_enqueue_progress(
+    source: Source, external_id: str, progress_ms: int, observed_at: datetime
+) -> None:
+    reference = db.session.scalar(
+        select(SourceMediaRef).where(
+            SourceMediaRef.source_id == source.id,
+            SourceMediaRef.external_id == external_id,
+            SourceMediaRef.available.is_(True),
+        )
+    )
+    if reference is not None:
+        state = db.session.scalar(
+            select(WatchState).where(
+                WatchState.media_item_id == reference.media_item_id,
+                WatchState.source_id == source.id,
+            )
+        )
+        if state is not None and state.completed:
+            return
+        if state is None:
+            state = WatchState(
+                media_item_id=reference.media_item_id,
+                source_id=source.id,
+                view_count=0,
+                completed=False,
+                observed_at=observed_at,
+            )
+            db.session.add(state)
+        state.completed = False
+        state.progress_ms = progress_ms
+        state.observed_at = observed_at
+    enqueue_watch_update(
+        db.session(),
+        source_id=source.id,
+        external_id=external_id,
+        watched_at=observed_at,
+        progress_ms=progress_ms,
+        completed=False,
+    )
 
 
 def _persist_webhook_event(

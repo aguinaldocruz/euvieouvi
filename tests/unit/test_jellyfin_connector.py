@@ -1,5 +1,6 @@
 """Jellyfin boundary, mapping, and pagination tests without network access."""
 
+import json
 from datetime import UTC, datetime
 
 import httpx
@@ -39,6 +40,7 @@ def make_client(handler: httpx.MockTransport) -> JellyfinHttpClient:
 def test_connector_discovers_reads_history_and_images() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["X-Emby-Token"] == "test-api-key"
+        assert 'Token="test-api-key"' in request.headers["Authorization"]
         if request.url.path.endswith("/System/Info"):
             return httpx.Response(
                 200,
@@ -130,6 +132,7 @@ def test_played_flag_wins_over_inconsistent_zero_play_count() -> None:
     )
 
     assert item.view_count == 1
+    assert item.completed is True
     assert item.last_viewed_at is None
     observed_at = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
     event = map_history_item(
@@ -175,9 +178,7 @@ def test_list_users_returns_selectable_jellyfin_users() -> None:
             request=request,
         )
 
-    users = JellyfinConnector(
-        make_client(httpx.MockTransport(handler)), "user-1"
-    ).list_users()
+    users = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1").list_users()
     assert [(user.external_id, user.name) for user in users] == [
         ("aaaaaaaa", "Alice"),
         ("bbbbbbbb", "Zoe"),
@@ -385,3 +386,18 @@ def test_executor_rejects_empty_or_unknown_sources(app: Flask) -> None:
         with pytest.raises(LookupError, match="Source not found"):
             executor.submit(999)
         assert executor.cancel(999) is False
+
+
+def test_set_progress_posts_user_data_without_marking_played() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path.endswith("/UserItems/movie-1/UserData")
+        assert request.url.params["userId"] == "user-1"
+        assert json.loads(request.content) == {
+            "PlaybackPositionTicks": 123_456_0000,
+            "Played": False,
+        }
+        return httpx.Response(204, request=request)
+
+    connector = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1")
+    connector.set_progress("movie-1", 123_456)

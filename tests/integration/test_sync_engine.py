@@ -49,11 +49,13 @@ from euvieouvi.database.models import (
     WatchState,
     WebhookEvent,
 )
+from euvieouvi.database.unit_of_work import UnitOfWork
 from euvieouvi.extensions import db
 from euvieouvi.sync.cancellation import CancellationToken
 from euvieouvi.sync.discovery import LibraryDiscoveryService
 from euvieouvi.sync.errors import SyncAlreadyRunningError
 from euvieouvi.sync.orchestrator import SyncOrchestrator
+from euvieouvi.sync.persistence import MediaPersistenceService
 from euvieouvi.sync.reconcile import reconcile_orphaned_runs
 
 NOW = datetime(2026, 8, 4, 18, 0, tzinfo=UTC)
@@ -196,6 +198,7 @@ def movie(
     external_id: str,
     *,
     view_count: int | None = None,
+    completed: bool | None = None,
     title: str | None = None,
     genres: tuple[str, ...] = (),
     thumb_path: str | None = None,
@@ -207,6 +210,7 @@ def movie(
         kind=ExternalMediaKind.MOVIE,
         title=title or f"Movie {external_id}",
         view_count=view_count,
+        completed=completed,
         last_viewed_at=NOW if view_count else None,
         genres=genres,
         thumb_path=thumb_path,
@@ -1031,15 +1035,23 @@ def test_lower_view_count_is_not_applied_silently(app: Flask) -> None:
         engine = orchestrator(FixtureConnector({"movies": (movie("1", view_count=4),)}))
         assert engine.run(source_id).status is SyncStatus.SUCCEEDED
 
-        second = orchestrator(FixtureConnector({"movies": (movie("1", view_count=2),)})).run(
-            source_id
-        )
+        orchestrator(
+            FixtureConnector({"movies": (movie("1", view_count=2, completed=False),)})
+        ).run(source_id)
 
         state = db.session.scalar(select(WatchState))
-        assert state is not None and state.view_count == 4
+        assert state is not None and state.view_count == 4 and state.completed is False
+
+        third = orchestrator(FixtureConnector({"movies": (movie("1", view_count=0),)})).run(
+            source_id
+        )
+        db.session.expire_all()
+        state = db.session.scalar(select(WatchState))
+        assert state is not None and state.view_count == 4 and state.completed is False
+        assert db.session.scalar(select(func.count()).select_from(WatchEvent)) == 1
         warning = db.session.scalar(
             select(SyncError).where(
-                SyncError.sync_run_id == second.run_id,
+                SyncError.sync_run_id == third.run_id,
                 SyncError.category == "view_count_regression",
             )
         )
@@ -1222,4 +1234,119 @@ def test_ambiguous_episode_identifier_keeps_source_specific_item(app: Flask) -> 
                 )
             )
             is not None
+        )
+
+
+def test_identifierless_episode_matches_unique_cross_source_season_coordinate(app: Flask) -> None:
+    with app.app_context():
+        plex_id, library_ids = seed_source(second_library=True)
+        plex_library_id = library_ids[1]
+        show = MediaItem(kind=MediaKind.SHOW, title="Bloodline")
+        db.session.add(show)
+        db.session.flush()
+        season = MediaItem(
+            kind=MediaKind.SEASON,
+            title="Season 1",
+            parent_id=show.id,
+            season_number=1,
+        )
+        db.session.add(season)
+        db.session.flush()
+        episode = MediaItem(
+            kind=MediaKind.EPISODE,
+            title="Part 11",
+            parent_id=season.id,
+            season_number=1,
+            episode_number=11,
+        )
+        db.session.add(episode)
+        db.session.flush()
+        db.session.add_all(
+            [
+                SourceMediaRef(
+                    source_id=plex_id,
+                    library_id=plex_library_id,
+                    media_item_id=episode.id,
+                    external_id="plex-episode-11",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+            ]
+        )
+        jellyfin = Source(
+            connector_type=ConnectorType.JELLYFIN,
+            name="Fixture Jellyfin",
+            base_url="http://jellyfin.local:8096",
+            secret="sanitized",
+            enabled=True,
+        )
+        db.session.add(jellyfin)
+        db.session.flush()
+        jellyfin_library = Library(
+            source_id=jellyfin.id,
+            external_id="jf-shows",
+            name="Shows",
+            media_type=LibraryMediaType.SHOW,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
+        )
+        db.session.add(jellyfin_library)
+        db.session.flush()
+        db.session.add_all(
+            [
+                SourceMediaRef(
+                    source_id=jellyfin.id,
+                    library_id=jellyfin_library.id,
+                    media_item_id=show.id,
+                    external_id="jf-bloodline",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+                SourceMediaRef(
+                    source_id=jellyfin.id,
+                    library_id=jellyfin_library.id,
+                    media_item_id=season.id,
+                    external_id="jf-bloodline-season-1",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+            ]
+        )
+        db.session.commit()
+        incoming = ExternalMediaItem(
+            external_id="jf-episode-11",
+            library_external_id="jf-shows",
+            kind=ExternalMediaKind.EPISODE,
+            title="Episódio 11",
+            show_external_id="jf-bloodline",
+            show_title="Bloodline",
+            season_external_id="jf-bloodline-season-1",
+            season_number=1,
+            episode_number=11,
+        )
+
+        with UnitOfWork(db.session()) as work:
+            result = MediaPersistenceService(
+                work, source_id=jellyfin.id, library_id=jellyfin_library.id
+            ).persist_media(incoming, NOW)
+            work.commit()
+
+        assert result.media_item_id == episode.id
+        assert (
+            db.session.scalar(
+                select(func.count())
+                .select_from(MediaItem)
+                .where(MediaItem.kind == MediaKind.EPISODE)
+            )
+            == 1
+        )
+        assert (
+            db.session.scalar(
+                select(func.count())
+                .select_from(SourceMediaRef)
+                .where(SourceMediaRef.media_item_id == episode.id)
+            )
+            == 2
         )
