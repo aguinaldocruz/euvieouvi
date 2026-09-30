@@ -13,6 +13,7 @@ from flask import Flask
 from sqlalchemy import func, insert, select
 
 from euvieouvi import create_app
+from euvieouvi.credentials import decrypt_text, encrypt_text, is_encrypted
 from euvieouvi.database.backup import backup_database, restore_database
 from euvieouvi.database.enums import ConnectorType, MediaKind
 from euvieouvi.database.models import MediaItem, Source
@@ -27,7 +28,7 @@ def test_backup_restore_and_application_recreation_preserve_volume(
             connector_type=ConnectorType.PLEX,
             name="Persistent Plex",
             base_url="http://plex:32400",
-            secret="volume-secret",
+            secret=encrypt_text("volume-secret"),
             enabled=True,
         )
         db.session.add(source)
@@ -47,7 +48,7 @@ def test_backup_restore_and_application_recreation_preserve_volume(
     recreated = create_app(
         {
             "ENVIRONMENT": "testing",
-            "SECRET_KEY": "recreated-test-secret",
+            "SECRET_KEY": "test-secret-key",
             "TESTING": True,
             "INSTANCE_PATH": Path(app.instance_path),
             "DATABASE_URI": app.config["SQLALCHEMY_DATABASE_URI"],
@@ -55,7 +56,8 @@ def test_backup_restore_and_application_recreation_preserve_volume(
     )
     with recreated.app_context():
         persisted = db.session.scalar(select(Source).where(Source.name == "Persistent Plex"))
-        assert persisted is not None and persisted.secret == "volume-secret"
+        assert persisted is not None and is_encrypted(persisted.secret)
+        assert decrypt_text(persisted.secret) == "volume-secret"
         assert recreated.test_client().get("/health/ready").status_code == 200
 
 

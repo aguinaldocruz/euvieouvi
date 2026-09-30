@@ -8,10 +8,11 @@ import re
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 from flask import Flask
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from euvieouvi.api.runtime import LocalSyncExecutor
 from euvieouvi.connectors.dtos import (
@@ -21,6 +22,7 @@ from euvieouvi.connectors.dtos import (
     ExternalLibraryType,
     ExternalMediaItem,
     ExternalMediaKind,
+    ExternalUser,
     ExternalWatchEvent,
     HistoryCheckpoint,
     Page,
@@ -28,6 +30,7 @@ from euvieouvi.connectors.dtos import (
 )
 from euvieouvi.connectors.errors import ConnectorConnectionError, ConnectorNotFoundError
 from euvieouvi.connectors.plex.connector import PlexConnector
+from euvieouvi.credentials import decrypt_text, is_encrypted
 from euvieouvi.database.enums import (
     ConnectorType,
     LibraryMediaType,
@@ -55,7 +58,11 @@ from euvieouvi.database.models import (
     WebhookEvent,
 )
 from euvieouvi.extensions import db
-from euvieouvi.sync.jobs import get_image_executor
+from euvieouvi.jellyfin_auth import JellyfinAuthentication, JellyfinQuickConnectRequest
+from euvieouvi.plex_auth import PlexPin
+from euvieouvi.sync.catalog_projection import rebuild_catalog_projection
+from euvieouvi.sync.jobs import JOBS, get_image_executor
+from euvieouvi.web import routes as web_routes
 from euvieouvi.web.formatting import duration_ms, elapsed_time, local_datetime
 
 NOW = datetime(2026, 8, 4, 18, tzinfo=UTC)
@@ -84,6 +91,12 @@ class WebConnector:
         del source_path, width, height
         return b"", "image/jpeg"
 
+    def mark_watched(self, external_id: str, *, watched_at: datetime | None = None) -> None:
+        del external_id, watched_at
+
+    def set_progress(self, external_id: str, progress_ms: int) -> None:
+        del external_id, progress_ms
+
 
 def csrf(client: object, path: str = "/") -> str:
     response = client.get(path)  # type: ignore[attr-defined]
@@ -109,11 +122,30 @@ def test_jobs_page_lists_independent_operations_and_saves_schedules(app: Flask) 
     assert "Jobs e agendamentos" not in body
     assert client.get("/settings/sync").status_code == 404
     assert "Agendamento sync" not in client.get("/settings/backup").get_data(as_text=True)
-    assert 'hx-trigger="every 2s"' in body
+    assert 'data-jobs-status-url="/jobs/statuses"' in body
+    assert 'id="job-last-run-sync_plex"' in body
+    assert 'id="job-actions-sync_plex"' in body
+    assert "SQLite e armazenamento" in body
+    assert 'caption class="visually-hidden"' in body
+    assert 'role="alert"' in body or 'role="status"' in body
+    assert 'hx-trigger="every 2s"' not in body
+    statuses = client.get("/jobs/statuses")
+    assert statuses.status_code == 200
+    assert statuses.json is not None
+    assert statuses.json["active"] is False
+    assert {job["id"] for job in statuses.json["jobs"]} == {job.id for job in JOBS}
+    assert all(
+        {"html", "last_run_html", "actions_html"} <= job.keys() for job in statuses.json["jobs"]
+    )
     assert client.get("/jobs/sync_plex/status-fragment").status_code == 200
     dashboard_jobs = client.get("/jobs/dashboard-fragment").get_data(as_text=True)
     assert "Jobs e tarefas" in dashboard_jobs
-    assert 'hx-trigger="every 2s"' in dashboard_jobs
+    assert 'data-jobs-events-url="/jobs/events"' in dashboard_jobs
+    assert 'hx-trigger="every 2s"' not in dashboard_jobs
+    events = client.get("/jobs/events?once=1")
+    assert events.status_code == 200
+    assert events.mimetype == "text/event-stream"
+    assert "event: jobs" in events.get_data(as_text=True)
 
     token = csrf(client, "/jobs")
     response = client.post(
@@ -129,6 +161,7 @@ def test_jobs_page_lists_independent_operations_and_saves_schedules(app: Flask) 
             "time_catalog_images": "04:30",
             "time_maintenance": "05:00",
             "retention_keep": "7",
+            "retry_max_attempts": "4",
             "watch_sync_enabled": "on",
         },
     )
@@ -137,7 +170,50 @@ def test_jobs_page_lists_independent_operations_and_saves_schedules(app: Flask) 
         assert db.session.get(Setting, "jobs.sync_plex.enabled").value == "true"  # type: ignore[union-attr]
         assert db.session.get(Setting, "jobs.sync_plex.time").value == "02:15"  # type: ignore[union-attr]
         assert db.session.get(Setting, "jobs.retention.keep_last").value == "7"  # type: ignore[union-attr]
+        assert db.session.get(Setting, "jobs.retry.max_attempts").value == "4"  # type: ignore[union-attr]
         assert db.session.get(Setting, "watch_sync.enabled").value == "true"  # type: ignore[union-attr]
+
+
+def test_job_status_payload_is_shared_for_short_interval(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+    expected = {"active": False, "jobs": []}
+
+    def payload() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return expected
+
+    monkeypatch.setattr(web_routes, "_job_status_payload", payload)
+    with app.app_context():
+        app.extensions.pop("euvieouvi.job_status_cache", None)
+        assert web_routes._cached_job_status_payload() is expected
+        assert web_routes._cached_job_status_payload() is expected
+    assert calls == 1
+
+
+def test_job_status_payload_truncates_oversized_persistent_summary(app: Flask) -> None:
+    with app.app_context():
+        db.session.add(
+            JobRun(
+                job_id="watched_jellyfin_to_plex",
+                trigger=SyncTrigger.MANUAL,
+                status=SyncStatus.FAILED,
+                created_at=NOW,
+                finished_at=NOW,
+                failed=1,
+                summary="error-prefix " + ("x" * 10_000) + " error-tail",
+            )
+        )
+        db.session.commit()
+        app.extensions.pop("euvieouvi.job_status_cache", None)
+
+    body = app.test_client().get("/jobs/statuses").get_data(as_text=True)
+
+    assert "error-prefix" in body
+    assert "error-tail" not in body
+    assert "x" * 2_000 not in body
 
 
 def test_job_status_repairs_completed_sync_left_running(app: Flask) -> None:
@@ -192,6 +268,45 @@ def test_maintenance_job_persists_result_and_readable_log(app: Flask) -> None:
     log = client.get(f"/job-runs/{run_id}/log")
     assert log.status_code == 200
     assert "Otimização concluída" in log.get_data(as_text=True)
+
+
+def test_diagnostic_archive_is_bounded_and_excludes_credentials(app: Flask) -> None:
+    with app.app_context():
+        seed_web()
+        run = JobRun(
+            job_id="metadata",
+            trigger=SyncTrigger.MANUAL,
+            status=SyncStatus.SUCCEEDED,
+            finished_at=NOW,
+            progress_percent=100,
+            log_filename="diagnostic-test.log",
+        )
+        db.session.add(run)
+        db.session.commit()
+        log_dir = Path(app.instance_path) / "job-logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "diagnostic-test.log").write_text(
+            "Authorization=diagnostic-secret-token\ncompleted\n", encoding="utf-8"
+        )
+
+    response = app.test_client().get("/diagnostics/download")
+    assert response.status_code == 200
+    assert response.mimetype == "application/zip"
+    with ZipFile(io.BytesIO(response.data)) as archive:
+        assert {
+            "summary.json",
+            "recent-job-runs.json",
+            "recent-sync-errors.json",
+            "recent-async-tasks.json",
+            "recent-operational-samples.json",
+            "job-logs/diagnostic-test.log",
+        } <= set(archive.namelist())
+        content = "\n".join(
+            archive.read(name).decode("utf-8", errors="replace") for name in archive.namelist()
+        )
+    assert "never-show" not in content
+    assert "diagnostic-secret-token" not in content
+    assert "[REDACTED]" in content
 
 
 def test_watched_state_propagation_is_disabled_by_default_and_configurable(app: Flask) -> None:
@@ -438,6 +553,34 @@ def seed_web() -> tuple[int, int, int, int]:
     return source.id, library.id, movie.id, run.id
 
 
+def test_catalog_revision_changes_only_after_persisted_catalog_activity(app: Flask) -> None:
+    with app.app_context():
+        source_id, _library_id, media_id, _run_id = seed_web()
+    client = app.test_client()
+    initial = client.get("/catalog/revision")
+    assert initial.status_code == 200
+    initial_revision = initial.get_json()["revision"]
+
+    with app.app_context():
+        db.session.add(
+            WatchEvent(
+                media_item_id=media_id,
+                source_id=source_id,
+                source_event_id="revision-event",
+                dedup_key="revision-event",
+                watched_at=NOW + timedelta(minutes=1),
+                completed=True,
+            )
+        )
+        db.session.commit()
+
+    changed = client.get("/catalog/revision")
+    assert changed.get_json()["revision"] != initial_revision
+    fragment = client.get("/catalog?fragment=1")
+    assert fragment.status_code == 200
+    assert "catalog-results" not in fragment.get_data(as_text=True)
+
+
 def test_first_access_navigation_and_local_assets(app: Flask) -> None:
     client = app.test_client()
     page = client.get("/")
@@ -445,7 +588,7 @@ def test_first_access_navigation_and_local_assets(app: Flask) -> None:
     assert page.status_code == 200 and "Configure seu servidor Plex" in text
     assert "bootstrap.d85327d9.min.css" in text
     assert "htmx.22283ef6.min.js" in text and "Pular para o conteúdo" in text
-    assert client.get("/setup").status_code == 302
+    assert client.get("/setup").status_code == 200
     for path, title in (
         ("/settings/plex", "Configurações do Plex"),
         ("/settings/appearance", "Aparência"),
@@ -463,7 +606,7 @@ def test_first_access_navigation_and_local_assets(app: Flask) -> None:
     assert "default-src 'self'" in page.headers["Content-Security-Policy"]
 
 
-def test_plex_form_validation_save_and_token_preservation(app: Flask) -> None:
+def test_plex_form_saves_server_before_hosted_login(app: Flask) -> None:
     client = app.test_client()
     token = csrf(client, "/settings/plex")
     assert client.post("/settings/plex", data={"csrf_token": token}).status_code == 200
@@ -473,13 +616,12 @@ def test_plex_form_validation_save_and_token_preservation(app: Flask) -> None:
             "csrf_token": token,
             "name": "Plex",
             "base_url": "http://plex:32400",
-            "secret": "private",
             "enabled": "on",
         },
     )
     assert saved.status_code == 302
     page = client.get("/settings/plex").get_data(as_text=True)
-    assert "Token já configurado" in page and "private" not in page
+    assert "Entrar com o Plex" in page and "password" not in page.casefold()
     token = csrf(client, "/settings/plex")
     assert (
         client.post(
@@ -488,7 +630,6 @@ def test_plex_form_validation_save_and_token_preservation(app: Flask) -> None:
                 "csrf_token": token,
                 "name": "Plex novo",
                 "base_url": "http://plex:32400",
-                "secret": "",
                 "enabled": "on",
             },
         ).status_code
@@ -496,7 +637,88 @@ def test_plex_form_validation_save_and_token_preservation(app: Flask) -> None:
     )
     with app.app_context():
         source = db.session.get(Source, 1)
-        assert source and source.secret == "private" and source.name == "Plex novo"
+        assert source is not None and source.name == "Plex novo"
+        assert is_encrypted(source.secret)
+        assert decrypt_text(source.secret) == ""
+
+
+def test_plex_hosted_login_encrypts_claimed_token(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakePinClient:
+        def start(self) -> PlexPin:
+            return PlexPin(identifier=71, code="short-code")
+
+        def authorization_url(self, _pin: PlexPin, *, forward_url: str) -> str:
+            assert forward_url.endswith("/settings/plex/auth/complete")
+            return "https://app.plex.tv/auth#?code=short-code"
+
+        def claim(self, pin_identifier: int) -> str:
+            assert pin_identifier == 71
+            return "claimed-plex-token"
+
+        def close(self) -> None:
+            pass
+
+    client = app.test_client()
+    token = csrf(client, "/settings/plex")
+    client.post(
+        "/settings/plex",
+        data={
+            "csrf_token": token,
+            "name": "Plex",
+            "base_url": "http://plex:32400",
+            "enabled": "on",
+        },
+    )
+    monkeypatch.setattr(web_routes, "_plex_pin_client", FakePinClient)
+
+    token = csrf(client, "/settings/plex")
+    started = client.post("/settings/plex/auth/start", data={"csrf_token": token})
+    assert started.status_code == 302
+    assert started.headers["Location"].startswith("https://app.plex.tv/auth")
+    completed = client.get("/settings/plex/auth/complete")
+    assert completed.status_code == 302
+
+    with app.app_context():
+        source = db.session.scalar(
+            select(Source).where(Source.connector_type == ConnectorType.PLEX)
+        )
+        assert source is not None and is_encrypted(source.secret)
+        assert decrypt_text(source.secret) == "claimed-plex-token"
+
+
+def test_system_settings_are_persisted(app: Flask) -> None:
+    client = app.test_client()
+    token = csrf(client, "/setup")
+    response = client.post(
+        "/setup",
+        data={
+            "csrf_token": token,
+            "log_level": "WARNING",
+            "timezone": "UTC",
+            "gunicorn_threads": "12",
+            "sqlite_busy_timeout_ms": "15000",
+        },
+    )
+
+    assert response.status_code == 302
+    with app.app_context():
+        persisted = {
+            setting.key: setting.value
+            for setting in db.session.scalars(
+                select(Setting).where(
+                    Setting.key.like("system.%") | (Setting.key == "setup.completed")
+                )
+            )
+        }
+        assert persisted == {
+            "setup.completed": "true",
+            "system.gunicorn_threads": "12",
+            "system.log_level": "WARNING",
+            "system.sqlite_busy_timeout_ms": "15000",
+            "system.timezone": "UTC",
+        }
 
 
 def test_plex_user_selector_saves_numeric_account_id(
@@ -506,9 +728,7 @@ def test_plex_user_selector_saves_numeric_account_id(
         def __init__(self) -> None:
             pass
 
-        def list_users(self):
-            from euvieouvi.connectors.dtos import ExternalUser
-
+        def list_users(self) -> tuple[ExternalUser, ...]:
             return (ExternalUser("7", "Alice"), ExternalUser("42", "Zoe"))
 
         def close(self) -> None:
@@ -551,8 +771,10 @@ def test_plex_user_selector_saves_numeric_account_id(
     )
     assert saved.status_code == 302
     with app.app_context():
-        assert db.session.get(Setting, "plex.user_id").value == "42"
-        assert db.session.get(Setting, "webhook.plex.user_filter").value == "42"
+        plex_user = db.session.get(Setting, "plex.user_id")
+        webhook_user = db.session.get(Setting, "webhook.plex.user_filter")
+        assert plex_user is not None and plex_user.value == "42"
+        assert webhook_user is not None and webhook_user.value == "42"
 
 
 def test_trakt_upload_uses_route_specific_body_limit(app: Flask) -> None:
@@ -598,12 +820,16 @@ def test_connection_discovery_selection_htmx_and_fallback(
         )
         db.session.add(source)
         db.session.commit()
+        source_id = source.id
     monkeypatch.setattr("euvieouvi.web.routes.connector_for", lambda source: WebConnector())
     client = app.test_client()
     token = csrf(client, "/settings/plex")
     assert client.post("/settings/plex/test", data={"csrf_token": token}).status_code == 302
     token = csrf(client, "/libraries")
-    assert client.post("/libraries/discover", data={"csrf_token": token}).status_code == 302
+    assert (
+        client.post(f"/libraries/{source_id}/discover", data={"csrf_token": token}).status_code
+        == 302
+    )
     with app.app_context():
         library_id = db.session.scalar(db.select(Library.id))
         assert library_id
@@ -658,7 +884,15 @@ def test_source_configuration_change_resets_all_incremental_checkpoints(app: Fla
         )
         db.session.add(library)
         db.session.flush()
-        db.session.add(SyncCheckpoint(library_id=library.id, strategy="incremental_v2"))
+        db.session.add_all(
+            [
+                SyncCheckpoint(library_id=library.id, strategy="incremental_v2"),
+                Setting(
+                    key="watch_sync.incremental.jellyfin.last_success_at",
+                    value=NOW.isoformat(),
+                ),
+            ]
+        )
         db.session.commit()
         library_id = library.id
 
@@ -682,6 +916,7 @@ def test_source_configuration_change_resets_all_incremental_checkpoints(app: Fla
             )
             is None
         )
+        assert db.session.get(Setting, "watch_sync.incremental.jellyfin.last_success_at") is None
 
 
 @pytest.mark.parametrize("connector_type", [ConnectorType.PLEX, ConnectorType.JELLYFIN])
@@ -734,18 +969,18 @@ def test_discovery_isolates_libraries_when_physical_server_changes(
     assert "Old server library" not in page
 
     with app.app_context():
-        source = db.session.get(Source, source_id)
-        old_library = db.session.get(Library, old_library_id)
+        loaded_source = db.session.get(Source, source_id)
+        loaded_old_library = db.session.get(Library, old_library_id)
         new_library = db.session.scalar(
             db.select(Library).where(
                 Library.source_id == source_id,
                 Library.external_id == "1",
             )
         )
-        assert source is not None and source.server_identifier == "new-machine"
-        assert old_library is not None
-        assert old_library.external_id.startswith("retired:library:")
-        assert old_library.available is False and old_library.enabled is False
+        assert loaded_source is not None and loaded_source.server_identifier == "new-machine"
+        assert loaded_old_library is not None
+        assert loaded_old_library.external_id.startswith("retired:library:")
+        assert loaded_old_library.available is False and loaded_old_library.enabled is False
         assert new_library is not None and new_library.available is True
         assert new_library.enabled is False
 
@@ -768,7 +1003,14 @@ def test_failed_connection_and_discovery_preserve_local_pages(
         as_text=True
     ) and "secret technical detail" not in result.get_data(as_text=True)
     token = csrf(client, "/libraries")
-    result = client.post("/libraries/discover", data={"csrf_token": token}, follow_redirects=True)
+    with app.app_context():
+        source_id = db.session.scalar(select(Source.id))
+    assert source_id is not None
+    result = client.post(
+        f"/libraries/{source_id}/discover",
+        data={"csrf_token": token},
+        follow_redirects=True,
+    )
     assert "lista anterior foi preservada" in result.get_data(as_text=True)
     assert client.get("/history").status_code == 200 and "Arrival" in client.get(
         "/history"
@@ -860,6 +1102,11 @@ def test_sync_start_cancel_and_polling_fragment(
             return run.id
 
         def cancel(self, run_id: int) -> bool:
+            run = db.session.get(SyncRun, run_id)
+            if run is not None:
+                run.status = SyncStatus.INTERRUPTED
+                run.finished_at = NOW
+                db.session.commit()
             return True
 
     executor = Executor()
@@ -869,8 +1116,14 @@ def test_sync_start_cancel_and_polling_fragment(
     token = csrf(client, "/jobs")
     started = client.post("/jobs/sync_plex/run", data={"csrf_token": token})
     assert started.status_code == 302 and started.headers["Location"].endswith("/jobs")
-    with app.app_context():
-        run_id = db.session.scalar(select(SyncRun.id).order_by(SyncRun.id.desc()))
+    deadline = time.monotonic() + 3
+    latest_run_id: int | None = finished_id
+    while time.monotonic() < deadline and latest_run_id == finished_id:
+        with app.app_context():
+            latest_run_id = db.session.scalar(select(SyncRun.id).order_by(SyncRun.id.desc()))
+        time.sleep(0.01)
+    assert latest_run_id is not None and latest_run_id != finished_id
+    run_id = latest_run_id
     active = client.get(f"/jobs/sync-runs/{run_id}/fragment").get_data(as_text=True)
     assert 'hx-trigger="every 3s"' in active
     token = csrf(client, "/jobs")
@@ -925,6 +1178,7 @@ def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
                     source_id=source_id,
                     view_count=0,
                     last_watched_at=NOW + timedelta(days=1),
+                    last_played_at=NOW + timedelta(days=1),
                     completed=False,
                     progress_ms=1_000,
                     observed_at=NOW + timedelta(days=1),
@@ -1008,6 +1262,46 @@ def test_catalog_filters_sorting_and_availability(app: Flask) -> None:
     assert client.get("/catalog?sort=original_title").status_code == 200
     assert client.get("/catalog?sort=updated&direction=desc").status_code == 200
     assert client.get("/catalog?sort=removed&direction=desc").status_code == 200
+
+
+def test_catalog_title_sort_only_aggregates_history_for_visible_items(app: Flask) -> None:
+    with app.app_context():
+        seed_web()
+        rebuild_catalog_projection(db.session())
+        db.session.commit()
+        statements: list[str] = []
+
+        def capture_statement(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: object,
+        ) -> None:
+            statements.append(" ".join(statement.casefold().split()))
+
+        event.listen(db.engine, "before_cursor_execute", capture_statement)
+        try:
+            response = app.test_client().get(
+                "/catalog?kind=movie&played=all&sort=title&direction=asc"
+            )
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture_statement)
+
+    assert response.status_code == 200
+    assert not [
+        statement
+        for statement in statements
+        if (
+            "group by watch_events.media_item_id" in statement
+            and "watch_events.media_item_id in" not in statement
+        )
+        or (
+            "group by watch_states.media_item_id" in statement
+            and "watch_states.media_item_id in" not in statement
+        )
+    ]
 
 
 def test_catalog_show_badges_distinguish_unwatched_watching_and_watched(app: Flask) -> None:
@@ -1196,6 +1490,7 @@ def test_media_image_proxies_available_source_without_local_cache(
     placeholder = client.get(f"/media/{movie_id}/image")
     assert placeholder.status_code == 200
     assert placeholder.mimetype == "image/svg+xml"
+    assert "no-store" in placeholder.headers["Cache-Control"]
 
     with app.app_context():
         db.session.add(
@@ -1959,7 +2254,6 @@ def test_jellyfin_settings_validation_save_update_and_test(
         data={"csrf_token": token, "name": "", "base_url": "ftp://bad"},
     )
     invalid_text = invalid.get_data(as_text=True)
-    assert "API key é obrigatória" in invalid_text
     assert "URL HTTP ou HTTPS válida" in invalid_text
 
     token = csrf(client, "/settings/jellyfin")
@@ -1969,8 +2263,6 @@ def test_jellyfin_settings_validation_save_update_and_test(
             "csrf_token": token,
             "name": "Jellyfin",
             "base_url": "http://jellyfin.local:8096",
-            "api_key": "api-key",
-            "user_id": "user-1",
             "enabled": "on",
         },
     )
@@ -1980,7 +2272,8 @@ def test_jellyfin_settings_validation_save_update_and_test(
             db.select(Source).where(Source.connector_type == ConnectorType.JELLYFIN)
         )
         assert source is not None
-        assert json.loads(source.secret)["api_key"] == "api-key"
+        assert is_encrypted(source.secret)
+        assert json.loads(decrypt_text(source.secret))["access_token"] == ""
 
     token = csrf(client, "/settings/jellyfin")
     updated = client.post(
@@ -1989,8 +2282,6 @@ def test_jellyfin_settings_validation_save_update_and_test(
             "csrf_token": token,
             "name": "Jellyfin Casa",
             "base_url": "http://jellyfin.local:8096",
-            "api_key": "",
-            "user_id": "",
             "enabled": "on",
         },
     )
@@ -2003,6 +2294,69 @@ def test_jellyfin_settings_validation_save_update_and_test(
         follow_redirects=True,
     )
     assert "Conexão com o Jellyfin realizada" in tested.get_data(as_text=True)
+
+
+def test_jellyfin_quick_connect_encrypts_user_token(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeQuickConnectClient:
+        def enabled(self) -> bool:
+            return True
+
+        def initiate(self) -> JellyfinQuickConnectRequest:
+            return JellyfinQuickConnectRequest(secret="temporary-secret", code="123456")
+
+        def is_authenticated(self, secret: str) -> bool:
+            assert secret == "temporary-secret"
+            return True
+
+        def authenticate(self, secret: str) -> JellyfinAuthentication:
+            assert secret == "temporary-secret"
+            return JellyfinAuthentication(
+                access_token="jellyfin-user-token",
+                user_id="0123456789abcdef0123456789abcdef",
+                user_name="Aguinaldo",
+            )
+
+        def close(self) -> None:
+            pass
+
+    client = app.test_client()
+    token = csrf(client, "/settings/jellyfin")
+    client.post(
+        "/settings/jellyfin",
+        data={
+            "csrf_token": token,
+            "name": "Jellyfin",
+            "base_url": "http://jellyfin.local:8096",
+            "enabled": "on",
+        },
+    )
+    monkeypatch.setattr(
+        web_routes,
+        "_jellyfin_quick_connect_client",
+        lambda source: FakeQuickConnectClient(),
+    )
+
+    token = csrf(client, "/settings/jellyfin")
+    started = client.post(
+        "/settings/jellyfin/auth/start", data={"csrf_token": token}, follow_redirects=True
+    )
+    assert "123456" in started.get_data(as_text=True)
+    completed = client.get("/settings/jellyfin/auth/status")
+    assert completed.status_code == 302
+
+    with app.app_context():
+        source = db.session.scalar(
+            select(Source).where(Source.connector_type == ConnectorType.JELLYFIN)
+        )
+        assert source is not None and is_encrypted(source.secret)
+        credentials = json.loads(decrypt_text(source.secret))
+        assert credentials["access_token"] == "jellyfin-user-token"
+        assert credentials["auth_method"] == "quick_connect"
+        assert credentials["user_id"] == "0123456789abcdef0123456789abcdef"
+        assert credentials["user_name"] == "Aguinaldo"
+        assert len(credentials["device_id"]) == 32
 
 
 def test_webhooks_reject_malformed_or_irrelevant_payloads(app: Flask) -> None:
@@ -2150,20 +2504,76 @@ def test_media_image_retires_orphaned_server_artwork(app: Flask) -> None:
         )
 
 
+def test_media_image_inherits_parent_artwork(app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
+    with app.app_context():
+        source_id, library_id, _, _ = seed_web()
+        show = MediaItem(kind=MediaKind.SHOW, title="Parent Show")
+        db.session.add(show)
+        db.session.flush()
+        season = MediaItem(kind=MediaKind.SEASON, title="Season 1", parent_id=show.id)
+        db.session.add(season)
+        db.session.flush()
+        episode = MediaItem(kind=MediaKind.EPISODE, title="Episode 1", parent_id=season.id)
+        db.session.add(episode)
+        db.session.flush()
+        for external_id, media_item_id in (
+            ("show-1", show.id),
+            ("season-1", season.id),
+            ("episode-1", episode.id),
+        ):
+            db.session.add(
+                SourceMediaRef(
+                    source_id=source_id,
+                    library_id=library_id,
+                    media_item_id=media_item_id,
+                    external_id=external_id,
+                    last_seen_at=NOW,
+                    available=True,
+                )
+            )
+        db.session.add(
+            MediaImage(
+                media_item_id=show.id,
+                source_id=source_id,
+                image_type="poster",
+                provider="plex",
+                source_path="/library/metadata/show-1/thumb",
+                cache_status="pending",
+            )
+        )
+        db.session.commit()
+        episode_id = episode.id
+
+    def image(*args: object, **kwargs: object) -> tuple[bytes, str]:
+        del args, kwargs
+        return b"parent-poster", "image/jpeg"
+
+    monkeypatch.setattr(PlexConnector, "fetch_image", image)
+    response = app.test_client().get(f"/media/{episode_id}/image")
+    assert response.status_code == 200
+    assert response.mimetype == "image/jpeg"
+    assert response.data == b"parent-poster"
+
+
 def test_media_image_retires_server_artwork_after_not_found(
     app: Flask, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with app.app_context():
         source_id, _, movie_id, _ = seed_web()
-        db.session.add(
-            MediaImage(
-                media_item_id=movie_id,
-                source_id=source_id,
-                image_type="poster",
-                provider="plex",
-                source_path=f"/library/metadata/{movie_id}/thumb",
-                cache_status="pending",
-            )
+        db.session.add_all(
+            [
+                MediaImage(
+                    media_item_id=movie_id,
+                    source_id=source_id,
+                    image_type="poster",
+                    provider="plex",
+                    source_path=f"/library/metadata/{movie_id}/thumb",
+                    cache_status="pending",
+                ),
+                MediaIdentifier(media_item_id=movie_id, provider="tmdb", external_id="329865"),
+                Setting(key="metadata.tmdb.enabled", value="true"),
+                Setting(key="metadata.tmdb.token", value="token"),
+            ]
         )
         db.session.commit()
 
@@ -2171,10 +2581,19 @@ def test_media_image_retires_server_artwork_after_not_found(
         del args, kwargs
         raise ConnectorNotFoundError("gone")
 
+    queued: list[tuple[str, SyncTrigger]] = []
+
+    def queue_job(app: Flask, job_id: str, *, trigger: SyncTrigger) -> bool:
+        del app
+        queued.append((job_id, trigger))
+        return True
+
     monkeypatch.setattr(PlexConnector, "fetch_image", missing)
+    monkeypatch.setattr(web_routes, "submit_job", queue_job)
     response = app.test_client().get(f"/media/{movie_id}/image")
     assert response.status_code == 200
     assert response.mimetype == "image/svg+xml"
+    assert queued == [("catalog_images", SyncTrigger.API)]
     with app.app_context():
         assert (
             db.session.scalar(select(MediaImage).where(MediaImage.media_item_id == movie_id))

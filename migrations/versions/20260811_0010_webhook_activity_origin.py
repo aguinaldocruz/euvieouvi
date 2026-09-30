@@ -3,6 +3,7 @@
 Revision ID: 20260811_0010
 Revises: 20260805_0009
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -12,6 +13,7 @@ revision: str = "20260811_0010"
 down_revision: str | None = "20260805_0009"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
 
 def upgrade() -> None:
     with op.batch_alter_table("watch_events") as batch:
@@ -45,6 +47,7 @@ def upgrade() -> None:
         ["completed", "occurred_at"],
     )
     op.create_index("ix_webhook_events_active_source", "webhook_events", ["active", "source_id"])
+
 
 def downgrade() -> None:
     op.drop_table("webhook_events")

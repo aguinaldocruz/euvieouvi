@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from euvieouvi.connectors.base import MediaConnector
+from euvieouvi.connectors.base import DiscoveryConnector
 from euvieouvi.connectors.dtos import ExternalLibraryType
 from euvieouvi.connectors.errors import ConnectorError
 from euvieouvi.database.enums import LibraryMediaType
@@ -21,7 +21,7 @@ class LibraryDiscoveryService:
     def __init__(
         self,
         session_factory: Callable[[], Session],
-        connector: MediaConnector,
+        connector: DiscoveryConnector,
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:

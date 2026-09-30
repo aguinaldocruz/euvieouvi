@@ -1,10 +1,12 @@
 """Cross-source watched-state propagation tests."""
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from flask import Flask
 
+from euvieouvi.connectors.errors import ConnectorNotFoundError
 from euvieouvi.database.enums import (
     ConnectorType,
     LibraryMediaType,
@@ -24,6 +26,7 @@ from euvieouvi.database.models import (
     WatchState,
 )
 from euvieouvi.extensions import db
+from euvieouvi.sync import watch_sync
 from euvieouvi.sync.watch_sync import WatchSyncService, _matching_item_groups
 
 NOW = datetime(2026, 8, 11, 19, tzinfo=UTC)
@@ -55,6 +58,13 @@ class RecordingConnector:
 
     def close(self) -> None:
         pass
+
+
+class StaleReferenceConnector(RecordingConnector):
+    def mark_watched(self, external_id: str, *, watched_at: datetime | None = None) -> None:
+        self.calls.append((self.source.connector_type, external_id))
+        if external_id == "jf-stale":
+            raise ConnectorNotFoundError("missing")
 
 
 @pytest.mark.parametrize(
@@ -171,9 +181,10 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
         movie_id = movie.id
         target_source_id = source_by_type[target_source].id
 
-        result = WatchSyncService(
+        service = WatchSyncService(
             lambda: db.session(), lambda source: RecordingConnector(source, calls)
-        ).run(run_id)
+        )
+        result = service.run(run_id, source_type=watched_source)
 
         assert result.scanned == 1
         assert result.updated == 1
@@ -187,6 +198,15 @@ def test_completed_state_is_propagated_only_to_unwatched_matching_source(
         )
         assert target_state.completed is True
         assert target_state.last_watched_at == NOW.replace(tzinfo=None)
+        repeated = service.run(None, source_type=watched_source)
+        assert repeated.scanned == 0
+        assert repeated.updated == 0
+        checkpoint = db.session.get(
+            Setting,
+            f"watch_sync.incremental.{watched_source.value}.last_success_at",
+        )
+        assert checkpoint is not None
+        assert calls == [(target_source, target_external_id)]
         persisted_run = db.session.get(SyncRun, run_id)
         assert persisted_run is not None
         assert persisted_run.watch_sync_status is SyncStatus.SUCCEEDED
@@ -304,6 +324,103 @@ def test_already_aligned_media_does_not_call_remote_server(app: Flask) -> None:
         assert calls == []
 
 
+def test_directional_sync_repairs_stale_duplicate_reference(app: Flask) -> None:
+    calls: list[tuple[ConnectorType, str]] = []
+    with app.app_context():
+        plex = Source(
+            connector_type=ConnectorType.PLEX,
+            name="Plex",
+            base_url="http://plex.local",
+            secret="token",
+            enabled=True,
+        )
+        jellyfin = Source(
+            connector_type=ConnectorType.JELLYFIN,
+            name="Jellyfin",
+            base_url="http://jellyfin.local",
+            secret='{"api_key":"key","user_id":"user"}',
+            enabled=True,
+        )
+        db.session.add_all([plex, jellyfin, Setting(key="plex.user_id", value="plex-user")])
+        db.session.flush()
+        plex_library = Library(
+            source_id=plex.id,
+            external_id="plex-movies",
+            name="Movies",
+            media_type=LibraryMediaType.MOVIE,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
+        )
+        jellyfin_library = Library(
+            source_id=jellyfin.id,
+            external_id="jf-movies",
+            name="Movies",
+            media_type=LibraryMediaType.MOVIE,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
+        )
+        movie = MediaItem(kind=MediaKind.MOVIE, title="Arrival")
+        db.session.add_all([plex_library, jellyfin_library, movie])
+        db.session.flush()
+        stale = SourceMediaRef(
+            source_id=jellyfin.id,
+            library_id=jellyfin_library.id,
+            media_item_id=movie.id,
+            external_id="jf-stale",
+            last_seen_at=NOW - timedelta(days=30),
+            available=True,
+        )
+        db.session.add_all(
+            [
+                SourceMediaRef(
+                    source_id=plex.id,
+                    library_id=plex_library.id,
+                    media_item_id=movie.id,
+                    external_id="plex-current",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+                SourceMediaRef(
+                    source_id=jellyfin.id,
+                    library_id=jellyfin_library.id,
+                    media_item_id=movie.id,
+                    external_id="jf-current",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+                stale,
+                WatchState(
+                    media_item_id=movie.id,
+                    source_id=plex.id,
+                    view_count=1,
+                    completed=True,
+                    last_watched_at=NOW,
+                    observed_at=NOW,
+                ),
+            ]
+        )
+        db.session.commit()
+        stale_id = stale.id
+
+        result = WatchSyncService(
+            lambda: db.session(),
+            lambda source: StaleReferenceConnector(source, calls),
+        ).run(None, source_type=ConnectorType.PLEX)
+
+        assert result.updated == 1 and result.failed == 0 and result.repaired == 1
+        assert calls == [
+            (ConnectorType.JELLYFIN, "jf-current"),
+            (ConnectorType.JELLYFIN, "jf-stale"),
+        ]
+        repaired = db.session.get(SourceMediaRef, stale_id)
+        assert repaired is not None and repaired.available is False
+        assert repaired.unavailable_since is not None
+
+
 def test_separate_rows_are_grouped_by_provider_identity(app: Flask) -> None:
     with app.app_context():
         plex_item = MediaItem(kind=MediaKind.EPISODE, title="Second Contact")
@@ -321,12 +438,109 @@ def test_separate_rows_are_grouped_by_provider_identity(app: Flask) -> None:
         db.session.flush()
         item_ids = {plex_item.id, jellyfin_item.id}
         groups = _matching_item_groups(
-            db.session, item_ids, {media_id: MediaKind.EPISODE for media_id in item_ids}
+            db.session(), item_ids, {media_id: MediaKind.EPISODE for media_id in item_ids}
         )
         assert groups == (frozenset(item_ids),)
 
 
-def test_partial_progress_syncs_with_plex_conflict_precedence(app: Flask) -> None:
+def test_large_watch_scope_is_queried_in_sqlite_safe_batches(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[ConnectorType, str]] = []
+    with app.app_context():
+        plex = Source(
+            connector_type=ConnectorType.PLEX,
+            name="Plex batched",
+            base_url="http://plex.local",
+            secret="token",
+            enabled=True,
+        )
+        jellyfin = Source(
+            connector_type=ConnectorType.JELLYFIN,
+            name="Jellyfin batched",
+            base_url="http://jellyfin.local",
+            secret='{"api_key":"key","user_id":"user"}',
+            enabled=True,
+        )
+        db.session.add_all([plex, jellyfin, Setting(key="plex.user_id", value="plex-user")])
+        db.session.flush()
+        plex_library = Library(
+            source_id=plex.id,
+            external_id="plex-batched",
+            name="Movies",
+            media_type=LibraryMediaType.MOVIE,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
+        )
+        jellyfin_library = Library(
+            source_id=jellyfin.id,
+            external_id="jf-batched",
+            name="Movies",
+            media_type=LibraryMediaType.MOVIE,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
+        )
+        db.session.add_all([plex_library, jellyfin_library])
+        db.session.flush()
+        movies = [MediaItem(kind=MediaKind.MOVIE, title=f"Movie {index}") for index in range(15)]
+        db.session.add_all(movies)
+        db.session.flush()
+        for index, movie in enumerate(movies):
+            db.session.add_all(
+                [
+                    SourceMediaRef(
+                        source_id=plex.id,
+                        library_id=plex_library.id,
+                        media_item_id=movie.id,
+                        external_id=f"plex-{index}",
+                        last_seen_at=NOW,
+                        available=True,
+                    ),
+                    SourceMediaRef(
+                        source_id=jellyfin.id,
+                        library_id=jellyfin_library.id,
+                        media_item_id=movie.id,
+                        external_id=f"jf-{index}",
+                        last_seen_at=NOW,
+                        available=True,
+                    ),
+                    WatchState(
+                        media_item_id=movie.id,
+                        source_id=plex.id,
+                        view_count=1,
+                        completed=True,
+                        last_watched_at=NOW,
+                        observed_at=NOW,
+                    ),
+                ]
+            )
+        db.session.commit()
+
+        monkeypatch.setattr(watch_sync, "_QUERY_BATCH_SIZE", 5)
+        driver = db.session.connection().connection.driver_connection
+        assert driver is not None
+        previous_limit = driver.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 10)
+        try:
+            result = WatchSyncService(
+                lambda: db.session(), lambda source: RecordingConnector(source, calls)
+            ).run(None, source_type=ConnectorType.PLEX)
+        finally:
+            driver.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous_limit)
+
+        assert result.scanned == 15
+        assert result.updated == 15
+        assert result.failed == 0
+        assert len(calls) == 15
+
+
+@pytest.mark.parametrize("known_playback", [False, True])
+def test_partial_progress_syncs_with_plex_conflict_precedence(
+    app: Flask, known_playback: bool
+) -> None:
     calls: list[tuple[ConnectorType, str]] = []
     with app.app_context():
         plex = Source(
@@ -392,6 +606,7 @@ def test_partial_progress_syncs_with_plex_conflict_precedence(app: Flask) -> Non
                     view_count=0,
                     completed=False,
                     progress_ms=500_000,
+                    last_played_at=NOW if known_playback else None,
                     observed_at=NOW,
                 ),
                 WatchState(
@@ -422,6 +637,7 @@ def test_partial_progress_syncs_with_plex_conflict_precedence(app: Flask) -> Non
             )
         )
         assert target is not None and target.completed is False and target.progress_ms == 500_000
+        assert target.last_played_at == (NOW.replace(tzinfo=None) if known_playback else None)
 
         plex_state = db.session.scalar(
             db.select(WatchState).where(

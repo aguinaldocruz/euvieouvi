@@ -16,11 +16,13 @@ from euvieouvi.connectors.dtos import (
 )
 
 
-class MediaConnector(Protocol):
+class DiscoveryConnector(Protocol):
     def test_connection(self) -> ConnectionInfo: ...
 
     def list_libraries(self) -> list[ExternalLibrary]: ...
 
+
+class SyncConnector(DiscoveryConnector, Protocol):
     def get_media_page(
         self,
         library: ExternalLibraryRef,
@@ -37,4 +39,12 @@ class MediaConnector(Protocol):
 
     def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]: ...
 
+
+class WatchConnector(Protocol):
     def mark_watched(self, external_id: str, *, watched_at: datetime | None = None) -> None: ...
+
+    def set_progress(self, external_id: str, progress_ms: int) -> None: ...
+
+
+class MediaConnector(SyncConnector, WatchConnector, Protocol):
+    """Complete connector contract implemented by production media servers."""

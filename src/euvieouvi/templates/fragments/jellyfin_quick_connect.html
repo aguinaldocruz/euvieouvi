@@ -1,0 +1,12 @@
+{% if error %}
+<div class="alert alert-warning mb-0">A autorização pendente expirou. Inicie o Quick Connect novamente.</div>
+{% else %}
+<div id="jellyfin-quick-connect" class="card mt-3" hx-get="{{ url_for('web.settings_jellyfin_auth_status') }}" hx-trigger="load delay:2s, every 5s" hx-swap="outerHTML">
+  <div class="card-body">
+    <h2 class="h5">Autorizar no Jellyfin</h2>
+    <p class="mb-2">No Jellyfin já conectado, abra <strong>Configurações → Quick Connect</strong> e informe:</p>
+    <p class="display-6 font-monospace mb-2" translate="no">{{ code }}</p>
+    <p class="small text-secondary mb-0">Aguardando autorização automaticamente…</p>
+  </div>
+</div>
+{% endif %}

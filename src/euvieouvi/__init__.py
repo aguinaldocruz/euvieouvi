@@ -1,5 +1,7 @@
 """Application factory for euvieouvi."""
 
+import os
+import sys
 from collections.abc import Mapping
 from typing import Any
 
@@ -12,6 +14,7 @@ from euvieouvi.extensions import init_extensions
 from euvieouvi.health import register_health_routes
 from euvieouvi.instance import prepare_instance_path
 from euvieouvi.logging import configure_logging
+from euvieouvi.observability import register_observability
 from euvieouvi.request_id import register_request_id
 from euvieouvi.sync.scheduler import start_scheduler
 from euvieouvi.web import register_web
@@ -37,12 +40,16 @@ def create_app(config_overrides: Mapping[str, Any] | None = None) -> Flask:
 
     configure_logging(settings.log_level)
     register_request_id(app)
+    register_observability(app)
     init_extensions(app)
     register_error_handlers(app)
     register_health_routes(app)
     register_api(app)
     register_web(app)
-    start_scheduler(app)
+    flask_cli_command = os.getenv("FLASK_RUN_FROM_CLI") == "true" and "run" not in sys.argv[1:]
+    background_disabled = bool((config_overrides or {}).get("DISABLE_BACKGROUND_SERVICES", False))
+    if not flask_cli_command and not background_disabled:
+        start_scheduler(app)
 
     @app.before_request
     def drain_async_tasks_on_activity() -> None:

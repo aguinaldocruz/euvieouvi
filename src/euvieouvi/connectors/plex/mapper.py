@@ -48,7 +48,10 @@ def parse_container(payload: PlexPayload) -> tuple[dict[str, Any], list[dict[str
         item: dict[str, Any] = dict(element.attrib)
         item["_tag"] = element.tag
         for child in element:
-            item.setdefault(child.tag, []).append(dict(child.attrib))
+            value: dict[str, Any] = dict(child.attrib)
+            if child.tag == "Media":
+                value["Part"] = [dict(part.attrib) for part in child if part.tag == "Part"]
+            item.setdefault(child.tag, []).append(value)
         mapped_items.append(item)
     return dict(root.attrib), mapped_items
 
@@ -130,6 +133,7 @@ def map_media_item(item: Mapping[str, Any], library_external_id: str) -> Externa
     return ExternalMediaItem(
         external_id=external_id,
         external_key=_optional_text(item.get("key")),
+        file_paths=_file_paths(item),
         library_external_id=library_external_id,
         kind=kind,
         title=title,
@@ -169,6 +173,21 @@ def map_media_item(item: Mapping[str, Any], library_external_id: str) -> Externa
         view_offset_ms=_integer(item.get("viewOffset")),
         completed=(_integer(item.get("viewCount")) or 0) > 0,
     )
+
+
+def _file_paths(item: Mapping[str, Any]) -> tuple[str, ...]:
+    media = item.get("Media")
+    if not isinstance(media, list):
+        return ()
+    paths: set[str] = set()
+    for version in media:
+        if not isinstance(version, dict) or not isinstance(version.get("Part"), list):
+            continue
+        for part in version["Part"]:
+            path = _optional_text(part.get("file")) if isinstance(part, dict) else None
+            if path:
+                paths.add(path)
+    return tuple(sorted(paths))
 
 
 def map_watch_event(item: Mapping[str, Any], library_external_id: str) -> ExternalWatchEvent:

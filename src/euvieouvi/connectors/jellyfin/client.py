@@ -16,33 +16,37 @@ from euvieouvi.connectors.errors import (
     ConnectorResponseError,
     ConnectorTimeoutError,
 )
+from euvieouvi.observability import observe_connector
 
 
 class JellyfinHttpClient:
     def __init__(
         self,
         base_url: str,
-        api_key: str,
+        access_token: str,
         *,
+        device_id: str = "euvieouvi",
         timeout: float = 30.0,
         max_response_bytes: int = 10 * 1024 * 1024,
         client: httpx.Client | None = None,
+        telemetry_key: str | None = None,
     ) -> None:
-        self.base_url = _normalize_base_url(base_url)
-        if not api_key.strip():
-            raise ConnectorConfigurationError("Jellyfin API key must not be empty.")
+        self.base_url = normalize_base_url(base_url)
+        if not access_token.strip():
+            raise ConnectorConfigurationError("Jellyfin access token must not be empty.")
         self._headers = {
             "Accept": "application/json",
-            "X-Emby-Token": api_key.strip(),
+            "X-Emby-Token": access_token.strip(),
             "Authorization": (
                 'MediaBrowser Client="euvieouvi", Device="Server", '
-                f'DeviceId="euvieouvi", Version="2", Token="{api_key.strip()}"'
+                f'DeviceId="{device_id}", Version="2", Token="{access_token.strip()}"'
             ),
         }
         self._timeout = httpx.Timeout(timeout, connect=min(timeout, 5.0))
         self._max_response_bytes = max_response_bytes
         self._client = client or httpx.Client(follow_redirects=False, trust_env=False)
         self._owns_client = client is None
+        self._telemetry_key = telemetry_key
 
     def close(self) -> None:
         if self._owns_client:
@@ -66,6 +70,15 @@ class JellyfinHttpClient:
         *,
         params: Mapping[str, str | int | bool] | None = None,
     ) -> None:
+        with observe_connector(self._telemetry_key, "POST"):
+            self._post_empty(path, params=params)
+
+    def _post_empty(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, str | int | bool] | None = None,
+    ) -> None:
         if not path.startswith("/") or path.startswith("//"):
             raise ConnectorConfigurationError("Jellyfin path must be server-local.")
         url = urljoin(self.base_url, path.lstrip("/"))
@@ -81,13 +94,23 @@ class JellyfinHttpClient:
         except httpx.RequestError as error:
             raise ConnectorConnectionError("Jellyfin request failed.") from error
         if response.status_code in {401, 403}:
-            raise ConnectorAuthenticationError("Jellyfin rejected the API key.")
+            raise ConnectorAuthenticationError("Jellyfin rejected the access token.")
         if response.status_code == 404:
             raise ConnectorNotFoundError("Jellyfin resource was not found.")
         if response.status_code >= 400:
             raise ConnectorResponseError("Jellyfin returned an unsuccessful response.")
 
     def post_json(
+        self,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        params: Mapping[str, str | int | bool] | None = None,
+    ) -> None:
+        with observe_connector(self._telemetry_key, "POST"):
+            self._post_json(path, payload, params=params)
+
+    def _post_json(
         self,
         path: str,
         payload: Mapping[str, Any],
@@ -106,7 +129,7 @@ class JellyfinHttpClient:
         except httpx.RequestError as error:
             raise ConnectorConnectionError("Jellyfin request failed.") from error
         if response.status_code in {401, 403}:
-            raise ConnectorAuthenticationError("Jellyfin rejected the API key.")
+            raise ConnectorAuthenticationError("Jellyfin rejected the access token.")
         if response.status_code == 404:
             raise ConnectorNotFoundError("Jellyfin resource was not found.")
         if response.status_code >= 400:
@@ -147,6 +170,12 @@ class JellyfinHttpClient:
         raise ConnectorNotFoundError(f"Jellyfin user '{candidate}' not found.")
 
     def _get(self, path: str, *, params: Mapping[str, str | int | bool] | None) -> httpx.Response:
+        with observe_connector(self._telemetry_key, "GET"):
+            return self._get_unobserved(path, params=params)
+
+    def _get_unobserved(
+        self, path: str, *, params: Mapping[str, str | int | bool] | None
+    ) -> httpx.Response:
         if not path.startswith("/") or path.startswith("//"):
             raise ConnectorConfigurationError("Jellyfin path must be server-local.")
         url = urljoin(self.base_url, path.lstrip("/"))
@@ -162,7 +191,7 @@ class JellyfinHttpClient:
         except httpx.RequestError as error:
             raise ConnectorConnectionError("Jellyfin request failed.") from error
         if response.status_code in {401, 403}:
-            raise ConnectorAuthenticationError("Jellyfin rejected the API key.")
+            raise ConnectorAuthenticationError("Jellyfin rejected the access token.")
         if response.status_code == 404:
             raise ConnectorNotFoundError("Jellyfin resource was not found.")
         if response.status_code >= 400:
@@ -172,7 +201,7 @@ class JellyfinHttpClient:
         return response
 
 
-def _normalize_base_url(value: str) -> str:
+def normalize_base_url(value: str) -> str:
     parsed = urlsplit(value.strip())
     if (
         parsed.scheme not in {"http", "https"}

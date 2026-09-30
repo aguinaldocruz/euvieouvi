@@ -8,6 +8,7 @@ from datetime import datetime
 
 from euvieouvi.connectors.dtos import (
     ConnectionInfo,
+    ExternalIdentifier,
     ExternalLibrary,
     ExternalLibraryRef,
     ExternalLibraryRejection,
@@ -17,6 +18,7 @@ from euvieouvi.connectors.dtos import (
     ExternalWatchEvent,
     HistoryCheckpoint,
     Page,
+    PageIssue,
     PageRequest,
 )
 from euvieouvi.connectors.errors import (
@@ -35,6 +37,7 @@ from euvieouvi.connectors.plex.mapper import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_PARENT_METADATA_BATCH_SIZE = 100
 
 
 class PlexConnector:
@@ -44,6 +47,8 @@ class PlexConnector:
         self._client = client
         self._user_id = (user_id or "").strip()
         self._last_pages: dict[str, tuple[int, tuple[str, ...]]] = {}
+        self._show_identifiers: dict[str, tuple[ExternalIdentifier, ...]] = {}
+        self._show_metadata: dict[str, ExternalMediaItem] = {}
         self.last_unsupported_libraries: tuple[ExternalLibraryRejection, ...] = ()
 
     def close(self) -> None:
@@ -87,7 +92,7 @@ class PlexConnector:
             },
         )
 
-    def get_media_item(self, external_id: str, library_external_id: str) -> ExternalMediaItem:
+    def get_media_item(self, external_id: str, library_external_id: str = "") -> ExternalMediaItem:
         """Fetch one item so webhook handling can verify Plex's stored watch state."""
         if not external_id.strip():
             raise ConnectorConfigurationError("Plex media id must not be empty.")
@@ -99,7 +104,12 @@ class PlexConnector:
         )
         if matching is None:
             raise ConnectorResponseError("Plex metadata omitted the requested media item.")
-        return map_media_item(matching, library_external_id)
+        resolved_library_id = (
+            library_external_id.strip() or str(matching.get("librarySectionID") or "").strip()
+        )
+        if not resolved_library_id:
+            raise ConnectorResponseError("Plex metadata omitted the item's library identity.")
+        return map_media_item(matching, resolved_library_id)
 
     def fetch_image(self, source_path: str, *, width: int, height: int) -> tuple[bytes, str]:
         """Fetch a bounded, Plex-resized image without exposing the server token."""
@@ -147,14 +157,85 @@ class PlexConnector:
             raise ConnectorConfigurationError("Plex media paging supports movies or episodes.")
         payload = self._client.get(f"/library/sections/{library.external_id}/all", params=params)
         container, items = parse_container(payload)
-        mapped = tuple(map_media_item(item, library.external_id) for item in items)
-        result = self._page(container, mapped, page)
+        mapped_items: list[ExternalMediaItem] = []
+        issues: list[PageIssue] = []
+        for item in items:
+            try:
+                mapped_items.append(map_media_item(item, library.external_id))
+            except Exception as error:
+                issue = _mapping_issue(item, "catalog_mapping", error)
+                issues.append(issue)
+                _LOGGER.warning("Plex catalog item skipped: %s", issue.message, exc_info=True)
+        if media_kind is ExternalMediaKind.EPISODE:
+            self._load_show_identifiers(mapped_items, library.external_id)
+            mapped_items = [
+                replace(
+                    item,
+                    show_identifiers=self._show_identifiers.get(item.show_external_id or "", ()),
+                    show_metadata=self._show_metadata.get(item.show_external_id or ""),
+                )
+                for item in mapped_items
+            ]
+        mapped = tuple(mapped_items)
+        result = replace(
+            self._page(container, mapped, page, consumed_size=len(items)),
+            issues=tuple(issues),
+        )
         self._remember_page(
             f"media:{library.external_id}:{media_kind.value}",
             page.start,
             tuple(item.external_id for item in mapped),
         )
         return result
+
+    def _load_show_identifiers(
+        self, items: list[ExternalMediaItem], library_external_id: str
+    ) -> None:
+        """Fetch each page's parent shows in batches so localized titles share identity."""
+        missing = sorted(
+            {
+                item.show_external_id
+                for item in items
+                if item.show_external_id is not None
+                and item.show_external_id not in self._show_identifiers
+            }
+        )
+        for offset in range(0, len(missing), _PARENT_METADATA_BATCH_SIZE):
+            batch = missing[offset : offset + _PARENT_METADATA_BATCH_SIZE]
+            try:
+                payload = self._client.get(
+                    f"/library/metadata/{','.join(batch)}", params={"includeGuids": 1}
+                )
+                _, parents = parse_container(payload)
+                returned: set[str] = set()
+                for parent in parents:
+                    try:
+                        mapped = map_media_item(parent, library_external_id)
+                    except Exception:
+                        _LOGGER.warning(
+                            "Plex parent show metadata could not be mapped: library=%s "
+                            "external_id=%s",
+                            library_external_id,
+                            parent.get("ratingKey"),
+                            exc_info=True,
+                        )
+                        continue
+                    if mapped.kind is not ExternalMediaKind.SHOW:
+                        continue
+                    returned.add(mapped.external_id)
+                    self._show_identifiers[mapped.external_id] = mapped.identifiers
+                    self._show_metadata[mapped.external_id] = mapped
+                for external_id in set(batch) - returned:
+                    self._show_identifiers[external_id] = ()
+            except Exception:
+                _LOGGER.warning(
+                    "Plex parent show identifier lookup failed: library=%s count=%d",
+                    library_external_id,
+                    len(batch),
+                    exc_info=True,
+                )
+                for external_id in batch:
+                    self._show_identifiers[external_id] = ()
 
     def get_history_page(
         self,
@@ -184,19 +265,28 @@ class PlexConnector:
                     current_start,
                     skipped,
                 )
-            mapped = tuple(
-                replace(
-                    map_watch_event(item, library.external_id),
-                    playback_user=self._user_id or None,
-                )
-                for item in identified
-            )
+            mapped_events: list[ExternalWatchEvent] = []
+            issues: list[PageIssue] = []
+            for item in identified:
+                try:
+                    mapped_events.append(
+                        replace(
+                            map_watch_event(item, library.external_id),
+                            playback_user=self._user_id or None,
+                        )
+                    )
+                except Exception as error:
+                    issue = _mapping_issue(item, "history_mapping", error)
+                    issues.append(issue)
+                    _LOGGER.warning("Plex history item skipped: %s", issue.message, exc_info=True)
+            mapped = tuple(mapped_events)
             result = self._page(
                 container,
                 mapped,
                 current_page,
                 consumed_size=len(items),
             )
+            result = replace(result, issues=tuple(issues))
             if result.items or result.next_start is None:
                 break
             current_start = result.next_start
@@ -252,6 +342,18 @@ class PlexConnector:
             total_size=total_size,
             next_start=next_start,
         )
+
+
+def _mapping_issue(item: dict[str, object], category: str, error: Exception) -> PageIssue:
+    external_id = str(item.get("ratingKey") or "").strip() or None
+    title = str(item.get("title") or item.get("grandparentTitle") or "").strip() or None
+    context = f"externo={external_id or '?'} · título={title or '?'}"
+    return PageIssue(
+        external_id,
+        title,
+        category,
+        f"{context} · erro={type(error).__name__}: {error}"[:1000],
+    )
 
 
 def _optional_int(value: object) -> int | None:

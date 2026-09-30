@@ -9,4 +9,5 @@
 <div class="mb-3"><label class="form-label" for="language">Idioma TMDB</label><select class="form-select" id="language" name="language"><option value="pt-BR" {% if values.get('metadata.language','pt-BR')=='pt-BR' %}selected{% endif %}>Português (Brasil)</option><option value="en-US" {% if values.get('metadata.language')=='en-US' %}selected{% endif %}>English (US)</option></select></div>
 <button class="btn btn-primary">Salvar configuração</button></form></div></div>
 {% include 'fragments/enrichment_status.html' %}
+<a class="btn btn-outline-secondary mt-3" href="{{ url_for('web.settings_media_identity') }}">Identificação de mídias</a>
 {% endblock %}

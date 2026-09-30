@@ -17,6 +17,45 @@ document.body.addEventListener("htmx:configRequest", function (event) {
   }
 })();
 (function(){
+  var form=document.getElementById("jobs-config");
+  var dashboard=document.getElementById("dashboard-jobs");
+  var eventUrl=form?form.dataset.jobsEventsUrl:dashboard?dashboard.dataset.jobsEventsUrl:null;
+  var statusUrl=form?form.dataset.jobsStatusUrl:dashboard?dashboard.dataset.jobsStatusUrl:null;
+  if(!eventUrl)return;
+  var stopped=false,source=null,errorCount=0;
+  function apply(data){
+    if(form&&data.jobs){
+      data.jobs.forEach(function(job){
+        var status=document.getElementById("job-status-"+job.id),lastRun=document.getElementById("job-last-run-"+job.id),actions=document.getElementById("job-actions-"+job.id);
+        if(status)status.innerHTML=job.html;
+        if(lastRun)lastRun.innerHTML=job.last_run_html;
+        if(actions){actions.innerHTML=job.actions_html;if(window.htmx)htmx.process(actions);}
+      });
+      var operations=document.getElementById("operational-status");
+      if(operations&&data.operations_html)operations.outerHTML=data.operations_html;
+    }
+    dashboard=document.getElementById("dashboard-jobs");
+    if(dashboard&&data.dashboard_html){dashboard.outerHTML=data.dashboard_html;dashboard=document.getElementById("dashboard-jobs");}
+  }
+  function poll(){
+    if(stopped||!statusUrl)return;
+    fetch(statusUrl,{headers:{"Accept":"application/json"}})
+      .then(function(response){return response.ok?response.json():Promise.reject(new Error("status"));})
+      .then(function(data){
+        apply(data);
+        if(!stopped)window.setTimeout(poll,data.active?2000:10000);
+      }).catch(function(){if(!stopped)window.setTimeout(poll,5000);});
+  }
+  if(window.EventSource){
+    source=new EventSource(eventUrl);
+    source.addEventListener("jobs",function(event){errorCount=0;apply(JSON.parse(event.data));});
+    source.addEventListener("ping",function(){errorCount=0;});
+    source.onopen=function(){errorCount=0;};
+    source.onerror=function(){errorCount+=1;if(errorCount>=3){source.close();source=null;poll();}};
+  }else{poll();}
+  window.addEventListener("beforeunload",function(){stopped=true;if(source)source.close();});
+})();
+(function(){
   var form=document.getElementById("catalog-filter-form");
   if(form){
     form.querySelectorAll(".catalog-auto-submit").forEach(function(control){
@@ -28,9 +67,31 @@ document.body.addEventListener("htmx:configRequest", function (event) {
       });
     });
   }
+  var results=document.getElementById("catalog-results");
+  if(results&&results.dataset.catalogRevisionUrl&&results.dataset.catalogRefreshUrl){
+    var revision=results.dataset.catalogRevision;
+    function checkRevision(){
+      fetch(results.dataset.catalogRevisionUrl,{headers:{"Accept":"application/json"}})
+        .then(function(response){return response.ok?response.json():Promise.reject(new Error("revision"));})
+        .then(function(data){
+          if(data.revision&&data.revision!==revision){
+            revision=data.revision;results.dataset.catalogRevision=revision;
+            htmx.ajax("GET",results.dataset.catalogRefreshUrl,{target:results,swap:"innerHTML"});
+          }
+        }).catch(function(){});
+    }
+    window.setInterval(checkRevision,5000);
+  }
   var sidebar=document.querySelector(".catalog-sidebar");
   if(!sidebar)return;
   var key="euvieouvi.catalog.type-order",dragged=null;
+  function saveOrder(){try{localStorage.setItem(key,JSON.stringify(Array.from(sidebar.querySelectorAll("[data-catalog-kind]")).map(function(link){return link.dataset.catalogKind;})));}catch(error){}}
+  function moveAt(item,x,y){
+    if(!dragged||dragged===item)return;
+    var box=item.getBoundingClientRect(),horizontal=getComputedStyle(sidebar).flexDirection==="row";
+    var after=horizontal?x>box.left+box.width/2:y>box.top+box.height/2;
+    sidebar.insertBefore(dragged,after?item.nextSibling:item);
+  }
   try{
     var order=JSON.parse(localStorage.getItem(key)||"[]");
     order.forEach(function(kind){var item=sidebar.querySelector('[data-catalog-kind="'+kind+'"]');if(item)sidebar.appendChild(item);});
@@ -39,13 +100,24 @@ document.body.addEventListener("htmx:configRequest", function (event) {
     item.addEventListener("dragstart",function(){dragged=item;item.classList.add("catalog-dragging");});
     item.addEventListener("dragend",function(){
       item.classList.remove("catalog-dragging");dragged=null;
-      try{localStorage.setItem(key,JSON.stringify(Array.from(sidebar.querySelectorAll("[data-catalog-kind]")).map(function(link){return link.dataset.catalogKind;})));}catch(error){}
+      saveOrder();
     });
     item.addEventListener("dragover",function(event){
       event.preventDefault();if(!dragged||dragged===item)return;
-      var box=item.getBoundingClientRect(),after=event.clientY>box.top+box.height/2;
-      sidebar.insertBefore(dragged,after?item.nextSibling:item);
+      moveAt(item,event.clientX,event.clientY);
     });
+    item.addEventListener("keydown",function(event){
+      if(!event.altKey||!["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(event.key))return;
+      event.preventDefault();var previous=["ArrowLeft","ArrowUp"].includes(event.key),sibling=previous?item.previousElementSibling:item.nextElementSibling;
+      if(!sibling)return;
+      sidebar.insertBefore(item,previous?sibling:sibling.nextSibling);saveOrder();item.focus();
+    });
+    item.addEventListener("touchstart",function(){dragged=item;},{passive:true});
+    item.addEventListener("touchmove",function(event){
+      var touch=event.touches[0],target=document.elementFromPoint(touch.clientX,touch.clientY);
+      var over=target&&target.closest("[data-catalog-kind]");if(over&&over!==dragged){event.preventDefault();moveAt(over,touch.clientX,touch.clientY);}
+    },{passive:false});
+    item.addEventListener("touchend",function(){if(dragged){saveOrder();dragged=null;}});
   });
 })();
 (function(){

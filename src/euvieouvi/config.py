@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
+import secrets
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +34,7 @@ class Settings:
     timezone: str
     database_uri: str
     sqlite_busy_timeout_ms: int
+    credential_encryption_key: str
 
     def as_flask_mapping(self) -> dict[str, Any]:
         """Return Flask configuration without leaking environment-specific names."""
@@ -45,6 +50,7 @@ class Settings:
             "SQLALCHEMY_DATABASE_URI": self.database_uri,
             "SQLALCHEMY_TRACK_MODIFICATIONS": False,
             "SQLITE_BUSY_TIMEOUT_MS": self.sqlite_busy_timeout_ms,
+            "CREDENTIAL_ENCRYPTION_KEY": self.credential_encryption_key,
         }
 
 
@@ -56,33 +62,6 @@ def load_settings(overrides: Mapping[str, Any] | None = None) -> Settings:
     if environment not in _VALID_ENVIRONMENTS:
         allowed = ", ".join(sorted(_VALID_ENVIRONMENTS))
         raise ConfigurationError(f"EUVIEOUVI_ENV must be one of: {allowed}.")
-
-    testing = _as_bool(values.get("TESTING", environment == "testing"), name="TESTING")
-    secret_key = str(values.get("SECRET_KEY", os.getenv("EUVIEOUVI_SECRET_KEY", ""))).strip()
-    if not secret_key:
-        raise ConfigurationError("EUVIEOUVI_SECRET_KEY is required.")
-
-    log_level = str(values.get("LOG_LEVEL", os.getenv("EUVIEOUVI_LOG_LEVEL", "INFO"))).upper()
-    if log_level not in _VALID_LOG_LEVELS:
-        allowed = ", ".join(sorted(_VALID_LOG_LEVELS))
-        raise ConfigurationError(f"EUVIEOUVI_LOG_LEVEL must be one of: {allowed}.")
-
-    host = str(values.get("HOST", os.getenv("EUVIEOUVI_HOST", "0.0.0.0"))).strip()
-    if not host:
-        raise ConfigurationError("EUVIEOUVI_HOST must not be empty.")
-
-    port = _as_int(
-        values.get("PORT", os.getenv("EUVIEOUVI_PORT", "8000")),
-        name="EUVIEOUVI_PORT",
-        minimum=1,
-        maximum=65535,
-    )
-    gunicorn_threads = _as_int(
-        values.get("GUNICORN_THREADS", os.getenv("EUVIEOUVI_GUNICORN_THREADS", "4")),
-        name="EUVIEOUVI_GUNICORN_THREADS",
-        minimum=1,
-        maximum=32,
-    )
 
     raw_instance_path = str(
         values.get(
@@ -102,10 +81,58 @@ def load_settings(overrides: Mapping[str, Any] | None = None) -> Settings:
     ).strip()
     if not database_uri.startswith("sqlite:///"):
         raise ConfigurationError("EUVIEOUVI_DATABASE_URI must use SQLite in this version.")
+    database_values = read_database_runtime_settings(database_uri)
+
+    testing = _as_bool(values.get("TESTING", environment == "testing"), name="TESTING")
+    explicit_secret = str(values.get("SECRET_KEY", os.getenv("EUVIEOUVI_SECRET_KEY", ""))).strip()
+    credential_key = _credential_key(
+        instance_path,
+        explicit=str(values.get("MASTER_KEY", os.getenv("EUVIEOUVI_MASTER_KEY", ""))).strip(),
+        deterministic_seed=explicit_secret if testing else "",
+    )
+    secret_key = (
+        explicit_secret
+        or hashlib.sha256(base64.urlsafe_b64decode(credential_key) + b":flask-session").hexdigest()
+    )
+
+    log_level = str(
+        values.get(
+            "LOG_LEVEL",
+            database_values.get("system.log_level", os.getenv("EUVIEOUVI_LOG_LEVEL", "INFO")),
+        )
+    ).upper()
+    if log_level not in _VALID_LOG_LEVELS:
+        allowed = ", ".join(sorted(_VALID_LOG_LEVELS))
+        raise ConfigurationError(f"EUVIEOUVI_LOG_LEVEL must be one of: {allowed}.")
+
+    host = str(values.get("HOST", os.getenv("EUVIEOUVI_HOST", "0.0.0.0"))).strip()
+    if not host:
+        raise ConfigurationError("EUVIEOUVI_HOST must not be empty.")
+
+    port = _as_int(
+        values.get("PORT", os.getenv("EUVIEOUVI_PORT", "8000")),
+        name="EUVIEOUVI_PORT",
+        minimum=1,
+        maximum=65535,
+    )
+    gunicorn_threads = _as_int(
+        values.get(
+            "GUNICORN_THREADS",
+            database_values.get(
+                "system.gunicorn_threads", os.getenv("EUVIEOUVI_GUNICORN_THREADS", "8")
+            ),
+        ),
+        name="EUVIEOUVI_GUNICORN_THREADS",
+        minimum=1,
+        maximum=32,
+    )
     sqlite_busy_timeout_ms = _as_int(
         values.get(
             "SQLITE_BUSY_TIMEOUT_MS",
-            os.getenv("EUVIEOUVI_SQLITE_BUSY_TIMEOUT_MS", "5000"),
+            database_values.get(
+                "system.sqlite_busy_timeout_ms",
+                os.getenv("EUVIEOUVI_SQLITE_BUSY_TIMEOUT_MS", "5000"),
+            ),
         ),
         name="EUVIEOUVI_SQLITE_BUSY_TIMEOUT_MS",
         minimum=1,
@@ -113,7 +140,12 @@ def load_settings(overrides: Mapping[str, Any] | None = None) -> Settings:
     )
 
     timezone = str(
-        values.get("TIMEZONE", os.getenv("EUVIEOUVI_TIMEZONE", "America/Sao_Paulo"))
+        values.get(
+            "TIMEZONE",
+            database_values.get(
+                "system.timezone", os.getenv("EUVIEOUVI_TIMEZONE", "America/Sao_Paulo")
+            ),
+        )
     ).strip()
     try:
         ZoneInfo(timezone)
@@ -132,7 +164,75 @@ def load_settings(overrides: Mapping[str, Any] | None = None) -> Settings:
         timezone=timezone,
         database_uri=database_uri,
         sqlite_busy_timeout_ms=sqlite_busy_timeout_ms,
+        credential_encryption_key=credential_key,
     )
+
+
+def read_database_runtime_settings(database_uri: str) -> dict[str, str]:
+    """Read the small restart-bound setting set before SQLAlchemy is initialized."""
+    if not database_uri.startswith("sqlite:///"):
+        return {}
+    path = Path(database_uri.removeprefix("sqlite:///") or ".")
+    if not path.is_file():
+        return {}
+    keys = (
+        "system.log_level",
+        "system.timezone",
+        "system.gunicorn_threads",
+        "system.sqlite_busy_timeout_ms",
+    )
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
+        try:
+            placeholders = ",".join("?" for _ in keys)
+            rows = connection.execute(
+                f"SELECT key,value FROM settings WHERE key IN ({placeholders})",
+                keys,
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return {}
+    return {str(key): str(value) for key, value in rows}
+
+
+def _credential_key(instance_path: Path, *, explicit: str, deterministic_seed: str) -> str:
+    if deterministic_seed:
+        digest = hashlib.sha256(deterministic_seed.encode()).digest()
+        return base64.urlsafe_b64encode(digest).decode()
+    if explicit:
+        _validate_credential_key(explicit)
+        return explicit
+    instance_path.mkdir(parents=True, exist_ok=True)
+    path = instance_path / ".euvieouvi-master.key"
+    try:
+        value = path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        value = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            value = path.read_text(encoding="ascii").strip()
+        else:
+            with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+                stream.write(value + "\n")
+    _validate_credential_key(value)
+    try:
+        path.chmod(0o600)
+    except OSError as error:
+        raise ConfigurationError(
+            "The credential master key permissions cannot be secured."
+        ) from error
+    return value
+
+
+def _validate_credential_key(value: str) -> None:
+    try:
+        decoded = base64.urlsafe_b64decode(value.encode())
+    except (ValueError, TypeError) as error:
+        raise ConfigurationError("The credential master key is invalid.") from error
+    if len(decoded) != 32:
+        raise ConfigurationError("The credential master key is invalid.")
 
 
 def _as_bool(value: Any, *, name: str) -> bool:

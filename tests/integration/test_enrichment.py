@@ -1,5 +1,6 @@
 """Optional enrichment persistence and Plex precedence."""
 
+import pytest
 from flask import Flask
 from sqlalchemy import select
 
@@ -85,6 +86,115 @@ def test_enrichment_only_fills_missing_fields_and_is_idempotent(
         assert image is not None and image.provider == "tmdb" and image.source_id is None
 
 
+def test_missing_artwork_recovery_uses_exact_external_id_and_retries_after_loss(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, str, str, str]] = []
+
+    class ArtworkTmdb:
+        def __init__(self, token: str) -> None:
+            assert token == "tmdb-token"
+
+        def lookup_external(
+            self,
+            media_type: str,
+            provider: str,
+            external_id: str,
+            *,
+            language: str,
+        ) -> EnrichedMetadata:
+            calls.append((media_type, provider, external_id, language))
+            if language == "pt-BR":
+                return EnrichedMetadata()
+            return EnrichedMetadata(
+                poster_url="https://image.tmdb.org/t/p/w500/show.jpg",
+                poster_provider="tmdb",
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(service, "TmdbClient", ArtworkTmdb)
+    with app.app_context():
+        show = MediaItem(kind=MediaKind.SHOW, title="Localized show")
+        db.session.add(show)
+        db.session.flush()
+        db.session.add_all(
+            [
+                MediaIdentifier(media_item_id=show.id, provider="tvdb", external_id="455064"),
+                EnrichmentRecord(
+                    media_item_id=show.id,
+                    provider="artwork:tvdb",
+                    status="succeeded",
+                    attempts=1,
+                ),
+                Setting(key="metadata.tmdb.enabled", value="true"),
+                Setting(key="metadata.tmdb.token", value="tmdb-token"),
+                Setting(key="metadata.language", value="pt-BR"),
+            ]
+        )
+        db.session.commit()
+
+        first = service.recover_missing_artwork(app)
+        image = db.session.scalar(select(MediaImage).where(MediaImage.media_item_id == show.id))
+        assert first == {"processed": 1, "updated": 1, "failed": 0, "not_found": 0}
+        assert image is not None and image.provider == "tmdb"
+        assert calls == [
+            ("tv", "tvdb", "455064", "pt-BR"),
+            ("tv", "tvdb", "455064", "en-US"),
+        ]
+
+        db.session.delete(image)
+        db.session.commit()
+        second = service.recover_missing_artwork(app)
+
+        assert second == {"processed": 1, "updated": 1, "failed": 0, "not_found": 0}
+        assert len(calls) == 4
+
+
+def test_missing_artwork_recovery_remembers_exact_not_found(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class NoArtworkTmdb:
+        def __init__(self, token: str) -> None:
+            assert token == "tmdb-token"
+
+        def lookup(self, media_type: str, external_id: str, *, language: str) -> EnrichedMetadata:
+            del media_type, external_id, language
+            return EnrichedMetadata()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(service, "TmdbClient", NoArtworkTmdb)
+    with app.app_context():
+        movie = MediaItem(kind=MediaKind.MOVIE, title="No poster")
+        db.session.add(movie)
+        db.session.flush()
+        db.session.add_all(
+            [
+                MediaIdentifier(media_item_id=movie.id, provider="tmdb", external_id="42"),
+                Setting(key="metadata.tmdb.enabled", value="true"),
+                Setting(key="metadata.tmdb.token", value="tmdb-token"),
+                Setting(key="metadata.language", value="en-US"),
+            ]
+        )
+        db.session.commit()
+
+        assert service.recover_missing_artwork(app) == {
+            "processed": 1,
+            "updated": 0,
+            "failed": 0,
+            "not_found": 1,
+        }
+        assert service.recover_missing_artwork(app) == {
+            "processed": 0,
+            "updated": 0,
+            "failed": 0,
+            "not_found": 0,
+        }
+
+
 def test_musicbrainz_enrichment_and_failure_are_audited(app: Flask, monkeypatch: object) -> None:
     monkeypatch.setattr(  # type: ignore[attr-defined]
         service, "MusicBrainzClient", FakeMusicBrainz
@@ -114,7 +224,7 @@ def test_musicbrainz_enrichment_and_failure_are_audited(app: Flask, monkeypatch:
 
 
 def test_musicbrainz_skips_tracks_with_plex_genre_and_poster(
-    app: Flask, monkeypatch: object
+    app: Flask, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class MustNotCallMusicBrainz(FakeMusicBrainz):
         def lookup_recording(self, mbid: str) -> EnrichedMetadata:

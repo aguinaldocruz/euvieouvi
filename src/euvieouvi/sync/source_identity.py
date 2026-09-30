@@ -13,6 +13,7 @@ from euvieouvi.database.models import (
     AsyncTask,
     Library,
     MediaImage,
+    Setting,
     Source,
     SourceMediaRef,
     SyncCheckpoint,
@@ -73,6 +74,7 @@ def apply_server_identity(
             session.delete(task)
 
     source.server_identifier = identifier
+    _reset_watch_sync_incremental_state(session)
     return True
 
 
@@ -82,15 +84,18 @@ def reset_source_incremental_state(session: Session, source_id: int) -> int:
     result = session.execute(
         delete(SyncCheckpoint).where(SyncCheckpoint.library_id.in_(library_ids))
     )
+    _reset_watch_sync_incremental_state(session)
     return int(getattr(result, "rowcount", 0) or 0)
 
 
 def reset_library_incremental_state(session: Session, library_id: int) -> int:
     """Force one library to establish a new full baseline when reselected."""
-    result = session.execute(
-        delete(SyncCheckpoint).where(SyncCheckpoint.library_id == library_id)
-    )
+    result = session.execute(delete(SyncCheckpoint).where(SyncCheckpoint.library_id == library_id))
     return int(getattr(result, "rowcount", 0) or 0)
+
+
+def _reset_watch_sync_incremental_state(session: Session) -> None:
+    session.execute(delete(Setting).where(Setting.key.like("watch_sync.incremental.%")))
 
 
 def _retired_identity(kind: str, row_id: int, external_id: str) -> str:

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from euvieouvi.connectors.base import MediaConnector
+from euvieouvi.connectors.base import SyncConnector
 from euvieouvi.connectors.dtos import (
     ExternalLibraryRef,
     ExternalLibraryType,
@@ -17,6 +18,7 @@ from euvieouvi.connectors.dtos import (
     ExternalMediaKind,
     ExternalWatchEvent,
     HistoryCheckpoint,
+    PageIssue,
     PageRequest,
 )
 from euvieouvi.connectors.errors import ConnectorError
@@ -24,7 +26,7 @@ from euvieouvi.database.enums import LibraryMediaType, MediaKind, SyncStatus, Sy
 from euvieouvi.database.models import Library, SyncCheckpoint, SyncError, SyncRun, SyncRunLibrary
 from euvieouvi.database.unit_of_work import UnitOfWork
 from euvieouvi.sync.cancellation import CancellationToken
-from euvieouvi.sync.catalog_reconcile import reconcile_matching_items
+from euvieouvi.sync.catalog_reconcile import reconcile_matching_items, reconcile_physical_item
 from euvieouvi.sync.errors import (
     SyncAlreadyRunningError,
     SyncCancelledError,
@@ -35,6 +37,7 @@ from euvieouvi.sync.persistence import ItemClassification, MediaPersistenceServi
 SessionFactory = Callable[[], Session]
 _FULL_SCAN_INTERVAL = timedelta(days=7)
 _WATERMARK_OVERLAP = timedelta(minutes=2)
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +56,7 @@ class SyncOrchestrator:
     def __init__(
         self,
         session_factory: SessionFactory,
-        connector: MediaConnector,
+        connector: SyncConnector,
         *,
         page_size: int = 200,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -66,6 +69,9 @@ class SyncOrchestrator:
         self._page_size = page_size
         self._clock = clock
         self._on_acquired = on_acquired
+        self._reconciled_catalog_identities: set[tuple[MediaKind, tuple[tuple[str, str], ...]]] = (
+            set()
+        )
 
     def run(
         self,
@@ -75,6 +81,7 @@ class SyncOrchestrator:
         cancellation: CancellationToken | None = None,
     ) -> SyncRunResult:
         token = cancellation or CancellationToken()
+        self._reconciled_catalog_identities.clear()
         run_id, library_ids = self._acquire(source_id, trigger, queued=False)
         if self._on_acquired is not None:
             self._on_acquired(run_id)
@@ -256,13 +263,12 @@ class SyncOrchestrator:
                     library_id,
                     media_page.items,
                     items_scanned=(
-                        media_page.next_start
-                        or media_page.total_size
-                        or start + media_page.size
+                        media_page.next_start or media_page.total_size or start + media_page.size
                     ),
                     items_total=media_page.total_size,
                     next_stage=next_stage,
                     next_start=next_start,
+                    issues=media_page.issues,
                 )
                 if not media_page.has_more:
                     break
@@ -293,6 +299,7 @@ class SyncOrchestrator:
                 history_page.items,
                 next_start=next_start,
                 complete=not history_page.has_more,
+                issues=history_page.issues,
             )
             if not history_page.has_more:
                 break
@@ -318,6 +325,7 @@ class SyncOrchestrator:
         items_total: int | None,
         next_stage: str,
         next_start: int,
+        issues: tuple[PageIssue, ...] = (),
     ) -> None:
         session = self._session_factory()
         failures = 0
@@ -325,20 +333,23 @@ class SyncOrchestrator:
             work = UnitOfWork(session)
             run, detail = self._required_execution(work, run_id, library_id)
             service = MediaPersistenceService(work, source_id=source_id, library_id=library_id)
+            for issue in issues:
+                failures += 1
+                run.items_read += 1
+                detail.items_read += 1
+                run.items_failed += 1
+                detail.items_failed += 1
+                self._add_page_issue(work, run_id, library_id, issue)
             for item in items:
                 run.items_read += 1
                 detail.items_read += 1
-                result, repaired, error = self._persist_media_with_repair(
-                    session, service, item
-                )
+                result, repaired, error = self._persist_media_with_repair(session, service, item)
                 if result is None:
                     assert error is not None
                     failures += 1
                     run.items_failed += 1
                     detail.items_failed += 1
-                    self._add_item_error(
-                        work, run_id, library_id, item.external_id, error
-                    )
+                    self._add_item_error(work, run_id, library_id, item.external_id, error)
                     continue
                 if repaired:
                     self._add_auto_reconciliation(
@@ -373,13 +384,19 @@ class SyncOrchestrator:
         *,
         next_start: int,
         complete: bool,
+        issues: tuple[PageIssue, ...] = (),
     ) -> None:
         session = self._session_factory()
         failures = 0
         try:
             work = UnitOfWork(session)
-            run, _ = self._required_execution(work, run_id, library_id)
+            run, detail = self._required_execution(work, run_id, library_id)
             service = MediaPersistenceService(work, source_id=source_id, library_id=library_id)
+            for issue in issues:
+                failures += 1
+                run.items_failed += 1
+                detail.items_failed += 1
+                self._add_page_issue(work, run_id, library_id, issue)
             for event in items:
                 try:
                     with session.begin_nested():
@@ -414,25 +431,11 @@ class SyncOrchestrator:
             with session.begin_nested():
                 result = service.persist_media(item, self._clock())
                 session.flush()
-            return result, 0, None
         except Exception as original_error:
             repaired = 0
             try:
                 with session.begin_nested():
-                    repaired += reconcile_matching_items(
-                        session,
-                        MediaKind(item.kind.value),
-                        tuple((value.provider, value.external_id) for value in item.identifiers),
-                    )
-                    if item.kind is ExternalMediaKind.EPISODE:
-                        repaired += reconcile_matching_items(
-                            session,
-                            MediaKind.SHOW,
-                            tuple(
-                                (value.provider, value.external_id)
-                                for value in item.show_identifiers
-                            ),
-                        )
+                    repaired += self._reconcile_persisted_item(session, item, include_leaf=True)
                     session.flush()
             except Exception:
                 repaired = 0
@@ -445,6 +448,55 @@ class SyncOrchestrator:
                 return result, repaired, None
             except Exception as retry_error:
                 return None, repaired, retry_error
+        try:
+            with session.begin_nested():
+                repaired = (
+                    reconcile_physical_item(session, result.media_item_id) if item.file_paths else 0
+                )
+                repaired += self._reconcile_persisted_item(
+                    session, item, include_leaf=item.kind is ExternalMediaKind.MOVIE
+                )
+                session.flush()
+        except Exception:
+            _LOGGER.warning(
+                "Post-persistence catalog reconciliation failed: kind=%s external_id=%s",
+                item.kind.value,
+                item.external_id,
+                exc_info=True,
+            )
+            repaired = 0
+        return result, repaired, None
+
+    def _reconcile_persisted_item(
+        self, session: Session, item: ExternalMediaItem, *, include_leaf: bool
+    ) -> int:
+        """Merge newly confirmed cross-source identities before a duplicate can persist."""
+        repaired = 0
+        if include_leaf:
+            repaired += self._reconcile_identity_once(
+                session,
+                MediaKind(item.kind.value),
+                tuple((value.provider, value.external_id) for value in item.identifiers),
+            )
+        if item.kind is ExternalMediaKind.EPISODE:
+            repaired += self._reconcile_identity_once(
+                session,
+                MediaKind.SHOW,
+                tuple((value.provider, value.external_id) for value in item.show_identifiers),
+            )
+        return repaired
+
+    def _reconcile_identity_once(
+        self,
+        session: Session,
+        kind: MediaKind,
+        identifiers: tuple[tuple[str, str], ...],
+    ) -> int:
+        key = (kind, tuple(sorted(identifiers)))
+        if not identifiers or key in self._reconciled_catalog_identities:
+            return 0
+        self._reconciled_catalog_identities.add(key)
+        return reconcile_matching_items(session, kind, identifiers)
 
     def _set_checkpoint(
         self,
@@ -560,7 +612,13 @@ class SyncOrchestrator:
             if detail is not None:
                 detail.status = status
                 detail.finished_at = self._clock()
-                detail.message = message
+                detail.message = (
+                    f"Completed with {detail.items_failed} item warnings."
+                    if status is SyncStatus.SUCCEEDED
+                    and detail.items_failed > 0
+                    and message is None
+                    else message
+                )
                 session.commit()
         finally:
             session.close()
@@ -575,7 +633,11 @@ class SyncOrchestrator:
             run.status = status
             run.finished_at = self._clock()
             run.heartbeat_at = self._clock()
-            run.summary = summary
+            run.summary = (
+                f"Synchronization completed with {run.items_failed} item warnings."
+                if status is SyncStatus.SUCCEEDED and run.items_failed > 0
+                else summary
+            )
             for detail in work.sync_run_libraries.for_run(run_id):
                 if detail.status in {
                     SyncStatus.QUEUED,
@@ -642,6 +704,25 @@ class SyncOrchestrator:
                 media_external_id=external_id,
                 category="item_persistence",
                 message=_safe_error_message(error),
+                retryable=False,
+            )
+        )
+
+    @staticmethod
+    def _add_page_issue(
+        work: UnitOfWork,
+        run_id: int,
+        library_id: int,
+        issue: PageIssue,
+    ) -> None:
+        context = f"título={issue.title} · " if issue.title else ""
+        work.sync_errors.add(
+            SyncError(
+                sync_run_id=run_id,
+                library_id=library_id,
+                media_external_id=issue.external_id,
+                category=issue.category,
+                message=(context + issue.message)[:1000],
                 retryable=False,
             )
         )

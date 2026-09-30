@@ -105,6 +105,7 @@ class MediaItem(TimestampMixin, Base):
         Index("ix_media_items_kind_title", "kind", "title"),
         Index("ix_media_items_year", "year"),
         Index("ix_media_items_source_added", "source_added_at"),
+        Index("ix_media_items_updated", "updated_at"),
         Index("ix_media_items_hierarchy", "parent_id", "season_number", "episode_number"),
         Index("ix_media_items_music_hierarchy", "parent_id", "disc_number", "track_number"),
         Index(
@@ -134,6 +135,7 @@ class MediaItem(TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     original_title: Mapped[str | None] = mapped_column(String(500))
     sort_title: Mapped[str | None] = mapped_column(String(500))
+    manual_match_tmdb_id: Mapped[str | None] = mapped_column(String(32))
     year: Mapped[int | None] = mapped_column(Integer)
     season_number: Mapped[int | None] = mapped_column(Integer)
     episode_number: Mapped[int | None] = mapped_column(Integer)
@@ -147,6 +149,67 @@ class MediaItem(TimestampMixin, Base):
     content_rating: Mapped[str | None] = mapped_column(String(64))
     audience_rating: Mapped[float | None] = mapped_column(Float)
     source_added_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CatalogEntry(Base):
+    """Persistent read model for one canonical card in the catalog."""
+
+    __tablename__ = "catalog_entries"
+    __table_args__ = (
+        CheckConstraint("completion_count >= 0", name="ck_catalog_entries_completion_count"),
+        CheckConstraint("child_count >= 0", name="ck_catalog_entries_child_count"),
+        CheckConstraint(
+            "completed_child_count >= 0 AND completed_child_count <= child_count",
+            name="ck_catalog_entries_completed_children",
+        ),
+        Index("ix_catalog_entries_kind_last_played", "kind", "last_played_at"),
+        Index("ix_catalog_entries_kind_first_played", "kind", "first_played_at"),
+        Index("ix_catalog_entries_kind_play_count", "kind", "completion_count"),
+        Index("ix_catalog_entries_kind_availability", "kind", "available"),
+    )
+
+    media_item_id: Mapped[int] = mapped_column(
+        ForeignKey("media_items.id", ondelete="CASCADE"), primary_key=True
+    )
+    group_key: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    completion_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    first_played_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_played_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    progress_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    child_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completed_child_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    available: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    available_plex: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    available_jellyfin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class CatalogEntryMember(Base):
+    """Map every source-specific media row to its canonical catalog card."""
+
+    __tablename__ = "catalog_entry_members"
+    __table_args__ = (
+        Index("ix_catalog_entry_members_catalog", "catalog_media_item_id", "media_item_id"),
+    )
+
+    media_item_id: Mapped[int] = mapped_column(
+        ForeignKey("media_items.id", ondelete="CASCADE"), primary_key=True
+    )
+    catalog_media_item_id: Mapped[int] = mapped_column(
+        ForeignKey("catalog_entries.media_item_id", ondelete="CASCADE"), nullable=False
+    )
+
+
+class CatalogProjectionDirtyItem(Base):
+    """Playback item awaiting an incremental catalog projection refresh."""
+
+    __tablename__ = "catalog_projection_dirty_items"
+
+    media_item_id: Mapped[int] = mapped_column(primary_key=True)
 
 
 class Genre(Base):
@@ -181,6 +244,7 @@ class SourceMediaRef(TimestampMixin, Base):
         Index("ix_source_media_refs_library_available", "library_id", "available"),
         Index("ix_source_media_refs_media_item", "media_item_id"),
         Index("ix_source_media_refs_unavailable_since", "unavailable_since"),
+        Index("ix_source_media_refs_updated", "updated_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -202,6 +266,23 @@ class SourceMediaRef(TimestampMixin, Base):
     raw_hash: Mapped[str | None] = mapped_column(String(128))
 
 
+class MediaFilePath(Base):
+    """Exact, root-mapped physical evidence, never a basename/title guess."""
+
+    __tablename__ = "media_file_paths"
+    __table_args__ = (
+        UniqueConstraint("reference_id", "path_key", name="uq_media_file_paths_reference_key"),
+        Index("ix_media_file_paths_key", "path_key"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reference_id: Mapped[int] = mapped_column(
+        ForeignKey("source_media_refs.id", ondelete="CASCADE"), nullable=False
+    )
+    path_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    original_path: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_path: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class MediaIdentifier(Base):
     __tablename__ = "media_identifiers"
     __table_args__ = (
@@ -209,6 +290,7 @@ class MediaIdentifier(Base):
             "media_item_id", "provider", "external_id", name="uq_media_identifiers_identity"
         ),
         Index("ix_media_identifiers_provider_external", "provider", "external_id"),
+        Index("ix_media_identifiers_created", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -228,6 +310,7 @@ class MediaImage(TimestampMixin, Base):
         UniqueConstraint("media_item_id", "image_type", name="uq_media_images_item_type"),
         Index("ix_media_images_cache_status", "cache_status"),
         Index("ix_media_images_type_item", "image_type", "media_item_id"),
+        Index("ix_media_images_updated", "updated_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -283,6 +366,7 @@ class WatchEvent(TimestampMixin, Base):
         Index("ix_watch_events_source_watched", "source_id", "watched_at"),
         Index("ix_watch_events_completed_id", "completed", "id"),
         Index("ix_watch_events_watched_id", "watched_at", "id"),
+        Index("ix_watch_events_updated", "updated_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -336,6 +420,7 @@ class WatchState(TimestampMixin, Base):
         CheckConstraint("progress_ms IS NULL OR progress_ms >= 0", name="ck_watch_states_progress"),
         UniqueConstraint("media_item_id", "source_id", name="uq_watch_states_item_source"),
         Index("ix_watch_states_completed_watched", "completed", "last_watched_at"),
+        Index("ix_watch_states_updated", "updated_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -347,6 +432,7 @@ class WatchState(TimestampMixin, Base):
     )
     view_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_watched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_played_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     progress_ms: Mapped[int | None] = mapped_column(Integer)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -409,6 +495,7 @@ class SyncRun(TimestampMixin, Base):
             SyncStatus,
             native_enum=False,
             create_constraint=False,
+            length=16,
             values_callable=lambda enum: [item.value for item in enum],
         )
     )
@@ -428,6 +515,15 @@ class JobRun(TimestampMixin, Base):
     __table_args__ = (
         Index("ix_job_runs_job_created", "job_id", "created_at"),
         Index("ix_job_runs_status_created", "status", "created_at"),
+        Index("ix_job_runs_queue", "status", "available_at", "id"),
+        Index("ix_job_runs_lease", "status", "lease_expires_at"),
+        Index(
+            "uq_job_runs_active_job",
+            "job_id",
+            unique=True,
+            sqlite_where=text("status IN ('queued', 'running')"),
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -452,6 +548,14 @@ class JobRun(TimestampMixin, Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(96))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    execution_reference: Mapped[str | None] = mapped_column(String(96))
     progress_percent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     processed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     updated: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -473,11 +577,44 @@ class AsyncTask(TimestampMixin, Base):
     task_type: Mapped[str] = mapped_column(String(64), nullable=False)
     dedup_key: Mapped[str] = mapped_column(String(128), nullable=False)
     payload: Mapped[str] = mapped_column(Text, nullable=False)
+    pending_payload: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(String(1000))
+
+
+class OperationalSample(Base):
+    """Bounded historical sample of queues, worker and connector health."""
+
+    __tablename__ = "operational_samples"
+    __table_args__ = (
+        CheckConstraint(
+            "queued_jobs >= 0 AND pending_tasks >= 0 AND open_circuits >= 0 AND "
+            "connector_failures >= 0 AND slow_operations >= 0 AND alert_count >= 0",
+            name="ck_operational_samples_nonnegative",
+        ),
+        Index("ix_operational_samples_captured", "captured_at"),
+        Index("ix_operational_samples_level_captured", "alert_level", "captured_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    queued_jobs: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    pending_tasks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    heartbeat_age_seconds: Mapped[int | None] = mapped_column(Integer)
+    open_circuits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    connector_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    average_connector_latency_ms: Mapped[float | None] = mapped_column(Float)
+    slow_operations: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    database_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    wal_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    alert_level: Mapped[str] = mapped_column(String(16), default="ok", nullable=False)
+    alert_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    alert_summary: Mapped[str | None] = mapped_column(Text)
 
 
 class SyncRunLibrary(Base):

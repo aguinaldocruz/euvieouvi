@@ -4,7 +4,7 @@ from flask import Flask
 from flask_migrate import Migrate  # type: ignore[import-untyped]
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import Engine, event
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Session
 
 
 class Base(DeclarativeBase):
@@ -13,6 +13,11 @@ class Base(DeclarativeBase):
 
 db = SQLAlchemy(model_class=Base)
 migrate = Migrate(compare_type=True, render_as_batch=True)
+
+
+def new_session() -> Session:
+    """Return an unscoped session owned and safely closed by a service."""
+    return db.session.session_factory()
 
 
 @event.listens_for(Engine, "connect")

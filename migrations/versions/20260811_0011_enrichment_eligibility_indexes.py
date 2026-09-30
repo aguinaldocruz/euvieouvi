@@ -14,10 +14,7 @@ down_revision: str | None = "4ac542335f9b"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-MISSING_METADATA = (
-    "summary IS NULL OR tagline IS NULL OR studio IS NULL "
-    "OR audience_rating IS NULL"
-)
+MISSING_METADATA = "summary IS NULL OR tagline IS NULL OR studio IS NULL OR audience_rating IS NULL"
 
 
 def upgrade() -> None:

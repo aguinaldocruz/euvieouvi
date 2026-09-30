@@ -17,9 +17,11 @@ from euvieouvi.connectors.jellyfin.client import JellyfinHttpClient
 from euvieouvi.connectors.jellyfin.connector import JellyfinConnector
 from euvieouvi.connectors.plex.client import PlexHttpClient
 from euvieouvi.connectors.plex.connector import PlexConnector
+from euvieouvi.credentials import decrypt_text
 from euvieouvi.database.enums import ConnectorType, SyncStatus, SyncTrigger
 from euvieouvi.database.models import Setting, Source, SyncRun
-from euvieouvi.extensions import db
+from euvieouvi.extensions import db, new_session
+from euvieouvi.logging import concise_error
 from euvieouvi.sync.cancellation import CancellationToken
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
 from euvieouvi.sync.orchestrator import SyncOrchestrator
@@ -31,22 +33,35 @@ ConnectorFactory = Callable[[Source], MediaConnector]
 def connector_for(source: Source) -> MediaConnector:
     if source.connector_type is ConnectorType.JELLYFIN:
         try:
-            secret = json.loads(source.secret)
-            api_key = str(secret["api_key"])
+            secret = json.loads(decrypt_text(source.secret))
+            access_token = str(secret.get("access_token") or secret.get("api_key") or "")
             user_id = str(secret["user_id"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("Invalid persisted Jellyfin credentials") from error
-        jf_client = JellyfinHttpClient(source.base_url, api_key)
+        device_id = str(secret.get("device_id") or "euvieouvi")
+        jf_client = JellyfinHttpClient(
+            source.base_url,
+            access_token,
+            device_id=device_id,
+            telemetry_key=f"jellyfin:{source.id}",
+        )
         try:
             resolved = jf_client.resolve_user_id(user_id)
         except Exception:
             resolved = user_id
         return JellyfinConnector(jf_client, resolved)
+    configured_client = db.session.get(Setting, "plex.client_identifier")
+    client_identifier = (
+        configured_client.value
+        if configured_client is not None and configured_client.value.strip()
+        else f"euvieouvi-{uuid.getnode():x}"
+    )
     client = PlexHttpClient(
         source.base_url,
-        source.secret,
+        decrypt_text(source.secret),
         application_version=version("euvieouvi"),
-        client_identifier=f"euvieouvi-{uuid.getnode():x}",
+        client_identifier=client_identifier,
+        telemetry_key=f"plex:{source.id}",
     )
     configured_user = db.session.get(Setting, "plex.user_id")
     if configured_user is None:
@@ -63,6 +78,7 @@ class LocalSyncExecutor:
         self._tokens: dict[int, CancellationToken] = {}
         self._lock = threading.Lock()
         self._watch_sync_running = False
+        self._watch_cancel = threading.Event()
         self._watch_snapshot: dict[str, int | bool | str] = {
             "active": False,
             "processed": 0,
@@ -81,7 +97,7 @@ class LocalSyncExecutor:
         source = db.session.get(Source, source_id)
         if source is None:
             raise LookupError("Source not found")
-        run_id = SyncOrchestrator(lambda: db.session(), self._factory(source)).enqueue(
+        run_id = SyncOrchestrator(new_session, self._factory(source)).enqueue(
             source_id, trigger=trigger
         )
         token = CancellationToken()
@@ -98,6 +114,9 @@ class LocalSyncExecutor:
                 try:
                     auto_enrich = db.session.get(Setting, "metadata.auto_after_sync")
                     enrich_after_sync = auto_enrich is not None and auto_enrich.value == "true"
+                    # Enrichment callbacks update the sync row while sharing the
+                    # background app-context transaction. A separate session here
+                    # would contend with that transaction for SQLite's writer lock.
                     orchestrator = SyncOrchestrator(
                         lambda: db.session(), self._factory(source), page_size=1000
                     )
@@ -194,7 +213,7 @@ class LocalSyncExecutor:
         def execute_pending() -> None:
             try:
                 with self._app.app_context():
-                    WatchSyncService(lambda: db.session(), self._factory).run(None)
+                    WatchSyncService(new_session, self._factory).run(None)
             except Exception:
                 self._app.logger.exception("pending watched-state propagation failed")
             finally:
@@ -220,6 +239,7 @@ class LocalSyncExecutor:
             if self._watch_sync_running:
                 return False
             self._watch_sync_running = True
+            self._watch_cancel.clear()
             self._watch_snapshot = {
                 "active": True,
                 "processed": 0,
@@ -228,6 +248,7 @@ class LocalSyncExecutor:
                 "percent": 1,
                 "summary": "Analisando o catálogo e calculando apenas as diferenças.",
                 "failure_details": "",
+                "cancelled": False,
             }
 
         def execute() -> None:
@@ -256,10 +277,11 @@ class LocalSyncExecutor:
                             self._watch_snapshot["failure_details"] = "\n".join(failure_details)
 
                     result = WatchSyncService(
-                        lambda: db.session(),
+                        new_session,
                         self._factory,
                         progress=report,
                         failure=report_failure,
+                        cancelled=self._watch_cancel.is_set,
                     ).run(None, source_type=source_type)
                     with self._lock:
                         self._watch_snapshot.update(
@@ -269,17 +291,26 @@ class LocalSyncExecutor:
                             percent=100,
                             summary=(
                                 f"{result.updated} atualizados, {result.skipped} ignorados e "
-                                f"{result.failed} falhas."
+                                f"{result.failed} falhas; {result.repaired} referências "
+                                "obsoletas reparadas."
                             ),
                         )
             except Exception as error:
                 self._app.logger.exception("directional watched-state propagation failed")
                 with self._lock:
-                    detail = f"operação=propagar assistido · erro={type(error).__name__}: {error}"
-                    failure_details.append(detail)
+                    cancelled = self._watch_cancel.is_set()
+                    formatted_error = concise_error(error)
+                    detail = f"operação=propagar assistido · erro={formatted_error}"
+                    if not cancelled:
+                        failure_details.append(detail)
                     self._watch_snapshot.update(
-                        summary=f"Propagação falhou: {type(error).__name__}: {error}",
-                        failed=1,
+                        summary=(
+                            "Propagação cancelada; atualizações já confirmadas foram preservadas."
+                            if cancelled
+                            else f"Propagação falhou: {formatted_error}"
+                        ),
+                        failed=0 if cancelled else 1,
+                        cancelled=cancelled,
                         failure_details="\n".join(failure_details),
                     )
             finally:
@@ -289,6 +320,13 @@ class LocalSyncExecutor:
 
         threading.Thread(target=execute, name="euvieouvi-watch-direction", daemon=True).start()
         return True
+
+    def cancel_watch_sync(self) -> bool:
+        with self._lock:
+            if not self._watch_sync_running:
+                return False
+            self._watch_cancel.set()
+            return True
 
     def cancel(self, run_id: int) -> bool:
         with self._lock:

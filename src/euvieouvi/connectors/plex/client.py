@@ -19,6 +19,7 @@ from euvieouvi.connectors.errors import (
     ConnectorResponseError,
     ConnectorTimeoutError,
 )
+from euvieouvi.observability import observe_connector
 
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _RETRYABLE_STATUSES = {429, 502, 503, 504}
@@ -47,6 +48,7 @@ class PlexHttpClient:
         max_response_bytes: int = 10 * 1024 * 1024,
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        telemetry_key: str | None = None,
     ) -> None:
         self.base_url = normalize_base_url(base_url)
         if not token.strip():
@@ -69,12 +71,17 @@ class PlexHttpClient:
         self._client = client or httpx.Client(follow_redirects=False, trust_env=False)
         self._owns_client = client is None
         self._sleep = sleep
+        self._telemetry_key = telemetry_key
 
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
 
     def get(self, path: str, *, params: Mapping[str, str | int] | None = None) -> PlexPayload:
+        with observe_connector(self._telemetry_key, "GET"):
+            return self._get(path, params=params)
+
+    def _get(self, path: str, *, params: Mapping[str, str | int] | None = None) -> PlexPayload:
         url = self._build_url(path)
         for attempt in range(self._retries + 1):
             try:

@@ -4,11 +4,12 @@
 <a href="{{ url_for('web.catalog') }}">← Voltar ao catálogo</a>
 <div class="row g-4 mt-1 mb-4">
   <div class="col-5 col-md-3 col-lg-2">
-    <img class="img-fluid rounded shadow-sm" src="{{ url_for('web.media_image', media_id=item.id) }}" alt="Capa de {{ item.title }}">
+    <img class="img-fluid rounded shadow-sm" src="{{ url_for('web.media_image', media_id=item.id, v=artwork_version) }}" alt="Capa de {{ item.title }}">
   </div>
   <div class="col">
     {% if series_title %}<p class="text-secondary mb-1">{{ series_title }}</p>{% endif %}
     <h1 class="h2">{{ item.title }}{% if item.year %} <span class="text-secondary">({{ item.year }})</span>{% endif %}</h1>
+    {% if item.kind.value in ['movie', 'show'] %}<a class="btn btn-outline-secondary btn-sm mb-3" href="{{ url_for('web.media_match', media_id=item.id) }}">Corrigir identificação</a>{% if item.manual_match_tmdb_id %}<span class="small text-secondary ms-2">TMDB {{ item.manual_match_tmdb_id }} · Identificação manual protegida</span>{% endif %}{% endif %}
     {% if item.tagline %}<p class="lead fst-italic">{{ item.tagline }}</p>{% endif %}
     <p class="text-secondary">
       {{ item.kind.value }}
@@ -112,6 +113,7 @@
 {% endif %}
 
 <h2 class="h4">Disponibilidade</h2>
+<a class="small" href="{{ url_for('web.settings_media_identity') }}">Identificação de mídias</a>
 <ul>
   {% for ref, source, library in availability_rows %}
     <li>{{ source.name }} · {{ library.name }} — {{ 'disponível' if ref.available else 'removido' }}{% if ref.unavailable_since %} em {{ format_datetime(ref.unavailable_since) }}{% endif %}</li>
@@ -119,4 +121,5 @@
     <li>Nenhuma referência encontrada.</li>
   {% endfor %}
 </ul>
+{% if physical_paths %}<details class="card mb-3"><summary class="card-header">Referências físicas</summary><div class="card-body"><p class="small text-secondary">Até 100 caminhos coletados nas sincronizações.</p><ul class="small mb-0">{% for path, source_name in physical_paths %}<li class="mb-2 text-break"><strong>{{ source_name }}</strong> · {{ path.original_path }}{% if path.original_path != path.canonical_path %}<br><span class="text-secondary">→ {{ path.canonical_path }}</span>{% endif %}</li>{% endfor %}</ul></div></details>{% endif %}
 {% endblock %}

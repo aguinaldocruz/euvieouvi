@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from enum import Enum
 from typing import Any
 
+from euvieouvi.credentials import decrypt_text
 from euvieouvi.database.models import Library, MediaItem, Source, SyncRun, WatchEvent, WatchState
 
 
@@ -24,7 +25,7 @@ def source(value: Source) -> dict[str, Any]:
         "name": value.name,
         "base_url": value.base_url,
         "enabled": value.enabled,
-        "has_secret": bool(value.secret),
+        "has_secret": bool(decrypt_text(value.secret)),
         "last_connection_test_at": timestamp(value.last_connection_test_at),
         "last_connection_status": value.last_connection_status,
         "created_at": timestamp(value.created_at),

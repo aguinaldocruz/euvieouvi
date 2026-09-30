@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from urllib.request import urlopen
 
 
 def main() -> int:
     """Return a process status suitable for Docker HEALTHCHECK."""
-    port = os.getenv("EUVIEOUVI_PORT", "8000")
-    url = f"http://127.0.0.1:{port}/health/ready"
+    url = "http://127.0.0.1:8000/health/ready"
     try:
         with urlopen(url, timeout=3) as response:
             return 0 if response.status == 200 else 1

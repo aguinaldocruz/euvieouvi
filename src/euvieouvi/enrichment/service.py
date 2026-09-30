@@ -9,6 +9,7 @@ from importlib.metadata import version
 from flask import Flask
 from sqlalchemy import and_, case, exists, func, or_, select, update
 
+from euvieouvi.credentials import setting_value
 from euvieouvi.database.enums import MediaKind
 from euvieouvi.database.models import (
     EnrichmentRecord,
@@ -28,6 +29,8 @@ from euvieouvi.enrichment.providers import (
 )
 from euvieouvi.extensions import db
 
+_ARTWORK_RECORD_PREFIX = "artwork:"
+
 
 def enrich_catalog(
     app: Flask,
@@ -38,7 +41,11 @@ def enrich_catalog(
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, int]:
     """Enrich all eligible exact identifiers, or a bounded batch when requested."""
-    settings = {item.key: item.value for item in db.session.scalars(select(Setting))}
+    settings = {
+        item.key: value
+        for item in db.session.scalars(select(Setting))
+        if (value := setting_value(item)) is not None
+    }
     language = settings.get("metadata.language", "pt-BR")
     tmdb = None
     musicbrainz = None
@@ -239,6 +246,257 @@ def enrich_catalog(
     db.session.commit()
     app.logger.info("metadata enrichment finished", extra=counters)
     return counters
+
+
+def recover_missing_artwork(
+    app: Flask,
+    *,
+    progress: Callable[[dict[str, int]], None] | None = None,
+    failure: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, int]:
+    """Discover external posters only for catalog items with exact stable identifiers."""
+    settings = {
+        item.key: value
+        for item in db.session.scalars(select(Setting))
+        if (value := setting_value(item)) is not None
+    }
+    language = settings.get("metadata.language", "pt-BR")
+    tmdb = None
+    musicbrainz = None
+    candidate_conditions = []
+    if settings.get("metadata.tmdb.enabled") == "true" and settings.get("metadata.tmdb.token"):
+        tmdb = TmdbClient(settings["metadata.tmdb.token"])
+        candidate_conditions.append(
+            and_(
+                MediaItem.kind.in_([MediaKind.MOVIE, MediaKind.SHOW]),
+                or_(
+                    MediaIdentifier.provider.in_(("tmdb", "imdb")),
+                    and_(
+                        MediaItem.kind == MediaKind.SHOW,
+                        MediaIdentifier.provider == "tvdb",
+                    ),
+                ),
+            )
+        )
+    if settings.get("metadata.musicbrainz.enabled") == "true":
+        musicbrainz = MusicBrainzClient(f"euvieouvi/{version('euvieouvi')}")
+        candidate_conditions.append(
+            or_(
+                and_(
+                    MediaItem.kind == MediaKind.ALBUM,
+                    MediaIdentifier.provider == "mbid-release",
+                ),
+                and_(
+                    MediaItem.kind == MediaKind.TRACK,
+                    MediaIdentifier.provider == "mbid",
+                ),
+            )
+        )
+    counters = {"processed": 0, "updated": 0, "failed": 0, "not_found": 0}
+    try:
+        if not candidate_conditions:
+            _report_artwork_progress(progress, counters, total=0)
+            return counters
+        has_poster = exists(
+            select(MediaImage.id).where(
+                MediaImage.media_item_id == MediaItem.id,
+                MediaImage.image_type == "poster",
+            )
+        )
+        rows = db.session.execute(
+            select(
+                MediaIdentifier.id,
+                MediaIdentifier.media_item_id,
+                MediaIdentifier.provider,
+            )
+            .join(MediaItem, MediaItem.id == MediaIdentifier.media_item_id)
+            .where(or_(*candidate_conditions), ~has_poster)
+            .order_by(
+                MediaIdentifier.media_item_id,
+                case(
+                    (MediaIdentifier.provider.in_(("tmdb", "mbid-release")), 0),
+                    (MediaIdentifier.provider.in_(("imdb", "mbid")), 1),
+                    else_=2,
+                ),
+                MediaIdentifier.id,
+            )
+        ).all()
+        records = {
+            (record.media_item_id, record.provider): record
+            for record in db.session.scalars(
+                select(EnrichmentRecord).where(
+                    EnrichmentRecord.provider.like(f"{_ARTWORK_RECORD_PREFIX}%")
+                )
+            )
+        }
+        candidates: dict[int, list[int]] = {}
+        seen_providers: set[tuple[int, str]] = set()
+        for identifier_id, media_item_id, provider in rows:
+            record_provider = f"{_ARTWORK_RECORD_PREFIX}{provider}"
+            record = records.get((int(media_item_id), record_provider))
+            provider_key = (int(media_item_id), str(provider))
+            if provider_key in seen_providers or (
+                record is not None and record.status == "not_found"
+            ):
+                continue
+            seen_providers.add(provider_key)
+            candidates.setdefault(int(media_item_id), []).append(int(identifier_id))
+        total = len(candidates)
+        _report_artwork_progress(progress, counters, total=total)
+        for media_item_id, identifier_ids in candidates.items():
+            if cancelled is not None and cancelled():
+                break
+            item = db.session.get(MediaItem, media_item_id)
+            if item is None:
+                continue
+            counters["processed"] += 1
+            recovered = transient_failure = False
+            for identifier_id in identifier_ids:
+                identifier = db.session.get(MediaIdentifier, identifier_id)
+                if identifier is None:
+                    continue
+                record_provider = f"{_ARTWORK_RECORD_PREFIX}{identifier.provider}"
+                record = records.get((item.id, record_provider))
+                if record is None:
+                    record = EnrichmentRecord(
+                        media_item_id=item.id,
+                        provider=record_provider,
+                        status="pending",
+                        attempts=0,
+                    )
+                    db.session.add(record)
+                    records[(item.id, record_provider)] = record
+                record.attempts += 1
+                record.checked_at = datetime.now(UTC)
+                try:
+                    metadata = _lookup_artwork(
+                        item,
+                        identifier,
+                        tmdb=tmdb,
+                        musicbrainz=musicbrainz,
+                        language=language,
+                    )
+                    if metadata.poster_url is None or metadata.poster_provider is None:
+                        record.status = "not_found"
+                        record.message = "External artwork was not found"
+                        continue
+                    image = db.session.scalar(
+                        select(MediaImage).where(
+                            MediaImage.media_item_id == item.id,
+                            MediaImage.image_type == "poster",
+                        )
+                    )
+                    if image is None:
+                        db.session.add(
+                            MediaImage(
+                                media_item_id=item.id,
+                                source_id=None,
+                                image_type="poster",
+                                provider=metadata.poster_provider,
+                                source_url=metadata.poster_url,
+                                cache_status="pending",
+                            )
+                        )
+                        counters["updated"] += 1
+                    record.status = "succeeded"
+                    record.message = None
+                    recovered = True
+                    break
+                except (EnrichmentNotFoundError, ValueError) as error:
+                    record.status = "not_found"
+                    record.message = str(error)[:500]
+                except EnrichmentError as error:
+                    record.status = "failed"
+                    record.message = str(error)[:500]
+                    counters["failed"] += 1
+                    transient_failure = True
+                    detail = (
+                        f"operação=recuperar imagem · tipo={item.kind.value} · "
+                        f"título={item.title} · item={item.id} · provedor={identifier.provider} · "
+                        f"externo={identifier.external_id} · "
+                        f"erro={type(error).__name__}: {error}"
+                    )
+                    if failure is not None:
+                        failure(detail)
+                    app.logger.warning("Artwork recovery failed: %s", detail, exc_info=True)
+                    break
+            if not recovered and not transient_failure:
+                counters["not_found"] += 1
+            db.session.commit()
+            _report_artwork_progress(progress, counters, total=total)
+    finally:
+        if tmdb is not None:
+            tmdb.close()
+        if musicbrainz is not None:
+            musicbrainz.close()
+    value = ",".join(f"{key}={number}" for key, number in counters.items())
+    summary = db.session.get(Setting, "metadata.last_artwork_summary")
+    if summary is None:
+        db.session.add(Setting(key="metadata.last_artwork_summary", value=value))
+    else:
+        summary.value = value
+    db.session.commit()
+    app.logger.info("external artwork recovery finished", extra=counters)
+    return counters
+
+
+def _lookup_artwork(
+    item: MediaItem,
+    identifier: MediaIdentifier,
+    *,
+    tmdb: TmdbClient | None,
+    musicbrainz: MusicBrainzClient | None,
+    language: str,
+) -> EnrichedMetadata:
+    if item.kind in {MediaKind.MOVIE, MediaKind.SHOW}:
+        if tmdb is None:
+            raise ValueError("TMDB artwork recovery is disabled")
+        media_type = "movie" if item.kind is MediaKind.MOVIE else "tv"
+        if identifier.provider == "tmdb":
+            metadata = tmdb.lookup(media_type, identifier.external_id, language=language)
+        else:
+            metadata = tmdb.lookup_external(
+                media_type,
+                identifier.provider,
+                identifier.external_id,
+                language=language,
+            )
+        if metadata.poster_url is None and language != "en-US":
+            if identifier.provider == "tmdb":
+                metadata = tmdb.lookup(media_type, identifier.external_id, language="en-US")
+            else:
+                metadata = tmdb.lookup_external(
+                    media_type,
+                    identifier.provider,
+                    identifier.external_id,
+                    language="en-US",
+                )
+        return metadata
+    if musicbrainz is None:
+        raise ValueError("MusicBrainz artwork recovery is disabled")
+    if item.kind is MediaKind.ALBUM and identifier.provider == "mbid-release":
+        return musicbrainz.lookup_release_artwork(identifier.external_id)
+    if item.kind is MediaKind.TRACK and identifier.provider == "mbid":
+        return musicbrainz.lookup_recording(identifier.external_id)
+    raise ValueError("Unsupported exact artwork identifier")
+
+
+def _report_artwork_progress(
+    progress: Callable[[dict[str, int]], None] | None,
+    counters: dict[str, int],
+    *,
+    total: int,
+) -> None:
+    if progress is None:
+        return
+    progress(
+        {
+            **counters,
+            "total": total,
+            "percent": 100 if total == 0 else min(100, counters["processed"] * 100 // total),
+        }
+    )
 
 
 def _needs_language_fallback(metadata: EnrichedMetadata) -> bool:

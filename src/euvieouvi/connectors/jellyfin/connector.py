@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -17,6 +16,7 @@ from euvieouvi.connectors.dtos import (
     ExternalWatchEvent,
     HistoryCheckpoint,
     Page,
+    PageIssue,
     PageRequest,
 )
 from euvieouvi.connectors.errors import ConnectorResponseError
@@ -42,6 +42,7 @@ _FIELDS = ",".join(
         "DateCreated",
         "DateLastSaved",
         "MediaSources",
+        "Path",
         "ParentId",
     ]
 )
@@ -90,6 +91,16 @@ class JellyfinConnector:
                 users.append(ExternalUser(external_id, name))
         return tuple(sorted(users, key=lambda user: user.name.casefold()))
 
+    def get_media_item(self, external_id: str, library_external_id: str) -> ExternalMediaItem:
+        """Fetch one item so a webhook can recover a missing catalog reference."""
+        if not external_id.strip():
+            raise ValueError("Jellyfin media id must not be empty")
+        raw = self._client.get_json(f"/Users/{self._user_id}/Items/{external_id}")
+        if not isinstance(raw, dict):
+            raise ConnectorResponseError("Jellyfin item response was invalid.")
+        enriched, _ = self._with_series_provider_ids(raw)
+        return map_item(enriched, library_external_id)
+
     def get_media_page(
         self,
         library: ExternalLibraryRef,
@@ -97,7 +108,7 @@ class JellyfinConnector:
         page: PageRequest,
     ) -> Page[ExternalMediaItem]:
         raw = self._items(library, media_kind, page, played_only=False)
-        mapped = tuple(self._map_valid_items(raw["items"], library.external_id))
+        mapped, issues = self._map_valid_items(raw["items"], library.external_id)
         return Page(
             mapped,
             page.start,
@@ -106,6 +117,7 @@ class JellyfinConnector:
             next_start=page.start + len(raw["items"])
             if page.start + len(raw["items"]) < raw["total"]
             else None,
+            issues=issues,
         )
 
     def get_history_page(
@@ -125,17 +137,25 @@ class JellyfinConnector:
         )
         raw = self._items(library, kind, effective_page, played_only=True, updated_for_user=True)
         observed_at = datetime.now(UTC)
-        mapped = tuple(
-            self._map_valid_history(raw["items"], library.external_id, observed_at=observed_at)
+        mapped, issues = self._map_valid_history(
+            raw["items"], library.external_id, observed_at=observed_at
+        )
+        watermark = checkpoint.watermark_at if checkpoint is not None else None
+        recent = tuple(
+            event for event in mapped if watermark is None or event.watched_at >= watermark
+        )
+        reached_watermark = watermark is not None and any(
+            event.watched_at < watermark for event in mapped
         )
         return Page(
-            mapped,
+            recent,
             page.start,
-            len(mapped),
+            len(recent),
             total_size=raw["total"],
             next_start=page.start + len(raw["items"])
-            if page.start + len(raw["items"]) < raw["total"]
+            if page.start + len(raw["items"]) < raw["total"] and not reached_watermark
             else None,
+            issues=issues,
         )
 
     def mark_watched(self, external_id: str, *, watched_at: datetime | None = None) -> None:
@@ -186,7 +206,7 @@ class JellyfinConnector:
         if played_only:
             params["IsPlayed"] = True
             params["SortBy"] = "DatePlayed"
-            params["SortOrder"] = "Ascending"
+            params["SortOrder"] = "Descending" if updated_for_user else "Ascending"
         if page.updated_since is not None and not updated_for_user:
             params["MinDateLastSaved"] = page.updated_since.isoformat().replace("+00:00", "Z")
         raw = self._client.get_json(f"/Users/{self._user_id}/Items", params=params)
@@ -198,25 +218,38 @@ class JellyfinConnector:
 
     def _map_valid_items(
         self, items: list[dict[str, Any]], library_id: str
-    ) -> Iterator[ExternalMediaItem]:
+    ) -> tuple[tuple[ExternalMediaItem, ...], tuple[PageIssue, ...]]:
+        mapped: list[ExternalMediaItem] = []
+        issues: list[PageIssue] = []
         for value in items:
             try:
-                yield map_item(self._with_series_provider_ids(value), library_id)
-            except (ConnectorResponseError, ValueError):
-                continue
+                enriched, enrichment_issue = self._with_series_provider_ids(value)
+                if enrichment_issue is not None:
+                    issues.append(enrichment_issue)
+                mapped.append(map_item(enriched, library_id))
+            except Exception as error:
+                issues.append(_mapping_issue(value, "catalog_mapping", error))
+        return tuple(mapped), tuple(issues)
 
-    def _with_series_provider_ids(self, value: dict[str, Any]) -> dict[str, Any]:
+    def _with_series_provider_ids(
+        self, value: dict[str, Any]
+    ) -> tuple[dict[str, Any], PageIssue | None]:
         series_id = value.get("SeriesId")
         if not isinstance(series_id, str) or not series_id.strip():
-            return value
+            return value, None
+        issue = None
         if series_id not in self._series_provider_ids:
-            raw = self._client.get_json(f"/Users/{self._user_id}/Items/{series_id}")
-            self._series_provider_ids[series_id] = (
-                raw.get("ProviderIds") if isinstance(raw, dict) else None
-            )
+            try:
+                raw = self._client.get_json(f"/Users/{self._user_id}/Items/{series_id}")
+                self._series_provider_ids[series_id] = (
+                    raw.get("ProviderIds") if isinstance(raw, dict) else None
+                )
+            except Exception as error:
+                self._series_provider_ids[series_id] = None
+                issue = _mapping_issue(value, "series_identifier_lookup", error)
         enriched = dict(value)
         enriched["_SeriesProviderIds"] = self._series_provider_ids[series_id]
-        return enriched
+        return enriched, issue
 
     def _map_valid_history(
         self,
@@ -224,11 +257,27 @@ class JellyfinConnector:
         library_id: str,
         *,
         observed_at: datetime,
-    ) -> Iterator[ExternalWatchEvent]:
+    ) -> tuple[tuple[ExternalWatchEvent, ...], tuple[PageIssue, ...]]:
+        mapped: list[ExternalWatchEvent] = []
+        issues: list[PageIssue] = []
         for value in items:
             try:
                 event = map_history_item(value, library_id, fallback_watched_at=observed_at)
-            except (ConnectorResponseError, ValueError):
+            except Exception as error:
+                issues.append(_mapping_issue(value, "history_mapping", error))
                 continue
             if event is not None:
-                yield replace(event, playback_user=self._user_id)
+                mapped.append(replace(event, playback_user=self._user_id))
+        return tuple(mapped), tuple(issues)
+
+
+def _mapping_issue(value: dict[str, Any], category: str, error: Exception) -> PageIssue:
+    external_id = str(value.get("Id") or "").strip() or None
+    title = str(value.get("Name") or value.get("SeriesName") or "").strip() or None
+    context = f"externo={external_id or '?'} · título={title or '?'}"
+    return PageIssue(
+        external_id,
+        title,
+        category,
+        f"{context} · erro={type(error).__name__}: {error}"[:1000],
+    )

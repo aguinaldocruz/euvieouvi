@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block title %}Identificação de mídias · euvieouvi{% endblock %}
+{% block content %}
+<h1 class="h3">Identificação de mídias</h1>
+<p>Mapeie as pastas que apontam para os mesmos arquivos físicos. Não é necessário montar os arquivos no euvieouvi: os caminhos são informados pelos servidores.</p>
+<p class="text-secondary">Use uma linha por pasta: origem => compartilhado. Exemplo: Plex /mnt/series => /shared/series e Jellyfin /media/tv => /shared/series. A comparação respeita maiúsculas e não usa apenas nomes de arquivos. Não mapeie pastas com conteúdos diferentes para a mesma raiz.</p>
+<form method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+{% for source in sources %}<div class="mb-3"><label class="form-label" for="roots-{{ source.id }}">{{ source.name }} · {{ source.connector_type.value }}</label><textarea class="form-control font-monospace" name="roots_{{ source.id }}" id="roots-{{ source.id }}" rows="3" placeholder="/media/tv => /shared/series">{% for mapping in roots.get(source.id|string, []) %}{{ mapping.source }} => {{ mapping.canonical }}{{ '\n' }}{% endfor %}</textarea></div>{% endfor %}
+<button class="btn btn-primary" type="submit">Salvar</button>
+</form>
+{% endblock %}

@@ -9,40 +9,55 @@ import re
 import secrets
 import sqlite3
 import threading
-import unicodedata
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from html import unescape
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from urllib.parse import urlencode
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import (
     Blueprint,
+    Flask,
     Response,
     current_app,
     flash,
+    jsonify,
     redirect,
     render_template,
     request,
     send_file,
     session,
+    stream_with_context,
     url_for,
 )
-from sqlalchemy import and_, case, delete, exists, func, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import case, delete, exists, func, or_, select, update
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import aliased
 
 from euvieouvi.api.runtime import connector_for, get_executor
 from euvieouvi.api.validation import http_url
-from euvieouvi.connectors.dtos import ExternalWatchEvent
+from euvieouvi.connectors.dtos import ExternalUser, ExternalWatchEvent
 from euvieouvi.connectors.errors import ConnectorError, ConnectorNotFoundError
 from euvieouvi.connectors.plex.connector import PlexConnector
-from euvieouvi.database.enums import ConnectorType, MediaKind, SyncStatus
+from euvieouvi.credentials import (
+    decrypt_text,
+    encrypt_text,
+    save_setting_value,
+    setting_value,
+)
+from euvieouvi.database.enums import ConnectorType, MediaKind, SyncStatus, SyncTrigger
 from euvieouvi.database.models import (
+    CatalogEntry,
+    CatalogEntryMember,
+    EnrichmentRecord,
     Genre,
     JobRun,
     Library,
+    MediaFilePath,
     MediaGenre,
     MediaIdentifier,
     MediaImage,
@@ -59,21 +74,31 @@ from euvieouvi.database.models import (
     WebhookEvent,
 )
 from euvieouvi.database.unit_of_work import UnitOfWork
+from euvieouvi.diagnostics import build_diagnostic_archive
+from euvieouvi.enrichment.providers import EnrichmentError, TmdbClient, TmdbMatch
 from euvieouvi.enrichment.runtime import get_enrichment_executor
 from euvieouvi.errors import AppError
-from euvieouvi.extensions import db
+from euvieouvi.extensions import db, new_session
+from euvieouvi.jellyfin_auth import JellyfinQuickConnectClient
+from euvieouvi.logging import configure_logging
 from euvieouvi.media_images import ensure_external_cached
+from euvieouvi.observability import operational_snapshot
+from euvieouvi.plex_auth import PlexPinClient
 from euvieouvi.sync.async_tasks import enqueue_watch_update, get_async_task_executor
+from euvieouvi.sync.catalog_projection import ensure_catalog_projection
 from euvieouvi.sync.discovery import LibraryDiscoveryService
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
 from euvieouvi.sync.jobs import (
     JOBS,
     get_image_executor,
     reconcile_completed_sync_job,
+    request_job_cancellation,
     setting_key,
     submit_job,
 )
+from euvieouvi.sync.manual_match import apply_manual_match
 from euvieouvi.sync.persistence import MediaPersistenceService
+from euvieouvi.sync.physical_identity import ROOTS_KEY, normalize_path, remap_paths
 from euvieouvi.sync.source_identity import (
     apply_server_identity,
     reset_library_incremental_state,
@@ -137,6 +162,26 @@ def _source(connector_type: ConnectorType | None = None) -> Source | None:
     return db.session.scalar(statement.order_by(Source.id))
 
 
+def _bounded_form_integer(
+    field: str,
+    *,
+    minimum: int,
+    maximum: int,
+    errors: dict[str, str],
+    message: str,
+) -> int | None:
+    raw = request.form.get(field, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        errors[field] = message
+        return None
+    if value < minimum or value > maximum:
+        errors[field] = message
+        return None
+    return value
+
+
 def _htmx() -> bool:
     return request.headers.get("HX-Request") == "true"
 
@@ -162,9 +207,11 @@ def _series_titles(items: Sequence[MediaItem]) -> dict[int, str]:
     }
     result: dict[int, str] = {}
     for episode in episodes:
+        if episode.parent_id is None:
+            continue
         parent = parents.get(episode.parent_id)
         show = parent if parent is not None and parent.kind == MediaKind.SHOW else None
-        if parent is not None and parent.kind == MediaKind.SEASON:
+        if parent is not None and parent.kind == MediaKind.SEASON and parent.parent_id is not None:
             show = shows.get(parent.parent_id)
         if show is not None:
             result[episode.id] = show.title
@@ -220,12 +267,85 @@ def dashboard() -> Any:
         series_titles=_series_titles([row[1] for row in recent]),
         job_definitions=JOBS,
         job_runs=_latest_job_runs(),
+        operations=operational_snapshot(),
     )
 
 
-@blueprint.get("/setup")
+@blueprint.route("/setup", methods=["GET", "POST"])
+@blueprint.route("/settings/system", methods=["GET", "POST"])
 def setup() -> Any:
-    return redirect(url_for("web.settings_plex"))
+    keys = (
+        "system.log_level",
+        "system.timezone",
+        "system.gunicorn_threads",
+        "system.sqlite_busy_timeout_ms",
+    )
+    values = _settings(*keys)
+    defaults = {
+        "system.log_level": str(current_app.config["LOG_LEVEL"]),
+        "system.timezone": str(current_app.config["TIMEZONE"]),
+        "system.gunicorn_threads": str(current_app.config["GUNICORN_THREADS"]),
+        "system.sqlite_busy_timeout_ms": str(current_app.config["SQLITE_BUSY_TIMEOUT_MS"]),
+    }
+    for key, fallback in defaults.items():
+        values.setdefault(key, fallback)
+    errors: dict[str, str] = {}
+    if request.method == "POST":
+        log_level = request.form.get("log_level", "").strip().upper()
+        timezone = request.form.get("timezone", "").strip()
+        threads = _bounded_form_integer(
+            "gunicorn_threads",
+            minimum=1,
+            maximum=32,
+            errors=errors,
+            message="Informe um número de threads entre 1 e 32.",
+        )
+        busy_timeout = _bounded_form_integer(
+            "sqlite_busy_timeout_ms",
+            minimum=1,
+            maximum=60000,
+            errors=errors,
+            message="Informe um timeout entre 1 e 60000 ms.",
+        )
+        if log_level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            errors["log_level"] = "Selecione um nível de log válido."
+        try:
+            ZoneInfo(timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            errors["timezone"] = "Informe um fuso horário IANA válido."
+        if not errors and threads is not None and busy_timeout is not None:
+            restart_required = threads != int(
+                current_app.config["GUNICORN_THREADS"]
+            ) or busy_timeout != int(current_app.config["SQLITE_BUSY_TIMEOUT_MS"])
+            _save_setting("system.log_level", log_level)
+            _save_setting("system.timezone", timezone)
+            _save_setting("system.gunicorn_threads", str(threads))
+            _save_setting("system.sqlite_busy_timeout_ms", str(busy_timeout))
+            _save_setting("setup.completed", "true")
+            db.session.commit()
+            current_app.config.update(
+                LOG_LEVEL=log_level,
+                TIMEZONE=timezone,
+                GUNICORN_THREADS=threads,
+                SQLITE_BUSY_TIMEOUT_MS=busy_timeout,
+            )
+            configure_logging(log_level)
+            if restart_required:
+                flash(
+                    "Configuração salva. Reinicie o container para aplicar threads "
+                    "e timeout do SQLite.",
+                    "success",
+                )
+            else:
+                flash("Configuração do sistema salva.", "success")
+            return redirect(url_for("web.setup"))
+        values = {
+            "system.log_level": log_level,
+            "system.timezone": timezone,
+            "system.gunicorn_threads": request.form.get("gunicorn_threads", ""),
+            "system.sqlite_busy_timeout_ms": request.form.get("sqlite_busy_timeout_ms", ""),
+        }
+    return render_template("settings_system.html", values=values, errors=errors)
 
 
 @blueprint.route("/settings/plex", methods=["GET", "POST"])
@@ -235,8 +355,9 @@ def settings_plex() -> Any:
     configured_user = user_values.get("plex.user_id") or user_values.get(
         "webhook.plex.user_filter", ""
     )
-    plex_users = ()
-    if source is not None and source.last_connection_status == "succeeded":
+    plex_users: tuple[ExternalUser, ...] = ()
+    plex_connected = bool(source is not None and decrypt_text(source.secret).strip())
+    if source is not None and plex_connected and source.last_connection_status == "succeeded":
         connector = connector_for(source)
         if isinstance(connector, PlexConnector):
             try:
@@ -268,7 +389,6 @@ def settings_plex() -> Any:
     if request.method == "POST":
         name = request.form.get("name", "").strip()
         base_url = request.form.get("base_url", "").strip()
-        secret = request.form.get("secret", "")
         user_id = request.form.get("user_id", "").strip()
         enabled = request.form.get("enabled") == "on"
         if not name or len(name) > 255:
@@ -278,8 +398,6 @@ def settings_plex() -> Any:
         except AppError:
             errors["base_url"] = "Informe uma URL HTTP ou HTTPS válida, sem credenciais."
             normalized_url = base_url
-        if source is None and not secret.strip():
-            errors["secret"] = "O token Plex é obrigatório no primeiro cadastro."
         if plex_users and not user_id:
             errors["user_id"] = "Selecione o usuário Plex acompanhado."
         elif user_id and (
@@ -293,23 +411,17 @@ def settings_plex() -> Any:
                     connector_type=ConnectorType.PLEX,
                     name=name,
                     base_url=normalized_url,
-                    secret=secret.strip(),
+                    secret=encrypt_text(""),
                     enabled=enabled,
                 )
                 db.session.add(source)
             else:
-                source_changed = (
-                    source.base_url != normalized_url
-                    or source.enabled != enabled
-                    or bool(secret.strip() and source.secret != secret.strip())
-                )
+                source_changed = source.base_url != normalized_url or source.enabled != enabled
                 source.name = name
                 source.base_url = normalized_url
                 source.enabled = enabled
-                if secret.strip():
-                    source.secret = secret.strip()
                 if source_changed:
-                    reset_source_incremental_state(db.session, source.id)
+                    reset_source_incremental_state(db.session(), source.id)
             if user_id:
                 selected = next((user for user in plex_users if user.external_id == user_id), None)
                 _save_setting("plex.user_id", user_id)
@@ -329,6 +441,79 @@ def settings_plex() -> Any:
         errors=errors,
         plex_users=plex_users,
         selected_user=selected_user,
+        plex_connected=plex_connected,
+    )
+
+
+@blueprint.post("/settings/plex/auth/start")
+def settings_plex_auth_start() -> Any:
+    source = _source(ConnectorType.PLEX)
+    if source is None:
+        flash("Salve o endereço do servidor antes de entrar com o Plex.", "warning")
+        return redirect(url_for("web.settings_plex"))
+    client = _plex_pin_client()
+    try:
+        pin = client.start()
+        forward_url = url_for("web.settings_plex_auth_complete", _external=True)
+        destination = client.authorization_url(pin, forward_url=forward_url)
+    except ConnectorError:
+        current_app.logger.exception("Plex hosted authorization could not be started")
+        flash("Não foi possível iniciar o login do Plex. Tente novamente.", "danger")
+        return redirect(url_for("web.settings_plex"))
+    finally:
+        client.close()
+    session["plex_pin_id"] = pin.identifier
+    session["plex_pin_source_id"] = source.id
+    return redirect(destination)
+
+
+@blueprint.get("/settings/plex/auth/complete")
+def settings_plex_auth_complete() -> Any:
+    pin_identifier = session.get("plex_pin_id")
+    source_identifier = session.get("plex_pin_source_id")
+    if not isinstance(pin_identifier, int) or not isinstance(source_identifier, int):
+        flash("A autorização do Plex expirou. Inicie o login novamente.", "warning")
+        return redirect(url_for("web.settings_plex"))
+    source = db.session.get(Source, source_identifier)
+    if source is None or source.connector_type is not ConnectorType.PLEX:
+        session.pop("plex_pin_id", None)
+        session.pop("plex_pin_source_id", None)
+        flash("A fonte Plex desta autorização não existe mais.", "danger")
+        return redirect(url_for("web.settings_plex"))
+    client = _plex_pin_client()
+    try:
+        token = client.claim(pin_identifier)
+    except ConnectorError:
+        current_app.logger.exception("Plex hosted authorization could not be completed")
+        flash("Não foi possível concluir o login do Plex. Tente novamente.", "danger")
+        return redirect(url_for("web.settings_plex"))
+    finally:
+        client.close()
+    if token is None:
+        flash("O login ainda não foi confirmado no Plex. Conclua-o e tente novamente.", "warning")
+        return redirect(url_for("web.settings_plex"))
+    changed = decrypt_text(source.secret) != token
+    source.secret = encrypt_text(token)
+    source.last_connection_status = None
+    source.last_connection_test_at = None
+    if changed:
+        reset_source_incremental_state(db.session(), source.id)
+    db.session.commit()
+    session.pop("plex_pin_id", None)
+    session.pop("plex_pin_source_id", None)
+    flash("Conta Plex conectada com segurança. Agora teste a conexão.", "success")
+    return redirect(url_for("web.settings_plex"))
+
+
+def _plex_pin_client() -> PlexPinClient:
+    client_identifier = _settings("plex.client_identifier").get("plex.client_identifier")
+    if not client_identifier:
+        client_identifier = secrets.token_hex(16)
+        _save_setting("plex.client_identifier", client_identifier)
+        db.session.commit()
+    return PlexPinClient(
+        client_identifier=client_identifier,
+        application_version=version("euvieouvi"),
     )
 
 
@@ -339,34 +524,16 @@ def settings_jellyfin() -> Any:
     persisted: dict[str, str] = {}
     if source is not None:
         try:
-            raw = json.loads(source.secret)
+            raw = json.loads(decrypt_text(source.secret))
             if isinstance(raw, dict):
                 persisted = {key: str(value) for key, value in raw.items()}
         except (TypeError, ValueError, json.JSONDecodeError):
             persisted = {}
-    jellyfin_users = ()
-    if source is not None and source.last_connection_status == "succeeded":
-        connector = None
-        try:
-            connector = connector_for(source)
-            list_users = getattr(connector, "list_users", None)
-            if callable(list_users):
-                jellyfin_users = list_users()
-        except (ConnectorError, OSError, ValueError):
-            flash(
-                "Não foi possível carregar os usuários do Jellyfin. Teste a conexão novamente.",
-                "warning",
-            )
-        finally:
-            if connector is not None:
-                close = getattr(connector, "close", None)
-                if callable(close):
-                    close()
+    access_token = persisted.get("access_token") or persisted.get("api_key", "")
+    jellyfin_connected = bool(access_token and persisted.get("user_id"))
     if request.method == "POST":
         name = request.form.get("name", "").strip()
         base_url = request.form.get("base_url", "").strip()
-        api_key = request.form.get("api_key", "").strip()
-        user_id = request.form.get("user_id", "").strip()
         enabled = request.form.get("enabled") == "on"
         if not name or len(name) > 255:
             errors["name"] = "Informe um nome com até 255 caracteres."
@@ -375,39 +542,45 @@ def settings_jellyfin() -> Any:
         except AppError:
             errors["base_url"] = "Informe uma URL HTTP ou HTTPS válida."
             normalized_url = base_url
-        if source is None and not api_key:
-            errors["api_key"] = "A API key é obrigatória no primeiro cadastro."
-        if not user_id and not persisted.get("user_id"):
-            errors["user_id"] = "Informe o ID do usuário Jellyfin acompanhado."
-        elif jellyfin_users and user_id not in {user.external_id for user in jellyfin_users}:
-            errors["user_id"] = "Selecione um usuário disponível no servidor Jellyfin."
         if not errors:
-            credentials = {
-                "api_key": api_key or persisted.get("api_key", ""),
-                "user_id": user_id or persisted.get("user_id", ""),
-            }
             if source is None:
+                credentials = {
+                    "access_token": "",
+                    "user_id": "",
+                    "user_name": "",
+                    "auth_method": "quick_connect",
+                }
                 source = Source(
                     connector_type=ConnectorType.JELLYFIN,
                     name=name,
                     base_url=normalized_url,
-                    secret=json.dumps(credentials),
+                    secret=encrypt_text(json.dumps(credentials)),
                     enabled=enabled,
                 )
                 db.session.add(source)
             else:
-                serialized_credentials = json.dumps(credentials)
-                source_changed = (
-                    source.base_url != normalized_url
-                    or source.secret != serialized_credentials
-                    or source.enabled != enabled
-                )
+                base_changed = source.base_url != normalized_url
+                source_changed = base_changed or source.enabled != enabled
                 source.name = name
                 source.base_url = normalized_url
-                source.secret = serialized_credentials
                 source.enabled = enabled
+                if base_changed:
+                    source.secret = encrypt_text(
+                        json.dumps(
+                            {
+                                "access_token": "",
+                                "user_id": "",
+                                "user_name": "",
+                                "auth_method": "quick_connect",
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                    source.last_connection_status = None
+                    source.last_connection_test_at = None
+                    _clear_jellyfin_quick_connect()
                 if source_changed:
-                    reset_source_incremental_state(db.session, source.id)
+                    reset_source_incremental_state(db.session(), source.id)
             try:
                 db.session.commit()
             except IntegrityError:
@@ -421,8 +594,125 @@ def settings_jellyfin() -> Any:
         source=source,
         errors=errors,
         persisted=persisted,
-        jellyfin_users=jellyfin_users,
+        jellyfin_connected=jellyfin_connected,
+        quick_connect_code=(
+            session.get("jellyfin_qc_code")
+            if session.get("jellyfin_qc_source_id") == (source.id if source is not None else None)
+            else None
+        ),
     )
+
+
+@blueprint.post("/settings/jellyfin/auth/start")
+def settings_jellyfin_auth_start() -> Any:
+    source = _source(ConnectorType.JELLYFIN)
+    if source is None:
+        flash("Salve o endereço do servidor antes de conectar ao Jellyfin.", "warning")
+        return redirect(url_for("web.settings_jellyfin"))
+    client = _jellyfin_quick_connect_client(source)
+    try:
+        if not client.enabled():
+            flash("Ative o Quick Connect no painel do servidor Jellyfin.", "warning")
+            return redirect(url_for("web.settings_jellyfin"))
+        authorization = client.initiate()
+    except ConnectorError:
+        current_app.logger.exception("Jellyfin Quick Connect could not be started")
+        flash("Não foi possível iniciar o Quick Connect do Jellyfin.", "danger")
+        return redirect(url_for("web.settings_jellyfin"))
+    finally:
+        client.close()
+    session["jellyfin_qc_secret"] = encrypt_text(authorization.secret)
+    session["jellyfin_qc_code"] = authorization.code
+    session["jellyfin_qc_source_id"] = source.id
+    return redirect(url_for("web.settings_jellyfin"))
+
+
+@blueprint.get("/settings/jellyfin/auth/status")
+def settings_jellyfin_auth_status() -> Any:
+    source_identifier = session.get("jellyfin_qc_source_id")
+    encrypted_secret = session.get("jellyfin_qc_secret")
+    code = session.get("jellyfin_qc_code")
+    if (
+        not isinstance(source_identifier, int)
+        or not isinstance(encrypted_secret, str)
+        or not isinstance(code, str)
+    ):
+        return render_template("fragments/jellyfin_quick_connect.html", error=True)
+    source = db.session.get(Source, source_identifier)
+    if source is None or source.connector_type is not ConnectorType.JELLYFIN:
+        _clear_jellyfin_quick_connect()
+        return render_template("fragments/jellyfin_quick_connect.html", error=True)
+    try:
+        secret = decrypt_text(encrypted_secret)
+    except ValueError:
+        _clear_jellyfin_quick_connect()
+        return render_template("fragments/jellyfin_quick_connect.html", error=True)
+    client = _jellyfin_quick_connect_client(source)
+    try:
+        if not client.is_authenticated(secret):
+            return render_template("fragments/jellyfin_quick_connect.html", code=code, error=False)
+        authentication = client.authenticate(secret)
+    except ConnectorError:
+        current_app.logger.exception("Jellyfin Quick Connect status check failed")
+        _clear_jellyfin_quick_connect()
+        flash("A autorização do Jellyfin expirou ou falhou. Inicie novamente.", "danger")
+        if not _htmx():
+            return redirect(url_for("web.settings_jellyfin"))
+        response = Response("", status=200)
+        response.headers["HX-Redirect"] = url_for("web.settings_jellyfin")
+        return response
+    finally:
+        client.close()
+    old_credentials = _jellyfin_credentials(source)
+    credentials = {
+        "access_token": authentication.access_token,
+        "device_id": _jellyfin_device_id(),
+        "user_id": authentication.user_id,
+        "user_name": authentication.user_name,
+        "auth_method": "quick_connect",
+    }
+    changed = (
+        old_credentials.get("access_token") or old_credentials.get("api_key")
+    ) != authentication.access_token or old_credentials.get("user_id") != authentication.user_id
+    source.secret = encrypt_text(json.dumps(credentials, sort_keys=True))
+    source.last_connection_status = None
+    source.last_connection_test_at = None
+    if changed:
+        reset_source_incremental_state(db.session(), source.id)
+    db.session.commit()
+    _clear_jellyfin_quick_connect()
+    flash(
+        f"Conta Jellyfin conectada com segurança ({authentication.user_name}).",
+        "success",
+    )
+    if not _htmx():
+        return redirect(url_for("web.settings_jellyfin"))
+    response = Response("", status=200)
+    response.headers["HX-Redirect"] = url_for("web.settings_jellyfin")
+    return response
+
+
+def _jellyfin_quick_connect_client(source: Source) -> JellyfinQuickConnectClient:
+    return JellyfinQuickConnectClient(
+        source.base_url,
+        device_id=_jellyfin_device_id(),
+        application_version=version("euvieouvi"),
+    )
+
+
+def _jellyfin_device_id() -> str:
+    device_id = _settings("jellyfin.device_id").get("jellyfin.device_id")
+    if not device_id:
+        device_id = secrets.token_hex(16)
+        _save_setting("jellyfin.device_id", device_id)
+        db.session.commit()
+    return device_id
+
+
+def _clear_jellyfin_quick_connect() -> None:
+    session.pop("jellyfin_qc_secret", None)
+    session.pop("jellyfin_qc_code", None)
+    session.pop("jellyfin_qc_source_id", None)
 
 
 @blueprint.route("/settings/appearance", methods=["GET", "POST"])
@@ -472,6 +762,7 @@ def jobs() -> Any:
     values = _settings(
         *keys,
         "jobs.retention.keep_last",
+        "jobs.retry.max_attempts",
         "jobs.catalog_reconcile.apply",
         "watch_sync.enabled",
     )
@@ -492,6 +783,14 @@ def jobs() -> Any:
         except ValueError:
             retention_keep = 20
             errors["retention"] = "Informe um número entre 1 e 500."
+        attempts_raw = request.form.get("retry_max_attempts", "3").strip()
+        try:
+            retry_max_attempts = int(attempts_raw)
+            if not 1 <= retry_max_attempts <= 10:
+                raise ValueError
+        except ValueError:
+            retry_max_attempts = 3
+            errors["retry"] = "Informe um número entre 1 e 10."
         if not errors:
             for job in JOBS:
                 _save_setting(
@@ -500,6 +799,7 @@ def jobs() -> Any:
                 )
                 _save_setting(setting_key(job.id, "time"), parsed[job.id])
             _save_setting("jobs.retention.keep_last", str(retention_keep))
+            _save_setting("jobs.retry.max_attempts", str(retry_max_attempts))
             _save_setting(
                 "jobs.catalog_reconcile.apply",
                 "true" if request.form.get("catalog_reconcile_apply") == "on" else "false",
@@ -513,38 +813,19 @@ def jobs() -> Any:
             flash("Agendamentos dos jobs atualizados.", "success")
             return redirect(url_for("web.jobs"))
 
-    active_syncs = {
-        source.connector_type.value
-        for _run, source in db.session.execute(
-            select(SyncRun, Source)
-            .join(Source, Source.id == SyncRun.source_id)
-            .where(SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]))
-        )
-    }
     metadata = get_enrichment_executor(current_app).snapshot
     images = get_image_executor(current_app).snapshot
-    watch_active = get_executor(current_app).watch_sync_active
+    sync_runs = _latest_sync_runs_by_job()
+    latest_runs = _latest_job_runs()
     states = {
-        "sync_plex": "running" if "plex" in active_syncs else "idle",
-        "sync_jellyfin": "running" if "jellyfin" in active_syncs else "idle",
-        "metadata": "running" if metadata["active"] else "idle",
-        "catalog_images": "running" if images["active"] else "idle",
-        "watched_plex_to_jellyfin": "running" if watch_active else "idle",
-        "watched_jellyfin_to_plex": "running" if watch_active else "idle",
-    }
-    sync_runs: dict[str, SyncRun] = {}
-    for job_id, connector_type in (
-        ("sync_plex", ConnectorType.PLEX),
-        ("sync_jellyfin", ConnectorType.JELLYFIN),
-    ):
-        latest_sync = db.session.scalar(
-            select(SyncRun)
-            .join(Source, Source.id == SyncRun.source_id)
-            .where(Source.connector_type == connector_type)
-            .order_by(SyncRun.created_at.desc(), SyncRun.id.desc())
+        job.id: (
+            "running"
+            if latest_runs.get(job.id) is not None
+            and latest_runs[job.id].status in {SyncStatus.QUEUED, SyncStatus.RUNNING}
+            else "idle"
         )
-        if latest_sync is not None:
-            sync_runs[job_id] = latest_sync
+        for job in JOBS
+    }
     return render_template(
         "jobs.html",
         jobs=JOBS,
@@ -553,11 +834,12 @@ def jobs() -> Any:
         states=states,
         metadata=metadata,
         images=images,
-        latest_runs=_latest_job_runs(),
+        latest_runs=latest_runs,
         sync_runs=sync_runs,
         recent_runs=db.session.scalars(
             select(JobRun).order_by(JobRun.created_at.desc(), JobRun.id.desc()).limit(20)
         ).all(),
+        operations=operational_snapshot(),
         timezone=current_app.config["TIMEZONE"],
     )
 
@@ -571,7 +853,7 @@ def job_run(job_id: str) -> Any:
     except (SyncAlreadyRunningError, SyncSourceUnavailableError):
         started = False
     if started:
-        flash("Job iniciado em segundo plano.", "success")
+        flash("Job colocado na fila persistente.", "success")
     else:
         flash("O job já está ativo ou sua fonte não está disponível.", "warning")
     return redirect(url_for("web.jobs"))
@@ -592,12 +874,133 @@ def job_status_fragment(job_id: str) -> Any:
     return render_template("fragments/job_status.html", job=job, run=run)
 
 
+@blueprint.get("/jobs/statuses")
+def job_statuses() -> Any:
+    return jsonify(_cached_job_status_payload())
+
+
+def _cached_job_status_payload(*, max_age_seconds: float = 0.75) -> dict[str, Any]:
+    app = current_app
+    cache = app.extensions.get("euvieouvi.job_status_cache")
+    if not isinstance(cache, dict):
+        cache = {"lock": threading.Lock(), "created": 0.0, "payload": None}
+        app.extensions["euvieouvi.job_status_cache"] = cache
+    lock = cache["lock"]
+    if not isinstance(lock, type(threading.Lock())):
+        return _job_status_payload()
+    with lock:
+        now = time.monotonic()
+        payload = cache.get("payload")
+        created = float(cache.get("created", 0.0))
+        if isinstance(payload, dict) and now - created <= max_age_seconds:
+            return payload
+        payload = _job_status_payload()
+        cache["payload"] = payload
+        cache["created"] = now
+        return payload
+
+
+def _job_status_payload() -> dict[str, Any]:
+    latest = _latest_job_runs()
+    sync_runs = _latest_sync_runs_by_job()
+    payload: list[dict[str, Any]] = []
+    active = False
+    for job in JOBS:
+        run = latest.get(job.id)
+        if run is not None:
+            reconcile_completed_sync_job(run)
+            active = active or run.status in {SyncStatus.QUEUED, SyncStatus.RUNNING}
+        run_active = run is not None and run.status in {SyncStatus.QUEUED, SyncStatus.RUNNING}
+        payload.append(
+            {
+                "id": job.id,
+                "html": render_template("fragments/job_status.html", job=job, run=run),
+                "last_run_html": render_template("fragments/job_last_run.html", run=run),
+                "actions_html": render_template(
+                    "fragments/job_actions.html",
+                    job=job,
+                    sync_run=sync_runs.get(job.id),
+                    active=run_active,
+                    run=run,
+                ),
+            }
+        )
+    operations = operational_snapshot()
+    return {
+        "active": active,
+        "jobs": payload,
+        "dashboard_html": render_template(
+            "fragments/dashboard_jobs.html",
+            job_definitions=JOBS,
+            job_runs=latest,
+            operations=operations,
+        ),
+        "operations_html": render_template(
+            "fragments/operational_status.html", operations=operations
+        ),
+        "operations": operations,
+    }
+
+
+@blueprint.get("/jobs/events")
+def job_events() -> Response:
+    """Stream job and queue changes without repeated browser requests."""
+    once = request.args.get("once") == "1"
+
+    def generate() -> Any:
+        last_fingerprint = ""
+        last_keepalive = time.monotonic()
+        deadline = time.monotonic() + (1 if once else 55)
+        while time.monotonic() < deadline:
+            db.session.expire_all()
+            try:
+                payload = _cached_job_status_payload()
+            finally:
+                # Streaming responses outlive ordinary requests. Return the SQLite
+                # connection before waiting so every open browser tab does not pin
+                # a read transaction or consume a pool slot for the full stream.
+                db.session.remove()
+            signature = {
+                "active": payload["active"],
+                "jobs": payload["jobs"],
+                "dashboard_html": payload["dashboard_html"],
+                "operations": {
+                    key: value
+                    for key, value in payload["operations"].items()
+                    if key != "generated_at"
+                },
+            }
+            fingerprint = hashlib.sha256(
+                json.dumps(signature, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+            if fingerprint != last_fingerprint:
+                yield "event: jobs\ndata: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+                last_fingerprint = fingerprint
+                last_keepalive = time.monotonic()
+            elif time.monotonic() - last_keepalive >= 10:
+                yield "event: ping\ndata: {}\n\n"
+                last_keepalive = time.monotonic()
+            if once:
+                return
+            time.sleep(1)
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @blueprint.get("/jobs/dashboard-fragment")
 def dashboard_jobs_fragment() -> Any:
     return render_template(
         "fragments/dashboard_jobs.html",
         job_definitions=JOBS,
         job_runs=_latest_job_runs(),
+        operations=operational_snapshot(),
     )
 
 
@@ -627,13 +1030,53 @@ def job_log(run_id: int) -> Any:
     return send_file(path, mimetype="text/plain", as_attachment=False, conditional=True)
 
 
+@blueprint.get("/diagnostics/download")
+def diagnostics_download() -> Any:
+    archive = build_diagnostic_archive(current_app)
+    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    return send_file(
+        archive,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"euvieouvi-diagnostics-{timestamp}.zip",
+        max_age=0,
+    )
+
+
+@blueprint.post("/job-runs/<int:run_id>/cancel")
+def job_cancel(run_id: int) -> Any:
+    if request_job_cancellation(current_app, run_id):
+        flash(
+            "Cancelamento persistente solicitado; o job parará no próximo ponto seguro.",
+            "warning",
+        )
+    else:
+        flash("Este job não está mais ativo.", "warning")
+    return redirect(url_for("web.jobs"))
+
+
 def _latest_job_runs() -> dict[str, JobRun]:
-    result: dict[str, JobRun] = {}
-    rows = db.session.scalars(select(JobRun).order_by(JobRun.created_at.desc(), JobRun.id.desc()))
-    for run in rows:
-        result.setdefault(run.job_id, run)
-        if len(result) == len(JOBS):
-            break
+    latest_ids = select(func.max(JobRun.id)).group_by(JobRun.job_id)
+    return {
+        run.job_id: run
+        for run in db.session.scalars(select(JobRun).where(JobRun.id.in_(latest_ids)))
+    }
+
+
+def _latest_sync_runs_by_job() -> dict[str, SyncRun]:
+    result: dict[str, SyncRun] = {}
+    for job_id, connector_type in (
+        ("sync_plex", ConnectorType.PLEX),
+        ("sync_jellyfin", ConnectorType.JELLYFIN),
+    ):
+        latest = db.session.scalar(
+            select(SyncRun)
+            .join(Source, Source.id == SyncRun.source_id)
+            .where(Source.connector_type == connector_type)
+            .order_by(SyncRun.created_at.desc(), SyncRun.id.desc())
+        )
+        if latest is not None:
+            result[job_id] = latest
     return result
 
 
@@ -718,7 +1161,7 @@ def settings_plex_test() -> Any:
         return redirect(url_for("web.settings_plex"))
     try:
         info = connector_for(source).test_connection()
-        apply_server_identity(db.session, source, info.server_identifier, now=datetime.now(UTC))
+        apply_server_identity(db.session(), source, info.server_identifier, now=datetime.now(UTC))
         source.last_connection_status = "succeeded"
         source.last_connection_test_at = datetime.now(UTC)
         db.session.commit()
@@ -739,7 +1182,7 @@ def settings_jellyfin_test() -> Any:
         return redirect(url_for("web.settings_jellyfin"))
     try:
         info = connector_for(source).test_connection()
-        apply_server_identity(db.session, source, info.server_identifier, now=datetime.now(UTC))
+        apply_server_identity(db.session(), source, info.server_identifier, now=datetime.now(UTC))
         source.last_connection_status = "succeeded"
         source.last_connection_test_at = datetime.now(UTC)
         db.session.commit()
@@ -748,7 +1191,7 @@ def settings_jellyfin_test() -> Any:
         source.last_connection_status = "failed"
         source.last_connection_test_at = datetime.now(UTC)
         db.session.commit()
-        flash("O Jellyfin não respondeu. Verifique URL, API key e usuário.", "danger")
+        flash("O Jellyfin não respondeu. Verifique URL, autorização e usuário.", "danger")
     return redirect(url_for("web.settings_jellyfin"))
 
 
@@ -1141,7 +1584,10 @@ def trakt_import() -> Any:
         raise
     db.session.remove()
     db.engine.dispose()
-    application = current_app._get_current_object()
+    application = cast(
+        Flask,
+        current_app._get_current_object(),  # type: ignore[attr-defined]
+    )
 
     def execute_import() -> None:
         try:
@@ -1204,7 +1650,7 @@ def settings_webhooks() -> Any:
             changed = True
     if changed:
         db.session.commit()
-    plex_users = ()
+    plex_users: tuple[ExternalUser, ...] = ()
     plex_source = _source(ConnectorType.PLEX)
     if plex_source is not None and plex_source.last_connection_status == "succeeded":
         connector = None
@@ -1419,7 +1865,13 @@ def plex_webhook(token: str) -> Any:
     if not completed:
         progress_ms = _safe_integer(metadata.get("viewOffset"))
         if user_matches and progress_ms is not None and progress_ms > 0:
-            _persist_and_enqueue_progress(source, external_id, progress_ms, watched_at)
+            _persist_and_enqueue_progress(
+                source,
+                external_id,
+                progress_ms,
+                watched_at,
+                library_external_id,
+            )
             db.session.commit()
             _request_watch_propagation()
         else:
@@ -1563,6 +2015,7 @@ def jellyfin_webhook(token: str) -> Any:
             source_id=source.id,
             external_id=external_id,
             watched_at=watched_at,
+            library_external_id=library_external_id,
         )
         source_id = source.id
         db.session.commit()
@@ -1607,9 +2060,7 @@ def libraries_discover(source_id: int) -> Any:
         flash("Configure a fonte antes de descobrir bibliotecas.", "warning")
     else:
         try:
-            count = LibraryDiscoveryService(lambda: db.session(), connector_for(source)).discover(
-                source.id
-            )
+            count = LibraryDiscoveryService(new_session, connector_for(source)).discover(source.id)
             flash(f"Descoberta concluída: {count} biblioteca(s) compatível(is).", "success")
         except (ConnectorError, SyncSourceUnavailableError):
             flash(
@@ -1617,16 +2068,6 @@ def libraries_discover(source_id: int) -> Any:
                 "danger",
             )
     return redirect(url_for("web.libraries"))
-
-
-@blueprint.post("/libraries/discover")
-def libraries_discover_legacy() -> Any:
-    """Keep old bookmarks and deployment instructions working for Plex."""
-    source = _source(ConnectorType.PLEX) or _source()
-    if source is None:
-        flash("Configure a fonte antes de descobrir bibliotecas.", "warning")
-        return redirect(url_for("web.libraries"))
-    return libraries_discover(source.id)
 
 
 @blueprint.post("/libraries/<int:library_id>/selection")
@@ -1639,7 +2080,7 @@ def library_selection(library_id: int) -> Any:
         flash("Uma biblioteca indisponível não pode ser selecionada.", "warning")
     else:
         if library.enabled != enabled:
-            reset_library_incremental_state(db.session, library.id)
+            reset_library_incremental_state(db.session(), library.id)
         library.enabled = enabled
         db.session.commit()
         flash("Seleção da biblioteca atualizada.", "success")
@@ -1695,7 +2136,18 @@ def job_sync_cancel(run_id: int) -> Any:
     if run.status not in {SyncStatus.QUEUED, SyncStatus.RUNNING}:
         flash("Esta sincronização já terminou.", "warning")
     else:
-        get_executor(current_app).cancel(run_id)
+        job = db.session.scalar(
+            select(JobRun)
+            .where(
+                JobRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]),
+                JobRun.execution_reference == f"sync:{run_id}",
+            )
+            .order_by(JobRun.id.desc())
+        )
+        if job is not None:
+            request_job_cancellation(current_app, job.id)
+        else:
+            get_executor(current_app).cancel(run_id)
         flash("Cancelamento solicitado. Os dados já confirmados serão preservados.", "warning")
     return redirect(url_for("web.jobs"))
 
@@ -1815,6 +2267,7 @@ def catalog() -> Any:
     if direction not in {"asc", "desc"}:
         direction = "asc"
     allowed_sorts = {
+        "unidentified",
         "title",
         "original_title",
         "year",
@@ -1845,158 +2298,76 @@ def catalog() -> Any:
         if kind in {item.value for item in allowed_kinds}
         else [MediaKind.MOVIE, MediaKind.SHOW, MediaKind.ARTIST]
     )
-    available_ref = exists().where(
-        SourceMediaRef.media_item_id == MediaItem.id,
-        SourceMediaRef.available.is_(True),
-    )
-    event_stats = (
-        select(
-            WatchEvent.media_item_id.label("media_item_id"),
-            func.count(WatchEvent.id).label("event_count"),
-            func.min(WatchEvent.watched_at).label("event_first"),
-            func.max(WatchEvent.watched_at).label("event_last"),
-        )
-        .where(WatchEvent.completed.is_(True))
-        .group_by(WatchEvent.media_item_id)
-        .subquery()
-    )
-    state_stats = (
-        select(
-            WatchState.media_item_id.label("media_item_id"),
-            func.max(WatchState.view_count).label("state_count"),
-            func.max(WatchState.last_watched_at).label("state_last"),
-        )
-        .where(WatchState.completed.is_(True))
-        .group_by(WatchState.media_item_id)
-        .subquery()
-    )
-    event_count = func.coalesce(event_stats.c.event_count, 0)
-    state_count = func.coalesce(state_stats.c.state_count, 0)
-    completion_count = case((event_count >= state_count, event_count), else_=state_count)
-    last_completed = case(
-        (event_stats.c.event_last.is_not(None), event_stats.c.event_last),
-        else_=state_stats.c.state_last,
-    )
-    completed_known = completion_count > 0
-    activity_item = aliased(MediaItem)
-    activity_parent = aliased(MediaItem)
-    event_activity = (
-        select(
-            func.coalesce(
-                activity_parent.parent_id, activity_item.parent_id, activity_item.id
-            ).label("root_id"),
-            WatchEvent.watched_at.label("played_at"),
-        )
-        .join(activity_item, activity_item.id == WatchEvent.media_item_id)
-        .outerjoin(activity_parent, activity_parent.id == activity_item.parent_id)
-    ).subquery()
-    state_activity = (
-        select(
-            func.coalesce(
-                activity_parent.parent_id, activity_item.parent_id, activity_item.id
-            ).label("root_id"),
-            WatchState.last_watched_at.label("played_at"),
-            WatchState.completed.label("completed"),
-            WatchState.progress_ms.label("progress_ms"),
-        )
-        .join(activity_item, activity_item.id == WatchState.media_item_id)
-        .outerjoin(activity_parent, activity_parent.id == activity_item.parent_id)
-        .where(
-            WatchState.last_watched_at.is_not(None),
-            or_(
-                WatchState.completed.is_(True),
-                WatchState.progress_ms > 0,
-            ),
-        )
-    ).subquery()
-    event_activity_stats = (
-        select(
-            event_activity.c.root_id,
-            func.max(event_activity.c.played_at).label("event_last"),
-        )
-        .group_by(event_activity.c.root_id)
-        .subquery()
-    )
-    state_activity_stats = (
-        select(
-            state_activity.c.root_id,
-            func.max(state_activity.c.played_at).label("state_last"),
-            func.max(
-                case(
-                    (
-                        and_(
-                            state_activity.c.completed.is_(False),
-                            state_activity.c.progress_ms > 0,
-                        ),
-                        state_activity.c.played_at,
-                    ),
-                    else_=None,
-                )
-            ).label("partial_last"),
-        )
-        .group_by(state_activity.c.root_id)
-        .subquery()
-    )
-    last_played = case(
-        (
-            event_activity_stats.c.event_last.is_not(None),
-            case(
-                (state_activity_stats.c.partial_last.is_(None), event_activity_stats.c.event_last),
-                (
-                    event_activity_stats.c.event_last >= state_activity_stats.c.partial_last,
-                    event_activity_stats.c.event_last,
-                ),
-                else_=state_activity_stats.c.partial_last,
-            ),
-        ),
-        else_=state_activity_stats.c.state_last,
-    )
-    statement = (
-        select(
-            MediaItem,
-            completion_count.label("completion_count"),
-            last_completed.label("last_completed"),
-        )
-        .outerjoin(event_stats, event_stats.c.media_item_id == MediaItem.id)
-        .outerjoin(state_stats, state_stats.c.media_item_id == MediaItem.id)
-        .outerjoin(event_activity_stats, event_activity_stats.c.root_id == MediaItem.id)
-        .outerjoin(state_activity_stats, state_activity_stats.c.root_id == MediaItem.id)
+    if ensure_catalog_projection(db.session()) is not None:
+        db.session.commit()
+    statement = select(MediaItem, CatalogEntry).join(
+        CatalogEntry, CatalogEntry.media_item_id == MediaItem.id
     )
     if kind in {item.value for item in allowed_kinds}:
-        statement = statement.where(MediaItem.kind == MediaKind(kind))
+        statement = statement.where(CatalogEntry.kind == kind)
     else:
-        statement = statement.where(
-            MediaItem.kind.in_([MediaKind.MOVIE, MediaKind.SHOW, MediaKind.ARTIST])
-        )
+        statement = statement.where(CatalogEntry.kind.in_(["movie", "show", "artist"]))
     if query:
-        statement = statement.where(MediaItem.title.ilike(f"%{query}%"))
-    if genre:
+        query_member = aliased(CatalogEntryMember)
+        query_item = aliased(MediaItem)
         statement = statement.where(
-            exists().where(
-                MediaGenre.media_item_id == MediaItem.id,
-                MediaGenre.genre_id == Genre.id,
-                Genre.normalized_name == genre,
+            exists(
+                select(query_member.media_item_id)
+                .select_from(query_member)
+                .join(query_item, query_item.id == query_member.media_item_id)
+                .where(
+                    query_member.catalog_media_item_id == CatalogEntry.media_item_id,
+                    query_item.title.ilike(f"%{query}%"),
+                )
+            )
+        )
+    if genre:
+        genre_member = aliased(CatalogEntryMember)
+        statement = statement.where(
+            exists(
+                select(MediaGenre.id)
+                .join(genre_member, genre_member.media_item_id == MediaGenre.media_item_id)
+                .join(Genre, Genre.id == MediaGenre.genre_id)
+                .where(
+                    genre_member.catalog_media_item_id == CatalogEntry.media_item_id,
+                    Genre.normalized_name == genre,
+                )
             )
         )
     if availability == "available":
-        statement = statement.where(available_ref)
+        statement = statement.where(CatalogEntry.available.is_(True))
     elif availability == "unavailable":
-        statement = statement.where(~available_ref)
+        statement = statement.where(CatalogEntry.available.is_(False))
     if played == "played":
-        statement = statement.where(completed_known)
+        statement = statement.where(CatalogEntry.completion_count > 0)
     elif played == "unplayed":
-        statement = statement.where(~completed_known)
+        statement = statement.where(CatalogEntry.completion_count == 0)
+    removed_member = aliased(CatalogEntryMember)
+    reliable_identity = (
+        select(MediaIdentifier.id)
+        .join(CatalogEntryMember, CatalogEntryMember.media_item_id == MediaIdentifier.media_item_id)
+        .where(
+            CatalogEntryMember.catalog_media_item_id == CatalogEntry.media_item_id,
+            MediaIdentifier.provider.in_(
+                ("tmdb", "tvdb", "imdb", "musicbrainz", "mbid", "mbid-release", "mbid-artist")
+            ),
+            MediaIdentifier.external_id != "",
+        )
+        .correlate(CatalogEntry)
+        .exists()
+    )
     sort_columns = {
         "title": func.coalesce(MediaItem.sort_title, MediaItem.title),
         "original_title": func.coalesce(MediaItem.original_title, MediaItem.title),
         "year": MediaItem.year,
-        "last_played": last_played,
-        "first_played": event_stats.c.event_first,
-        "play_count": completion_count,
+        "last_played": CatalogEntry.last_played_at,
+        "first_played": CatalogEntry.first_played_at,
+        "play_count": CatalogEntry.completion_count,
         "added": func.coalesce(MediaItem.source_added_at, MediaItem.created_at),
         "updated": MediaItem.updated_at,
         "removed": select(func.max(SourceMediaRef.unavailable_since))
-        .where(SourceMediaRef.media_item_id == MediaItem.id)
+        .join(removed_member, removed_member.media_item_id == SourceMediaRef.media_item_id)
+        .where(removed_member.catalog_media_item_id == CatalogEntry.media_item_id)
         .scalar_subquery(),
         "duration": MediaItem.duration_ms,
         "rating": MediaItem.audience_rating,
@@ -2005,179 +2376,50 @@ def catalog() -> Any:
     ordering = (
         sort_column.desc().nullslast() if direction == "desc" else sort_column.asc().nullslast()
     )
-    rows = db.session.execute(
-        statement.order_by(ordering, MediaItem.title, MediaItem.id)
-        .limit(80)
-        .offset((page - 1) * 40)
+    orderings = [ordering, MediaItem.title, MediaItem.id]
+    if sort == "unidentified":
+        orderings = [case((reliable_identity, 1), else_=0).asc(), ordering, MediaItem.id]
+    result_rows = db.session.execute(
+        statement.order_by(*orderings).limit(41).offset((page - 1) * 40)
     ).all()
-    candidate_ids = [row[0].id for row in rows]
-    availability_by_item: dict[int, set[ConnectorType]] = {
-        media_id: set() for media_id in candidate_ids
-    }
-    canonical_identifier_by_item: dict[int, tuple[str, str]] = {}
-    if candidate_ids:
-        identifier_rows = db.session.execute(
-            select(
-                MediaIdentifier.media_item_id,
-                MediaIdentifier.provider,
-                MediaIdentifier.external_id,
-            ).where(
-                MediaIdentifier.media_item_id.in_(candidate_ids),
-                MediaIdentifier.provider.in_(("tmdb", "tvdb", "imdb")),
-            )
-        )
-        provider_priority = {"tmdb": 0, "tvdb": 1, "imdb": 2}
-        ranked_identifiers: dict[int, tuple[int, str, str]] = {}
-        for media_id, provider, external_id in identifier_rows:
-            candidate = (provider_priority[provider], provider, external_id)
-            current = ranked_identifiers.get(int(media_id))
-            if current is None or candidate < current:
-                ranked_identifiers[int(media_id)] = candidate
-        canonical_identifier_by_item = {
-            media_id: (ranked[1], ranked[2]) for media_id, ranked in ranked_identifiers.items()
-        }
-
-        direct_rows = db.session.execute(
-            select(SourceMediaRef.media_item_id, Source.connector_type)
-            .join(Source, Source.id == SourceMediaRef.source_id)
-            .where(
-                SourceMediaRef.media_item_id.in_(candidate_ids),
-                SourceMediaRef.available.is_(True),
-            )
-            .distinct()
-        )
-        for media_id, connector_type in direct_rows:
-            availability_by_item[int(media_id)].add(connector_type)
-
-        current_identifier = aliased(MediaIdentifier)
-        matching_identifier = aliased(MediaIdentifier)
-        matching_item = aliased(MediaItem)
-        current_item = aliased(MediaItem)
-        shared_rows = db.session.execute(
-            select(current_identifier.media_item_id, Source.connector_type)
-            .join(current_item, current_item.id == current_identifier.media_item_id)
-            .join(
-                matching_identifier,
-                and_(
-                    matching_identifier.provider == current_identifier.provider,
-                    matching_identifier.external_id == current_identifier.external_id,
-                ),
-            )
-            .join(matching_item, matching_item.id == matching_identifier.media_item_id)
-            .join(SourceMediaRef, SourceMediaRef.media_item_id == matching_item.id)
-            .join(Source, Source.id == SourceMediaRef.source_id)
-            .where(
-                current_identifier.media_item_id.in_(candidate_ids),
-                matching_item.kind == current_item.kind,
-                SourceMediaRef.available.is_(True),
-            )
-            .distinct()
-        )
-        for media_id, connector_type in shared_rows:
-            availability_by_item[int(media_id)].add(connector_type)
-
-    # Deduplicate by title/year/kind merging Plex/Jellyfin badges.
-    # When same media exists in both sources as separate rows (e.g., Plex
-    # without identifiers), show single card with both badges.
-    # Keep DB order and merge badges via OR.
-    deduped: dict[tuple[str, int | None, str], Any] = {}
-    ordered_keys: list[tuple[str, int | None, str]] = []
-    for row in rows:
-        item = row[0]
-        source_availability = availability_by_item[item.id]
-        display_row = (
+    has_more = len(result_rows) > 40
+    visible_rows = result_rows[:40]
+    merged_rows = [
+        (
             item,
-            row[1],
-            row[2],
-            ConnectorType.PLEX in source_availability,
-            ConnectorType.JELLYFIN in source_availability,
+            entry.completion_count,
+            entry.last_completed_at,
+            entry.available_plex,
+            entry.available_jellyfin,
         )
-        identifier = canonical_identifier_by_item.get(item.id)
-        key = (
-            f"{identifier[0]}:{identifier[1]}"
-            if identifier is not None
-            else _normalized_catalog_title(item.title),
-            None if identifier is not None else item.year,
-            item.kind.value,
-        )
-        if key not in deduped:
-            deduped[key] = display_row
-            ordered_keys.append(key)
-        else:
-            prev = deduped[key]
-            merged_plex = bool(prev[3] or display_row[3])
-            merged_jelly = bool(prev[4] or display_row[4])
-            keep = prev if prev[0].id < item.id else display_row
-            deduped[key] = (keep[0], keep[1], keep[2], merged_plex, merged_jelly)
-    merged_rows = [deduped[k] for k in ordered_keys]
-    has_more = len(merged_rows) > 40
-    merged_rows = merged_rows[:40]
+        for item, entry in visible_rows
+    ]
+    entries_by_item = {item.id: entry for item, entry in visible_rows}
     watch_progress: dict[int, dict[str, int | str]] = {}
-    displayed_show_ids = {row[0].id for row in merged_rows if row[0].kind is MediaKind.SHOW}
-    if displayed_show_ids:
-        season_item = aliased(MediaItem)
-        episode_item = aliased(MediaItem)
-        episode_rows = db.session.execute(
-            select(
-                season_item.parent_id.label("show_id"),
-                episode_item.id.label("episode_id"),
-                or_(
-                    exists().where(
-                        WatchState.media_item_id == episode_item.id,
-                        WatchState.completed.is_(True),
-                    ),
-                    exists().where(
-                        WatchEvent.media_item_id == episode_item.id,
-                        WatchEvent.completed.is_(True),
-                    ),
-                ).label("completed"),
-            )
-            .join(season_item, season_item.id == episode_item.parent_id)
-            .where(
-                season_item.parent_id.in_(displayed_show_ids),
-                episode_item.kind == MediaKind.EPISODE,
-                exists().where(
-                    SourceMediaRef.media_item_id == episode_item.id,
-                    SourceMediaRef.available.is_(True),
-                ),
-            )
-        ).all()
-        totals = {show_id: [0, 0] for show_id in displayed_show_ids}
-        for show_id, _episode_id, completed in episode_rows:
-            totals[int(show_id)][0] += 1
-            totals[int(show_id)][1] += int(bool(completed))
-        for show_id, (total, completed) in totals.items():
-            percent = min(100, (completed * 100 + total // 2) // total) if total else 0
-            if completed == 0:
-                state, icon, label = "unwatched", "—", "Não assistida"
-            elif completed < total:
-                state, icon, label = "watching", "◐", "Assistindo"
-            else:
-                state, icon, label = "watched", "✓", "Assistida"
-            watch_progress[show_id] = {
-                "state": state,
-                "icon": icon,
-                "percent": percent,
-                "title": f"{label} · {completed} de {total} episódios · Progresso: {percent}%",
-            }
+    for item, entry in visible_rows:
+        if item.kind is not MediaKind.SHOW:
+            continue
+        total = entry.child_count
+        completed = entry.completed_child_count
+        percent = min(100, (completed * 100 + total // 2) // total) if total else 0
+        if completed == 0:
+            state, icon, label = "unwatched", "—", "Não assistida"
+        elif completed < total:
+            state, icon, label = "watching", "◐", "Assistindo"
+        else:
+            state, icon, label = "watched", "✓", "Assistida"
+        watch_progress[item.id] = {
+            "state": state,
+            "icon": icon,
+            "percent": percent,
+            "title": f"{label} · {completed} de {total} episódios · Progresso: {percent}%",
+        }
 
     displayed_movies = {
         row[0].id: (row[0], int(row[1])) for row in merged_rows if row[0].kind is MediaKind.MOVIE
     }
-    movie_progress_ms = (
-        {
-            int(media_id): int(progress_ms or 0)
-            for media_id, progress_ms in db.session.execute(
-                select(WatchState.media_item_id, func.max(WatchState.progress_ms))
-                .where(WatchState.media_item_id.in_(displayed_movies))
-                .group_by(WatchState.media_item_id)
-            )
-        }
-        if displayed_movies
-        else {}
-    )
     for media_id, (item, completions) in displayed_movies.items():
-        progress_ms = movie_progress_ms.get(media_id, 0)
+        progress_ms = entries_by_item[media_id].progress_ms
         if completions > 0:
             state, icon, percent = "watched", "✓", 100
             action = f"Assistido {completions} {'vez' if completions == 1 else 'vezes'}"
@@ -2203,6 +2445,7 @@ def catalog() -> Any:
             "title": f"{action} · {progress_label}",
         }
     template_values = dict(
+        artwork_versions=_artwork_versions([item.id for item, _ in visible_rows]),
         rows=merged_rows,
         page=page,
         has_more=has_more,
@@ -2239,8 +2482,29 @@ def catalog() -> Any:
     if request.args.get("fragment") == "1":
         return render_template("fragments/catalog_results.html", **template_values)
     refresh_values = {key: value for key, value in request.args.items() if key != "fragment"}
-    template_values["catalog_refresh_url"] = url_for("web.catalog", **refresh_values, fragment="1")
+    refresh_values["fragment"] = "1"
+    template_values["catalog_refresh_url"] = f"{url_for('web.catalog')}?{urlencode(refresh_values)}"
+    template_values["catalog_revision_url"] = url_for("web.catalog_revision")
+    template_values["catalog_revision"] = _catalog_revision_value()
     return render_template("catalog.html", **template_values)
+
+
+@blueprint.get("/catalog/revision")
+def catalog_revision() -> Any:
+    return jsonify({"revision": _catalog_revision_value()})
+
+
+def _catalog_revision_value() -> str:
+    values = db.session.execute(
+        select(
+            select(func.max(MediaItem.updated_at)).scalar_subquery(),
+            select(func.max(SourceMediaRef.updated_at)).scalar_subquery(),
+            select(func.max(MediaImage.updated_at)).scalar_subquery(),
+            select(func.max(WatchState.updated_at)).scalar_subquery(),
+            select(func.max(WatchEvent.id)).scalar_subquery(),
+        )
+    ).one()
+    return "|".join(str(value or "") for value in values)
 
 
 @blueprint.get("/media/<int:media_id>/image")
@@ -2248,69 +2512,172 @@ def media_image(media_id: int) -> Any:
     item = db.session.get(MediaItem, media_id)
     if item is None:
         return Response(status=404)
-    image = db.session.scalar(
-        select(MediaImage).where(
-            MediaImage.media_item_id == media_id,
-            MediaImage.image_type == "poster",
-        )
-    )
-    if image is None:
-        return _placeholder_image(item.kind)
     cache_directory = Path(current_app.instance_path) / "images"
-    if image.provider not in {"plex", "jellyfin"}:
-        try:
-            path = ensure_external_cached(image, cache_directory)
+    square = item.kind in {MediaKind.ARTIST, MediaKind.ALBUM, MediaKind.TRACK}
+    candidates = _artwork_candidate_items(item)
+    for image in _artwork_candidate_images(candidates):
+        if image.provider not in {"plex", "jellyfin"}:
+            try:
+                path = ensure_external_cached(image, cache_directory)
+                db.session.commit()
+            except (OSError, ValueError):
+                db.session.rollback()
+                continue
+            response = send_file(path, mimetype=image.mime_type, conditional=True, max_age=86400)
+            response.headers["Cache-Control"] = "private, max-age=86400"
+            return response
+        source = db.session.get(Source, image.source_id)
+        if source is None or not source.enabled:
+            db.session.delete(image)
             db.session.commit()
-        except (OSError, ValueError):
+            continue
+        available = db.session.scalar(
+            select(SourceMediaRef.id).where(
+                SourceMediaRef.media_item_id == image.media_item_id,
+                SourceMediaRef.source_id == source.id,
+                SourceMediaRef.available.is_(True),
+            )
+        )
+        if available is None or image.source_path is None:
+            db.session.delete(image)
+            db.session.commit()
+            continue
+        connector = None
+        try:
+            connector = connector_for(source)
+            content, mime_type = connector.fetch_image(
+                image.source_path,
+                width=400 if square else 300,
+                height=400 if square else 450,
+            )
+            response = Response(content, mimetype=mime_type)
+            response.headers["Cache-Control"] = "private, max-age=86400"
+            response.set_etag(hashlib.sha256(content).hexdigest())
+            return response.make_conditional(request)
+        except ConnectorNotFoundError:
             db.session.rollback()
-            return _placeholder_image(item.kind)
-        response = send_file(path, mimetype=image.mime_type, conditional=True, max_age=86400)
-        response.headers["Cache-Control"] = "private, max-age=86400"
-        return response
-    source = db.session.get(Source, image.source_id)
-    if source is None or not source.enabled:
-        return _placeholder_image(item.kind)
-    available = db.session.scalar(
-        select(SourceMediaRef.id).where(
-            SourceMediaRef.media_item_id == media_id,
-            SourceMediaRef.source_id == source.id,
-            SourceMediaRef.available.is_(True),
+            stale = db.session.get(MediaImage, image.id)
+            if stale is not None:
+                db.session.delete(stale)
+                db.session.commit()
+        except (ConnectorError, OSError, ValueError):
+            db.session.rollback()
+        finally:
+            close = getattr(connector, "close", None)
+            if callable(close):
+                close()
+    recovery_item = next(
+        (
+            candidate
+            for candidate in candidates
+            if candidate.kind in {MediaKind.MOVIE, MediaKind.SHOW, MediaKind.ALBUM, MediaKind.TRACK}
+        ),
+        item,
+    )
+    _queue_missing_artwork_recovery(recovery_item)
+    return _placeholder_image(item.kind)
+
+
+def _artwork_candidate_items(item: MediaItem) -> list[MediaItem]:
+    """Return direct, canonical-equivalent, then parent artwork candidates."""
+    candidates = [item]
+    seen = {item.id}
+    catalog_media_id = db.session.scalar(
+        select(CatalogEntryMember.catalog_media_item_id).where(
+            CatalogEntryMember.media_item_id == item.id
         )
     )
-    if available is None:
-        db.session.delete(image)
-        db.session.commit()
-        return _placeholder_image(item.kind)
-    if image.source_path is None:
-        db.session.delete(image)
-        db.session.commit()
-        return _placeholder_image(item.kind)
-    connector = connector_for(source)
-    square = item.kind in {MediaKind.ARTIST, MediaKind.ALBUM, MediaKind.TRACK}
-    try:
-        content, mime_type = connector.fetch_image(
-            image.source_path,
-            width=400 if square else 300,
-            height=400 if square else 450,
+    if catalog_media_id is None and db.session.get(CatalogEntry, item.id) is not None:
+        catalog_media_id = item.id
+    if catalog_media_id is not None:
+        member_ids = db.session.scalars(
+            select(CatalogEntryMember.media_item_id)
+            .where(CatalogEntryMember.catalog_media_item_id == catalog_media_id)
+            .order_by(CatalogEntryMember.media_item_id)
+        ).all()
+        for member_id in member_ids:
+            member = db.session.get(MediaItem, member_id)
+            if member is not None and member.id not in seen:
+                candidates.append(member)
+                seen.add(member.id)
+    frontier = list(candidates)
+    for _ in range(3):
+        parents: list[MediaItem] = []
+        for candidate in frontier:
+            if candidate.parent_id is None or candidate.parent_id in seen:
+                continue
+            parent = db.session.get(MediaItem, candidate.parent_id)
+            if parent is not None:
+                candidates.append(parent)
+                parents.append(parent)
+                seen.add(parent.id)
+        if not parents:
+            break
+        frontier = parents
+    return candidates
+
+
+def _artwork_candidate_images(candidates: Sequence[MediaItem]) -> list[MediaImage]:
+    if not candidates:
+        return []
+    images = {
+        image.media_item_id: image
+        for image in db.session.scalars(
+            select(MediaImage).where(
+                MediaImage.media_item_id.in_([candidate.id for candidate in candidates]),
+                MediaImage.image_type == "poster",
+            )
         )
-        response = Response(content, mimetype=mime_type)
-        response.headers["Cache-Control"] = "private, max-age=86400"
-        response.set_etag(hashlib.sha256(content).hexdigest())
-        return response.make_conditional(request)
-    except ConnectorNotFoundError:
+    }
+    return [images[candidate.id] for candidate in candidates if candidate.id in images]
+
+
+def _queue_missing_artwork_recovery(item: MediaItem) -> None:
+    tmdb_enabled = db.session.get(Setting, "metadata.tmdb.enabled")
+    tmdb_token = setting_value(db.session.get(Setting, "metadata.tmdb.token"))
+    musicbrainz_enabled = db.session.get(Setting, "metadata.musicbrainz.enabled")
+    allowed: set[str] = set()
+    if tmdb_enabled is not None and tmdb_enabled.value == "true" and tmdb_token:
+        if item.kind is MediaKind.MOVIE:
+            allowed.update(("tmdb", "imdb"))
+        elif item.kind is MediaKind.SHOW:
+            allowed.update(("tmdb", "imdb", "tvdb"))
+    if musicbrainz_enabled is not None and musicbrainz_enabled.value == "true":
+        if item.kind is MediaKind.ALBUM:
+            allowed.add("mbid-release")
+        elif item.kind is MediaKind.TRACK:
+            allowed.add("mbid")
+    if not allowed:
+        return
+    providers = set(
+        db.session.scalars(
+            select(MediaIdentifier.provider).where(
+                MediaIdentifier.media_item_id == item.id,
+                MediaIdentifier.provider.in_(allowed),
+            )
+        )
+    )
+    if not providers:
+        return
+    permanently_missing = set(
+        db.session.scalars(
+            select(EnrichmentRecord.provider).where(
+                EnrichmentRecord.media_item_id == item.id,
+                EnrichmentRecord.provider.in_([f"artwork:{value}" for value in providers]),
+                EnrichmentRecord.status == "not_found",
+            )
+        )
+    )
+    if all(f"artwork:{provider}" in permanently_missing for provider in providers):
+        return
+    try:
+        submit_job(current_app, "catalog_images", trigger=SyncTrigger.API)
+    except OperationalError:
         db.session.rollback()
-        stale = db.session.get(MediaImage, image.id)
-        if stale is not None:
-            db.session.delete(stale)
-            db.session.commit()
-        return _placeholder_image(item.kind)
-    except (ConnectorError, OSError):
-        db.session.rollback()
-        return _placeholder_image(item.kind)
-    finally:
-        close = getattr(connector, "close", None)
-        if callable(close):
-            close()
+        current_app.logger.warning(
+            "Could not queue external artwork recovery for media %s due to SQLite contention",
+            item.id,
+        )
 
 
 @blueprint.get("/media/<int:media_id>")
@@ -2464,6 +2831,7 @@ def media_detail(media_id: int) -> Any:
     ).all()
     return render_template(
         "media_detail.html",
+        artwork_version=_artwork_versions([item.id]).get(item.id, "0"),
         item=item,
         item_completion_count=item_completion_count,
         item_last_completed=item_last_completed,
@@ -2478,8 +2846,126 @@ def media_detail(media_id: int) -> Any:
         child_completions=child_completions,
         child_availability=child_availability,
         availability_rows=availability_rows,
+        physical_paths=db.session.execute(
+            select(MediaFilePath, Source.name)
+            .join(SourceMediaRef, SourceMediaRef.id == MediaFilePath.reference_id)
+            .join(Source, Source.id == SourceMediaRef.source_id)
+            .where(
+                SourceMediaRef.media_item_id.in_(
+                    [media_id, *(child.id for child in children_for_states)]
+                )
+            )
+            .order_by(Source.name, MediaFilePath.original_path)
+            .limit(100)
+        ).all(),
         series_title=_series_titles([item]).get(item.id),
     )
+
+
+@blueprint.route("/media/<int:media_id>/match", methods=["GET", "POST"])
+def media_match(media_id: int) -> Any:
+    item = db.session.get(MediaItem, media_id)
+    if item is None or item.kind not in {MediaKind.MOVIE, MediaKind.SHOW}:
+        return Response(status=404)
+    values = _settings("metadata.tmdb.token", "metadata.language")
+    token = values.get("metadata.tmdb.token", "")
+    query = request.args.get("q", "").strip()[:200]
+    matches: tuple[TmdbMatch, ...] = ()
+    if not token:
+        flash("Configure a credencial TMDB em Metadados para corrigir a identificação.", "warning")
+    elif request.method == "POST" or query:
+        client = TmdbClient(token)
+        try:
+            media_type = "movie" if item.kind is MediaKind.MOVIE else "tv"
+            language = values.get("metadata.language", "en-US")
+            if request.method == "POST":
+                if _active_sync_exists():
+                    flash(
+                        "Aguarde a sincronização terminar antes de corrigir a identificação.",
+                        "warning",
+                    )
+                    return redirect(url_for("web.media_match", media_id=media_id))
+                match = client.match_details(
+                    media_type, request.form.get("tmdb_id", ""), language=language
+                )
+                media_id = apply_manual_match(db.session(), item, match)
+                db.session.commit()
+                current_app.logger.info(
+                    "Manual TMDB match media=%s kind=%s tmdb=%s title=%r",
+                    media_id,
+                    item.kind.value,
+                    match.external_id,
+                    match.title,
+                )
+                submit_job(current_app, "catalog_images")
+                flash(
+                    "Identificação corrigida. Histórico preservado; "
+                    "imagens adicionadas à fila de download.",
+                    "success",
+                )
+                return redirect(url_for("web.media_detail", media_id=media_id))
+            matches = client.search(media_type, query, language=language)
+        except (EnrichmentError, ValueError) as error:
+            db.session.rollback()
+            current_app.logger.warning(
+                "TMDB match failed media=%s error=%s", media_id, error, exc_info=True
+            )
+            flash(
+                "Não foi possível consultar o TMDB. Verifique a credencial e tente novamente.",
+                "danger",
+            )
+        finally:
+            client.close()
+    return render_template(
+        "media_match.html", item=item, query=query, matches=matches, configured=bool(token)
+    )
+
+
+@blueprint.route("/settings/media-identity", methods=["GET", "POST"])
+def settings_media_identity() -> Any:
+    sources = db.session.scalars(select(Source).order_by(Source.name)).all()
+    if request.method == "POST":
+        if _active_sync_exists():
+            flash("Aguarde a sincronização terminar antes de alterar os caminhos.", "warning")
+            return redirect(url_for("web.settings_media_identity"))
+        roots: dict[str, list[dict[str, str]]] = {}
+        try:
+            for source in sources:
+                mappings: list[dict[str, str]] = []
+                for line in request.form.get(f"roots_{source.id}", "").splitlines():
+                    if not line.strip():
+                        continue
+                    parts = line.split("=>")
+                    if len(parts) != 2:
+                        raise ValueError("mapping needs source => canonical")
+                    original, canonical = normalize_path(parts[0]), normalize_path(parts[1])
+                    if not original or not canonical:
+                        raise ValueError("mapping paths must be absolute")
+                    if any(row["source"] == original for row in mappings):
+                        raise ValueError("duplicate mapping root")
+                    mappings.append({"source": original, "canonical": canonical})
+                roots[str(source.id)] = mappings
+            _save_setting(ROOTS_KEY, json.dumps(roots))
+            remap_paths(db.session())
+            for source in sources:
+                reset_source_incremental_state(db.session(), source.id)
+            db.session.commit()
+            flash(
+                "Caminhos salvos. A próxima sincronização coletará "
+                "as referências físicas completas.",
+                "success",
+            )
+        except ValueError:
+            db.session.rollback()
+            flash(
+                "Use um caminho absoluto por linha no formato origem => compartilhado, "
+                "sem raízes repetidas.",
+                "danger",
+            )
+        return redirect(url_for("web.settings_media_identity"))
+    setting = db.session.get(Setting, ROOTS_KEY)
+    roots = json.loads(setting.value) if setting and setting.value else {}
+    return render_template("settings_media_identity.html", sources=sources, roots=roots)
 
 
 @blueprint.get("/about")
@@ -2560,17 +3046,14 @@ def _watched_count(kind: MediaKind) -> int:
 
 def _settings(*keys: str) -> dict[str, str]:
     return {
-        item.key: item.value
+        item.key: value
         for item in db.session.scalars(select(Setting).where(Setting.key.in_(keys)))
+        if (value := setting_value(item)) is not None
     }
 
 
 def _save_setting(key: str, value: str) -> None:
-    setting = db.session.get(Setting, key)
-    if setting is None:
-        db.session.add(Setting(key=key, value=value))
-    else:
-        setting.value = value
+    save_setting_value(db.session(), key, value)
 
 
 def _valid_webhook_token(provider: str, supplied: str) -> bool:
@@ -2580,7 +3063,7 @@ def _valid_webhook_token(provider: str, supplied: str) -> bool:
 
 def _jellyfin_credentials(source: Source) -> dict[str, str]:
     try:
-        raw = json.loads(source.secret)
+        raw = json.loads(decrypt_text(source.secret))
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return {key: str(value) for key, value in raw.items()} if isinstance(raw, dict) else {}
@@ -2664,8 +3147,13 @@ def _plex_live_tv_metadata(metadata: dict[str, Any]) -> bool:
 
 
 def _persist_and_enqueue_progress(
-    source: Source, external_id: str, progress_ms: int, observed_at: datetime
+    source: Source,
+    external_id: str,
+    progress_ms: int,
+    observed_at: datetime,
+    library_external_id: str | None = None,
 ) -> None:
+    resolved_library_external_id = library_external_id
     reference = db.session.scalar(
         select(SourceMediaRef).where(
             SourceMediaRef.source_id == source.id,
@@ -2674,14 +3162,15 @@ def _persist_and_enqueue_progress(
         )
     )
     if reference is not None:
+        if not resolved_library_external_id:
+            library = db.session.get(Library, reference.library_id)
+            resolved_library_external_id = library.external_id if library is not None else None
         state = db.session.scalar(
             select(WatchState).where(
                 WatchState.media_item_id == reference.media_item_id,
                 WatchState.source_id == source.id,
             )
         )
-        if state is not None and state.completed:
-            return
         if state is None:
             state = WatchState(
                 media_item_id=reference.media_item_id,
@@ -2691,6 +3180,11 @@ def _persist_and_enqueue_progress(
                 observed_at=observed_at,
             )
             db.session.add(state)
+        current_played = state.last_played_at
+        if current_played is None or observed_at > current_played.replace(tzinfo=UTC):
+            state.last_played_at = observed_at
+        if state.completed:
+            return
         state.completed = False
         state.progress_ms = progress_ms
         state.observed_at = observed_at
@@ -2701,6 +3195,7 @@ def _persist_and_enqueue_progress(
         watched_at=observed_at,
         progress_ms=progress_ms,
         completed=False,
+        library_external_id=resolved_library_external_id,
     )
 
 
@@ -2876,13 +3371,6 @@ def _parse_webhook_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _normalized_catalog_title(value: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", value)
-    return " ".join(
-        "".join(char for char in decomposed if not unicodedata.combining(char)).split()
-    ).casefold()
-
-
 def _truthy(value: Any) -> bool:
     return value is True or (isinstance(value, str) and value.casefold() == "true")
 
@@ -2899,5 +3387,31 @@ def _placeholder_image(kind: MediaKind) -> Response:
         f'font-family="sans-serif" font-size="24" fill="#607080">{label}</text></svg>'
     )
     response = Response(svg, mimetype="image/svg+xml")
-    response.headers["Cache-Control"] = "private, max-age=3600"
+    response.headers["Cache-Control"] = "private, no-store"
     return response
+
+
+def _artwork_versions(media_ids: list[int]) -> dict[int, str]:
+    """Version artwork URLs in one bounded query, including grouped and inherited covers."""
+    if not media_ids:
+        return {}
+    member = aliased(MediaItem)
+    parent = aliased(MediaItem)
+    grandparent = aliased(MediaItem)
+    versions = db.session.execute(
+        select(MediaItem.id, func.max(MediaImage.updated_at))
+        .outerjoin(CatalogEntryMember, CatalogEntryMember.catalog_media_item_id == MediaItem.id)
+        .outerjoin(member, member.id == CatalogEntryMember.media_item_id)
+        .outerjoin(parent, parent.id == func.coalesce(member.parent_id, MediaItem.parent_id))
+        .outerjoin(grandparent, grandparent.id == parent.parent_id)
+        .outerjoin(
+            MediaImage,
+            MediaImage.media_item_id.in_((MediaItem.id, member.id, parent.id, grandparent.id)),
+        )
+        .where(MediaItem.id.in_(media_ids))
+        .group_by(MediaItem.id)
+    )
+    return {
+        media_id: hashlib.sha256(str(updated_at).encode()).hexdigest()[:12]
+        for media_id, updated_at in versions
+    }

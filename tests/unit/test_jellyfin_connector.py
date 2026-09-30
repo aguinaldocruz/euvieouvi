@@ -102,6 +102,8 @@ def test_history_does_not_use_unreliable_jellyfin_user_date_filter() -> None:
         assert request.url.path.endswith("/Users/user-1/Items")
         assert "MinDateLastSavedForUser" not in request.url.params
         assert "MinDateLastSaved" not in request.url.params
+        assert request.url.params["SortBy"] == "DatePlayed"
+        assert request.url.params["SortOrder"] == "Descending"
         return httpx.Response(200, json={"TotalRecordCount": 0, "Items": []}, request=request)
 
     connector = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1")
@@ -113,6 +115,50 @@ def test_history_does_not_use_unreliable_jellyfin_user_date_filter() -> None:
     )()
 
     connector.get_history_page(library, checkpoint, PageRequest(size=10))
+
+
+def test_history_stops_after_crossing_incremental_watermark() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "TotalRecordCount": 10,
+                "Items": [
+                    {
+                        "Id": "new",
+                        "Type": "Movie",
+                        "Name": "New",
+                        "UserData": {
+                            "Played": True,
+                            "LastPlayedDate": "2026-08-17T12:00:00Z",
+                        },
+                    },
+                    {
+                        "Id": "old",
+                        "Type": "Movie",
+                        "Name": "Old",
+                        "UserData": {
+                            "Played": True,
+                            "LastPlayedDate": "2026-08-15T12:00:00Z",
+                        },
+                    },
+                ],
+            },
+            request=request,
+        )
+
+    connector = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1")
+    library = ExternalLibraryRef("lib-1", ExternalLibraryType.MOVIE)
+    checkpoint = type(
+        "Checkpoint",
+        (),
+        {"watermark_at": datetime(2026, 8, 16, tzinfo=UTC), "last_external_id": None},
+    )()
+
+    page = connector.get_history_page(library, checkpoint, PageRequest(size=2))
+
+    assert [event.media_external_id for event in page.items] == ["new"]
+    assert page.next_start is None
 
 
 def test_played_flag_wins_over_inconsistent_zero_play_count() -> None:
@@ -198,6 +244,23 @@ def test_mark_watched_preserves_original_played_date() -> None:
     connector.mark_watched("movie-1", watched_at=watched_at)
 
 
+def test_targeted_item_lookup_maps_webhook_media() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/Users/user-1/Items/movie-1")
+        return httpx.Response(
+            200,
+            json={"Id": "movie-1", "Type": "Movie", "Name": "Arrival"},
+            request=request,
+        )
+
+    item = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1").get_media_item(
+        "movie-1", "movies"
+    )
+
+    assert item.external_id == "movie-1"
+    assert item.library_external_id == "movies"
+
+
 def test_connector_fetches_and_caches_parent_series_provider_ids() -> None:
     series_requests = 0
 
@@ -241,6 +304,105 @@ def test_connector_fetches_and_caches_parent_series_provider_ids() -> None:
     assert series_requests == 1
     assert page.items[0].show_identifiers[0].external_id == "tt0213327"
     assert page.items[1].show_identifiers[1].external_id == "2985"
+
+
+def test_embedded_provider_id_recovers_missing_jellyfin_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/Users/user-1/Items/show-1"):
+            return httpx.Response(200, json={"ProviderIds": {}}, request=request)
+        return httpx.Response(
+            200,
+            json={
+                "TotalRecordCount": 1,
+                "Items": [
+                    {
+                        "Id": "episode-1",
+                        "Type": "Episode",
+                        "Name": "Raw episode name",
+                        "SeriesId": "show-1",
+                        "SeriesName": "O Show de Dick Tracy [tmdb-15119]",
+                        "ParentIndexNumber": 1,
+                        "IndexNumber": 1,
+                    }
+                ],
+            },
+            request=request,
+        )
+
+    page = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1").get_media_page(
+        ExternalLibraryRef("shows", ExternalLibraryType.SHOW),
+        ExternalMediaKind.EPISODE,
+        PageRequest(size=10),
+    )
+    episode = page.items[0]
+    assert episode.show_title == "O Show de Dick Tracy"
+    assert [(value.provider, value.external_id) for value in episode.show_identifiers] == [
+        ("tmdb", "15119")
+    ]
+
+    movie = map_item(
+        {
+            "Id": "movie-1",
+            "Type": "Movie",
+            "Name": "Localized [tmdbid-42]",
+            "ProviderIds": {},
+        },
+        "movies",
+    )
+    assert movie.title == "Localized"
+    assert movie.identifiers[0].external_id == "42"
+
+    authoritative = map_item(
+        {
+            "Id": "movie-2",
+            "Type": "Movie",
+            "Name": "Localized [tmdb-999]",
+            "ProviderIds": {"Tmdb": "42"},
+        },
+        "movies",
+    )
+    assert authoritative.title == "Localized"
+    assert [value.external_id for value in authoritative.identifiers] == ["42"]
+
+
+def test_parent_identifier_failure_keeps_episode_and_reports_issue() -> None:
+    series_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal series_requests
+        if request.url.path.endswith("/Users/user-1/Items/show-1"):
+            series_requests += 1
+            return httpx.Response(500, request=request)
+        return httpx.Response(
+            200,
+            json={
+                "TotalRecordCount": 2,
+                "Items": [
+                    {
+                        "Id": f"episode-{number}",
+                        "Type": "Episode",
+                        "Name": f"Episode {number}",
+                        "SeriesId": "show-1",
+                        "SeriesName": "Still imported",
+                        "ParentIndexNumber": 1,
+                        "IndexNumber": number,
+                    }
+                    for number in (1, 2)
+                ],
+            },
+            request=request,
+        )
+
+    page = JellyfinConnector(make_client(httpx.MockTransport(handler)), "user-1").get_media_page(
+        ExternalLibraryRef("shows", ExternalLibraryType.SHOW),
+        ExternalMediaKind.EPISODE,
+        PageRequest(size=10),
+    )
+
+    assert [item.external_id for item in page.items] == ["episode-1", "episode-2"]
+    assert series_requests == 1
+    assert len(page.issues) == 1
+    assert page.issues[0].category == "series_identifier_lookup"
 
 
 def test_music_and_episode_mapping_with_fallbacks() -> None:
@@ -309,6 +471,10 @@ def test_media_pagination_advances_past_invalid_items() -> None:
 
     assert [item.external_id for item in page.items] == ["movie-1"]
     assert page.next_start == 2
+    assert len(page.issues) == 1
+    assert page.issues[0].external_id == "bad"
+    assert page.issues[0].category == "catalog_mapping"
+    assert "Missing numbers" in page.issues[0].message
 
 
 @pytest.mark.parametrize(

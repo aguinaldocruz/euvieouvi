@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import aliased
 
 from euvieouvi.connectors.dtos import (
     ExternalIdentifier,
@@ -20,6 +21,7 @@ from euvieouvi.connectors.dtos import (
 from euvieouvi.database.enums import ConnectorType, MediaKind
 from euvieouvi.database.models import (
     Genre,
+    MediaFilePath,
     MediaGenre,
     MediaIdentifier,
     MediaImage,
@@ -32,6 +34,7 @@ from euvieouvi.database.models import (
 )
 from euvieouvi.database.unit_of_work import UnitOfWork
 from euvieouvi.sync.async_tasks import enqueue_watch_update
+from euvieouvi.sync.physical_identity import load_roots, path_keys, save_paths
 
 
 class ItemClassification(StrEnum):
@@ -55,13 +58,23 @@ class MediaPersistenceService:
         self.work = work
         self.source_id = source_id
         self.library_id = library_id
+        self._synced_identifier_sets: set[tuple[int, tuple[tuple[str, str], ...]]] = set()
+        self._synced_show_metadata: set[int] = set()
+        self._path_roots = load_roots(work.session, source_id)
 
     def persist_media(self, item: ExternalMediaItem, observed_at: datetime) -> PersistResult:
         reference = self.work.source_media_refs.by_external_identity(
             self.source_id, item.external_id
         )
-        matched_media = None if reference is not None else self._match_by_identifiers(item)
+        matched_media = (
+            None
+            if reference is not None
+            else (self._match_by_physical_path(item) or self._match_by_identifiers(item))
+        )
+        if matched_media is not None and self._physical_evidence_disagrees(item, matched_media.id):
+            matched_media = None
         parent_id = self._ensure_hierarchy(item, observed_at, matched_media=matched_media)
+        self._sync_show_metadata(item, parent_id)
         signature = media_signature(item)
         if reference is None:
             media = matched_media or MediaItem(
@@ -107,6 +120,8 @@ class MediaPersistenceService:
             reference.unavailable_since = None
             reference.raw_hash = signature
 
+        if item.file_paths:
+            save_paths(self.work.session, reference, path_keys(item.file_paths, self._path_roots))
         self._sync_identifiers(media.id, item)
         if self._canonical_source_may_update(media.id):
             self._sync_genres(media.id, item.genres)
@@ -220,6 +235,7 @@ class MediaPersistenceService:
                 source_id=self.source_id,
                 external_id=event.media_external_id,
                 watched_at=event.watched_at,
+                library_external_id=event.library_external_id,
             )
         return True
 
@@ -251,6 +267,7 @@ class MediaPersistenceService:
         state.view_count = max(state.view_count, event_count)
         state.completed = True
         state.last_watched_at = _latest_datetime(state.last_watched_at, event.watched_at)
+        state.last_played_at = _latest_datetime(state.last_played_at, event.watched_at)
         state.progress_ms = event.progress_ms
         state.observed_at = event.watched_at
 
@@ -348,6 +365,7 @@ class MediaPersistenceService:
         state.view_count = view_count
         state.completed = view_count > 0
         state.last_watched_at = last_watched_at
+        state.last_played_at = _latest_datetime(state.last_played_at, last_watched_at)
         state.progress_ms = None
         state.observed_at = observed_at
 
@@ -434,6 +452,85 @@ class MediaPersistenceService:
         )
         return season.id
 
+    def _sync_show_metadata(self, item: ExternalMediaItem, parent_id: int | None) -> None:
+        metadata = item.show_metadata
+        if item.kind is not ExternalMediaKind.EPISODE or metadata is None or parent_id is None:
+            return
+        if (
+            metadata.kind is not ExternalMediaKind.SHOW
+            or metadata.external_id != item.show_external_id
+        ):
+            raise ValueError("Parent show metadata has an incompatible identity.")
+        season = self._required_media(parent_id)
+        show = self._required_media(season.parent_id or 0)
+        if show.id in self._synced_show_metadata:
+            return
+        self._synced_show_metadata.add(show.id)
+        if not self._canonical_source_may_update(show.id):
+            return
+        for field in (
+            "title",
+            "original_title",
+            "year",
+            "summary",
+            "tagline",
+            "studio",
+            "content_rating",
+            "audience_rating",
+            "originally_available_on",
+        ):
+            value = getattr(metadata, field)
+            if value is not None:
+                setattr(show, field, value)
+        if metadata.added_at is not None:
+            show.source_added_at = metadata.added_at
+        if metadata.genres:
+            self._sync_genres(show.id, metadata.genres)
+        self._sync_image(show.id, "poster", metadata.thumb_path)
+        self._sync_image(show.id, "backdrop", metadata.art_path)
+
+    def _physical_evidence_disagrees(self, item: ExternalMediaItem, media_id: int) -> bool:
+        keys = set(path_keys(item.file_paths, self._path_roots))
+        if not keys:
+            return False
+        known = set(
+            self.work.session.scalars(
+                select(MediaFilePath.path_key)
+                .join(SourceMediaRef, SourceMediaRef.id == MediaFilePath.reference_id)
+                .where(
+                    SourceMediaRef.media_item_id == media_id,
+                    SourceMediaRef.source_id != self.source_id,
+                    SourceMediaRef.available.is_(True),
+                )
+            )
+        )
+        return bool(known and not keys & known)
+
+    def _match_by_physical_path(self, item: ExternalMediaItem) -> MediaItem | None:
+        keys = path_keys(item.file_paths, self._path_roots)
+        if not keys:
+            return None
+        candidates = self.work.session.scalars(
+            select(MediaItem)
+            .join(SourceMediaRef, SourceMediaRef.media_item_id == MediaItem.id)
+            .join(MediaFilePath, MediaFilePath.reference_id == SourceMediaRef.id)
+            .where(
+                MediaItem.kind == MediaKind(item.kind.value),
+                SourceMediaRef.source_id != self.source_id,
+                SourceMediaRef.available.is_(True),
+                MediaFilePath.path_key.in_(keys),
+            )
+            .distinct()
+        ).all()
+        if len(candidates) != 1:
+            return None
+        candidate = candidates[0]
+        if item.kind is ExternalMediaKind.EPISODE and not self._episode_hierarchy_is_compatible(
+            item, candidate
+        ):
+            return None
+        return candidate
+
     def _match_by_identifiers(self, item: ExternalMediaItem) -> MediaItem | None:
         identities = tuple(
             (identifier.provider, identifier.external_id) for identifier in item.identifiers
@@ -470,7 +567,7 @@ class MediaPersistenceService:
                     self.source_id, season_external_id
                 )
                 if season_reference is None:
-                    return None
+                    return self._match_cross_source_episode(item)
                 candidates = self.work.session.scalars(
                     select(MediaItem)
                     .join(SourceMediaRef, SourceMediaRef.media_item_id == MediaItem.id)
@@ -507,6 +604,41 @@ class MediaPersistenceService:
         ):
             return None
         return matched
+
+    def _match_cross_source_episode(self, item: ExternalMediaItem) -> MediaItem | None:
+        """Safely reconcile an episode when its source hierarchy IDs were replaced."""
+        assert item.show_title is not None
+        season = aliased(MediaItem)
+        show = aliased(MediaItem)
+        candidates = self.work.session.scalars(
+            select(MediaItem)
+            .join(season, MediaItem.parent_id == season.id)
+            .join(show, season.parent_id == show.id)
+            .join(SourceMediaRef, SourceMediaRef.media_item_id == MediaItem.id)
+            .where(
+                MediaItem.kind == MediaKind.EPISODE,
+                MediaItem.season_number == item.season_number,
+                MediaItem.episode_number == item.episode_number,
+                season.kind == MediaKind.SEASON,
+                season.season_number == item.season_number,
+                show.kind == MediaKind.SHOW,
+                SourceMediaRef.source_id != self.source_id,
+                SourceMediaRef.available.is_(True),
+            )
+            .distinct()
+        ).all()
+        normalized_show = _normalized_title(item.show_title)
+        candidates = [
+            episode
+            for episode in candidates
+            if episode.parent_id is not None
+            and (candidate_season := self.work.media_items.get(episode.parent_id)) is not None
+            and candidate_season.parent_id is not None
+            and (candidate_show := self.work.media_items.get(candidate_season.parent_id))
+            is not None
+            and _normalized_title(candidate_show.title) == normalized_show
+        ]
+        return candidates[0] if len(candidates) == 1 else None
 
     def _episode_hierarchy_is_compatible(self, item: ExternalMediaItem, episode: MediaItem) -> bool:
         """Return whether a provider-id match can safely share this hierarchy."""
@@ -552,7 +684,8 @@ class MediaPersistenceService:
             raise ValueError("Matched episode has an incompatible historical hierarchy.")
         assert item.show_external_id is not None
         assert item.show_title is not None
-        show.title = item.show_title
+        if self._canonical_source_may_update(show.id):
+            show.title = item.show_title
         self._bind_existing_container(
             show,
             external_id=item.show_external_id,
@@ -712,6 +845,17 @@ class MediaPersistenceService:
                 item for item in candidates if _normalized_title(item.title) == normalized_title
             ]
         if len(candidates) > 1:
+            owned_ids = set(
+                self.work.session.scalars(
+                    select(SourceMediaRef.media_item_id).where(
+                        SourceMediaRef.source_id == self.source_id,
+                        SourceMediaRef.media_item_id.in_([item.id for item in candidates]),
+                    )
+                )
+            )
+            owned = [item for item in candidates if item.id in owned_ids]
+            if len(owned) == 1:
+                return owned[0]
             raise ValueError("Historical hierarchy has more than one matching container.")
         return candidates[0] if candidates else None
 
@@ -747,13 +891,29 @@ class MediaPersistenceService:
     def _sync_identifier_values(
         self, media_item_id: int, identifiers: tuple[ExternalIdentifier, ...]
     ) -> None:
+        media = self.work.media_items.get(media_item_id)
+        if media is not None and media.manual_match_tmdb_id:
+            return
+        identity_key = (
+            media_item_id,
+            tuple(sorted((value.provider, value.external_id) for value in identifiers)),
+        )
+        if not identifiers or identity_key in self._synced_identifier_sets:
+            return
+        existing = self.work.session.scalars(
+            select(MediaIdentifier).where(MediaIdentifier.media_item_id == media_item_id)
+        ).all()
         for identifier in identifiers:
-            if (
-                self.work.media_identifiers.by_identity(
-                    media_item_id, identifier.provider, identifier.external_id
-                )
-                is None
-            ):
+            previous = [value for value in existing if value.provider == identifier.provider]
+            conflicting = [
+                value for value in previous if value.external_id != identifier.external_id
+            ]
+            if conflicting and identifier.provider in {"tmdb", "imdb", "tvdb", "musicbrainz"}:
+                if not self._canonical_source_may_update(media_item_id):
+                    continue
+                for value in conflicting:
+                    self.work.session.delete(value)
+            if not any(value.external_id == identifier.external_id for value in previous):
                 self.work.media_identifiers.add(
                     MediaIdentifier(
                         media_item_id=media_item_id,
@@ -761,8 +921,12 @@ class MediaPersistenceService:
                         external_id=identifier.external_id,
                     )
                 )
+        self._synced_identifier_sets.add(identity_key)
 
     def _sync_image(self, media_item_id: int, image_type: str, source_path: str | None) -> None:
+        media = self.work.media_items.get(media_item_id)
+        if media is not None and media.manual_match_tmdb_id:
+            return
         if source_path is None:
             return
         image = self.work.media_images.by_item_and_type(media_item_id, image_type)
@@ -792,6 +956,9 @@ class MediaPersistenceService:
             image.cached_at = None
 
     def _canonical_source_may_update(self, media_item_id: int) -> bool:
+        media = self.work.media_items.get(media_item_id) if media_item_id else None
+        if media is not None and media.manual_match_tmdb_id:
+            return False
         source = self.work.sources.get(self.source_id)
         if source is None or source.connector_type is ConnectorType.PLEX:
             return True
@@ -840,6 +1007,9 @@ class MediaPersistenceService:
                 self.work.session.delete(link)
 
     def _merge_genres(self, media_item_id: int, names: tuple[str, ...]) -> None:
+        media = self.work.media_items.get(media_item_id)
+        if media is not None and media.manual_match_tmdb_id:
+            return
         existing_names = tuple(
             self.work.session.scalars(
                 select(Genre.name)
@@ -856,7 +1026,7 @@ class MediaPersistenceService:
             return False
         state = self.work.watch_states.by_item_and_source(media_item_id, self.source_id)
         incoming_count = item.view_count or 0
-        incoming_completed = item.completed if item.completed is not None else incoming_count > 0
+        incoming_completed = bool(item.completed or incoming_count > 0)
         regression = state is not None and incoming_count < state.view_count
         preserved_count = max(state.view_count if state else 0, incoming_count)
         if state is None:
@@ -869,8 +1039,10 @@ class MediaPersistenceService:
             )
             self.work.watch_states.add(state)
         state.view_count = preserved_count
-        state.last_watched_at = item.last_viewed_at or state.last_watched_at
-        state.completed = incoming_completed
+        state.last_watched_at = _latest_datetime(item.last_viewed_at, state.last_watched_at)
+        state.last_played_at = _latest_datetime(item.last_viewed_at, state.last_played_at)
+        # A server's unplayed toggle must not erase a historical completion.
+        state.completed = bool(state.completed or incoming_completed)
         state.progress_ms = item.view_offset_ms
         state.observed_at = observed_at
         return regression

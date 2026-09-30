@@ -16,6 +16,7 @@ class LocalEnrichmentExecutor:
         self._lock = threading.Lock()
         self._active = False
         self._cancel = threading.Event()
+        self._cancelled = False
         self._progress: dict[str, int] = {
             "processed": 0,
             "updated": 0,
@@ -35,6 +36,7 @@ class LocalEnrichmentExecutor:
         with self._lock:
             return {
                 "active": self._active,
+                "cancelled": self._cancelled,
                 **self._progress,
                 "failure_details": "\n".join(self._failure_details),
             }
@@ -45,6 +47,7 @@ class LocalEnrichmentExecutor:
                 return False
             self._active = True
             self._cancel.clear()
+            self._cancelled = False
             self._progress = {
                 "processed": 0,
                 "updated": 0,
@@ -71,6 +74,14 @@ class LocalEnrichmentExecutor:
                         failure=report_failure,
                         cancelled=self._cancel.is_set,
                     )
+            except Exception as error:
+                self._app.logger.exception("metadata enrichment worker failed")
+                with self._lock:
+                    self._progress["failed"] += 1
+                    self._progress["percent"] = 100
+                    self._failure_details.append(
+                        f"operação=atualizar metadados · erro={type(error).__name__}: {error}"
+                    )
             finally:
                 with self._lock:
                     self._active = False
@@ -83,6 +94,7 @@ class LocalEnrichmentExecutor:
             if not self._active:
                 return False
             self._cancel.set()
+            self._cancelled = True
             return True
 
 

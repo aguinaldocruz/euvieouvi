@@ -1,0 +1,1 @@
+{% if run %}{{ format_datetime(run.finished_at or run.started_at or run.created_at) }}<br>{{ 'Agendada' if run.trigger.value=='scheduled' else 'Manual/API' }} · {{ format_elapsed(run.started_at or run.created_at, run.finished_at) }}{% else %}—{% endif %}

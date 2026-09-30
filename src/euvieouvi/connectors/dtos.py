@@ -98,11 +98,13 @@ class ExternalMediaItem:
     kind: ExternalMediaKind
     title: str
     external_key: str | None = None
+    file_paths: tuple[str, ...] = ()
     original_title: str | None = None
     year: int | None = None
     show_external_id: str | None = None
     show_title: str | None = None
     show_identifiers: tuple[ExternalIdentifier, ...] = ()
+    show_metadata: ExternalMediaItem | None = None
     season_external_id: str | None = None
     season_number: int | None = None
     episode_number: int | None = None
@@ -211,6 +213,14 @@ class PageRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class PageIssue:
+    external_id: str | None
+    title: str | None
+    category: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class Page[ItemT]:
     items: tuple[ItemT, ...]
     start: int
@@ -218,6 +228,7 @@ class Page[ItemT]:
     total_size: int | None = None
     next_start: int | None = None
     next_cursor: str | None = None
+    issues: tuple[PageIssue, ...] = ()
 
     def __post_init__(self) -> None:
         if self.start < 0 or self.size < 0:
@@ -229,8 +240,6 @@ class Page[ItemT]:
 
     @property
     def has_more(self) -> bool:
-        if not self.items:
-            return False
         return self.next_start is not None or self.next_cursor is not None
 
 

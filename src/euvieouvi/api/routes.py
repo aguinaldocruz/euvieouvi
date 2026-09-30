@@ -40,6 +40,7 @@ from euvieouvi.connectors.errors import (
     ConnectorResponseError,
     ConnectorTimeoutError,
 )
+from euvieouvi.credentials import decrypt_text, encrypt_text
 from euvieouvi.database.enums import (
     ConnectorType,
     LibraryMediaType,
@@ -61,7 +62,7 @@ from euvieouvi.database.models import (
     WatchState,
 )
 from euvieouvi.errors import AppError
-from euvieouvi.extensions import db
+from euvieouvi.extensions import db, new_session
 from euvieouvi.sync.discovery import LibraryDiscoveryService
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
 from euvieouvi.sync.source_identity import (
@@ -106,7 +107,7 @@ def sources_create() -> tuple[Response, int]:
         connector_type=ConnectorType.PLEX,
         name=string(data["name"], "name", maximum=255),
         base_url=http_url(data["base_url"]),
-        secret=string(data["secret"], "secret", maximum=4096),
+        secret=encrypt_text(string(data["secret"], "secret", maximum=4096)),
         enabled=boolean(data.get("enabled", True), "enabled"),
     )
     db.session.add(entity)
@@ -150,15 +151,15 @@ def sources_patch(source_id: int) -> Response:
         if data["secret"] is None:
             raise validation_error("secret", "null_not_allowed", "Secret cannot be null.")
         secret = string(data["secret"], "secret", maximum=4096)
-        reset_incremental = reset_incremental or entity.secret != secret
-        entity.secret = secret
+        reset_incremental = reset_incremental or decrypt_text(entity.secret) != secret
+        entity.secret = encrypt_text(secret)
         entity.last_connection_status = None
     if "enabled" in data:
         enabled = boolean(data["enabled"], "enabled")
         reset_incremental = reset_incremental or entity.enabled != enabled
         entity.enabled = enabled
     if reset_incremental:
-        reset_source_incremental_state(db.session, entity.id)
+        reset_source_incremental_state(db.session(), entity.id)
     try:
         db.session.commit()
     except IntegrityError as error:
@@ -181,7 +182,7 @@ def source_connection_test(source_id: int) -> Response:
     entity.last_connection_test_at = datetime.now().astimezone()
     entity.last_connection_status = "succeeded"
     apply_server_identity(
-        db.session,
+        db.session(),
         entity,
         info.server_identifier,
         now=entity.last_connection_test_at,
@@ -206,7 +207,7 @@ def library_discovery(source_id: int) -> Response:
         raise _not_found("Source")
     connector = connector_for(entity)
     try:
-        count = LibraryDiscoveryService(lambda: db.session(), connector).discover(source_id)
+        count = LibraryDiscoveryService(new_session, connector).discover(source_id)
     except SyncSourceUnavailableError as error:
         raise AppError("source_unavailable", str(error), 409) from error
     except ConnectorError as error:
@@ -268,7 +269,7 @@ def libraries_patch(library_id: int) -> Response:
     if enabled and not entity.available:
         raise AppError("library_unavailable", "An unavailable library cannot be enabled.", 409)
     if entity.enabled != enabled:
-        reset_library_incremental_state(db.session, entity.id)
+        reset_library_incremental_state(db.session(), entity.id)
     entity.enabled = enabled
     db.session.commit()
     return jsonify(library(entity))

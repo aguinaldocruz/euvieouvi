@@ -13,6 +13,7 @@ from euvieouvi.connectors.dtos import (
     ExternalMediaKind,
     ExternalWatchEvent,
 )
+from euvieouvi.connectors.embedded_identifiers import parse_embedded_identifiers
 from euvieouvi.connectors.errors import ConnectorResponseError
 
 _LIBRARY_TYPES = {
@@ -40,13 +41,24 @@ def map_libraries(items: list[Any]) -> list[ExternalLibrary]:
     return result
 
 
+def _file_paths(raw: dict[str, Any]) -> tuple[str, ...]:
+    paths = {_text(raw.get("Path"))}
+    sources = raw.get("MediaSources")
+    if isinstance(sources, list):
+        paths.update(_text(source.get("Path")) for source in sources if isinstance(source, dict))
+    return tuple(sorted(path for path in paths if path))
+
+
 def map_item(raw: dict[str, Any], library_id: str) -> ExternalMediaItem:
     raw_type = _text(raw.get("Type"))
     kind = _ITEM_TYPES.get(raw_type or "")
     if kind is None:
         raise ConnectorResponseError("Unsupported Jellyfin media type.")
     external_id = _required(raw, "Id")
-    title = _required(raw, "Name")
+    raw_title = _required(raw, "Name")
+    embedded = parse_embedded_identifiers(raw_title)
+    video_item = kind in {ExternalMediaKind.MOVIE, ExternalMediaKind.EPISODE}
+    title = embedded.title if video_item else raw_title
     raw_user_data = raw.get("UserData")
     user_data: dict[str, Any] = raw_user_data if isinstance(raw_user_data, dict) else {}
     view_count = _integer(user_data.get("PlayCount"))
@@ -60,6 +72,10 @@ def map_item(raw: dict[str, Any], library_id: str) -> ExternalMediaItem:
         value for value in raw.get("Genres", []) if isinstance(value, str) and value.strip()
     )
     series_id = _text(raw.get("SeriesId"))
+    raw_series_title = _text(raw.get("SeriesName"))
+    embedded_series = (
+        parse_embedded_identifiers(raw_series_title) if raw_series_title is not None else None
+    )
     season_id = _text(raw.get("SeasonId"))
     album_id = _text(raw.get("AlbumId"))
     album_artists = raw.get("AlbumArtists")
@@ -75,14 +91,16 @@ def map_item(raw: dict[str, Any], library_id: str) -> ExternalMediaItem:
     return ExternalMediaItem(
         external_id=external_id,
         external_key=f"/Items/{external_id}",
+        file_paths=_file_paths(raw),
         library_external_id=library_id,
         kind=kind,
         title=title,
         original_title=_text(raw.get("OriginalTitle")),
         year=_integer(raw.get("ProductionYear")),
         show_external_id=series_id,
-        show_title=_text(raw.get("SeriesName")),
-        show_identifiers=_identifiers(raw.get("_SeriesProviderIds")),
+        show_title=embedded_series.title if embedded_series is not None else None,
+        show_identifiers=_identifiers(raw.get("_SeriesProviderIds"))
+        or (embedded_series.identifiers if embedded_series is not None else ()),
         season_external_id=season_id,
         season_number=_integer(raw.get("ParentIndexNumber")),
         episode_number=_integer(raw.get("IndexNumber")),
@@ -113,7 +131,8 @@ def map_item(raw: dict[str, Any], library_id: str) -> ExternalMediaItem:
         album_thumb_path=(
             f"/Items/{season_id or album_id}/Images/Primary" if season_id or album_id else None
         ),
-        identifiers=_identifiers(raw.get("ProviderIds")),
+        identifiers=_identifiers(raw.get("ProviderIds"))
+        or (embedded.identifiers if video_item else ()),
         updated_at=_timestamp(raw.get("DateLastSaved") or raw.get("DateLastMediaAdded")),
         last_viewed_at=_timestamp(user_data.get("LastPlayedDate")),
         view_count=view_count,

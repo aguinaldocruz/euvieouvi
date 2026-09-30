@@ -691,6 +691,119 @@ def test_show_provider_identifier_reuses_historical_container(app: Flask) -> Non
         )
 
 
+def test_new_parent_identifiers_proactively_merge_localized_cross_source_show(
+    app: Flask,
+) -> None:
+    with app.app_context():
+        plex_id, library_ids = seed_source(second_library=True)
+        movie_library = db.session.get(Library, library_ids[0])
+        plex_library = db.session.get(Library, library_ids[1])
+        assert movie_library is not None and plex_library is not None
+        movie_library.enabled = False
+        jellyfin = Source(
+            connector_type=ConnectorType.JELLYFIN,
+            name="Fixture Jellyfin",
+            base_url="http://jellyfin.local",
+            secret='{"api_key":"key","user_id":"user"}',
+            enabled=True,
+        )
+        db.session.add(jellyfin)
+        db.session.flush()
+        jellyfin_library = Library(
+            source_id=jellyfin.id,
+            external_id="jf-shows",
+            name="Shows",
+            media_type=LibraryMediaType.SHOW,
+            enabled=True,
+            available=True,
+            discovered_at=NOW,
+            last_seen_at=NOW,
+        )
+        plex_show = MediaItem(kind=MediaKind.SHOW, title="Neagley")
+        jellyfin_show = MediaItem(kind=MediaKind.SHOW, title="Neagley: Detetive Particular")
+        db.session.add_all([jellyfin_library, plex_show, jellyfin_show])
+        db.session.flush()
+        plex_season = MediaItem(
+            kind=MediaKind.SEASON,
+            title="Season 1",
+            parent_id=plex_show.id,
+            season_number=1,
+        )
+        db.session.add(plex_season)
+        db.session.flush()
+        db.session.add_all(
+            [
+                SourceMediaRef(
+                    source_id=plex_id,
+                    library_id=plex_library.id,
+                    media_item_id=plex_show.id,
+                    external_id="plex-show",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+                SourceMediaRef(
+                    source_id=plex_id,
+                    library_id=plex_library.id,
+                    media_item_id=plex_season.id,
+                    external_id="plex-season-1",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+                SourceMediaRef(
+                    source_id=jellyfin.id,
+                    library_id=jellyfin_library.id,
+                    media_item_id=jellyfin_show.id,
+                    external_id="jf-show",
+                    last_seen_at=NOW,
+                    available=True,
+                ),
+                MediaIdentifier(
+                    media_item_id=jellyfin_show.id,
+                    provider="tvdb",
+                    external_id="455064",
+                ),
+            ]
+        )
+        db.session.commit()
+        plex_show_id = plex_show.id
+        jellyfin_show_id = jellyfin_show.id
+
+        incoming = ExternalMediaItem(
+            external_id="plex-episode-1",
+            library_external_id="shows",
+            kind=ExternalMediaKind.EPISODE,
+            title="L Train",
+            show_external_id="plex-show",
+            show_title="Neagley",
+            show_identifiers=(ExternalIdentifier("tvdb", "455064"),),
+            season_external_id="plex-season-1",
+            season_number=1,
+            episode_number=1,
+        )
+        result = orchestrator(FixtureConnector({"shows": (incoming,)})).run(plex_id)
+
+        assert result.status is SyncStatus.SUCCEEDED
+        db.session.expire_all()
+        assert db.session.get(MediaItem, jellyfin_show_id) is None
+        assert db.session.get(MediaItem, plex_show_id) is not None
+        jellyfin_reference = db.session.scalar(
+            select(SourceMediaRef).where(SourceMediaRef.external_id == "jf-show")
+        )
+        assert jellyfin_reference is not None
+        assert jellyfin_reference.media_item_id == plex_show_id
+        assert db.session.scalar(
+            select(MediaIdentifier).where(
+                MediaIdentifier.media_item_id == plex_show_id,
+                MediaIdentifier.provider == "tvdb",
+                MediaIdentifier.external_id == "455064",
+            )
+        )
+        repair = db.session.scalar(
+            select(SyncError).where(SyncError.category == "catalog_auto_reconciled")
+        )
+        assert repair is not None
+
+
 def test_same_source_duplicate_episode_identifier_keeps_both_hierarchies(app: Flask) -> None:
     with app.app_context():
         source_id, library_ids = seed_source(second_library=True)
@@ -986,6 +1099,15 @@ def test_noncritical_item_failure_is_logged_and_checkpoint_advances(app: Flask) 
         assert checkpoint.last_successful_run_id == result.run_id
         run = db.session.get(SyncRun, result.run_id)
         assert run is not None and run.items_failed == 1
+        assert run.summary == "Synchronization completed with 1 item warnings."
+        detail = db.session.scalar(
+            select(SyncRunLibrary).where(
+                SyncRunLibrary.sync_run_id == result.run_id,
+                SyncRunLibrary.library_id == library_ids[1],
+            )
+        )
+        assert detail is not None
+        assert detail.message == "Completed with 1 item warnings."
 
 
 def test_snapshot_does_not_change_when_selection_changes_mid_run(app: Flask) -> None:
@@ -1040,14 +1162,14 @@ def test_lower_view_count_is_not_applied_silently(app: Flask) -> None:
         ).run(source_id)
 
         state = db.session.scalar(select(WatchState))
-        assert state is not None and state.view_count == 4 and state.completed is False
+        assert state is not None and state.view_count == 4 and state.completed is True
 
         third = orchestrator(FixtureConnector({"movies": (movie("1", view_count=0),)})).run(
             source_id
         )
         db.session.expire_all()
         state = db.session.scalar(select(WatchState))
-        assert state is not None and state.view_count == 4 and state.completed is False
+        assert state is not None and state.view_count == 4 and state.completed is True
         assert db.session.scalar(select(func.count()).select_from(WatchEvent)) == 1
         warning = db.session.scalar(
             select(SyncError).where(

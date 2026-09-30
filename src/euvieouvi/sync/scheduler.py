@@ -11,8 +11,8 @@ from flask import Flask
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from euvieouvi.database.enums import SyncTrigger
-from euvieouvi.database.models import Setting
+from euvieouvi.database.enums import SyncStatus, SyncTrigger
+from euvieouvi.database.models import JobRun, Setting
 from euvieouvi.extensions import db
 from euvieouvi.sync.errors import SyncAlreadyRunningError, SyncSourceUnavailableError
 
@@ -39,14 +39,31 @@ def _scheduler_loop(app: Flask, stop: threading.Event) -> None:
         from euvieouvi.sync.async_tasks import recover_async_tasks
         from euvieouvi.sync.jobs import reconcile_interrupted_job_runs
 
-        interrupted = reconcile_interrupted_job_runs()
-        recovered_tasks = recover_async_tasks()
-        if interrupted:
-            app.logger.warning(
-                "reconciled interrupted job runs", extra={"count": interrupted}
-            )
-        if recovered_tasks:
-            app.logger.warning("recovered interrupted asynchronous tasks")
+        try:
+            interrupted = reconcile_interrupted_job_runs()
+            if interrupted:
+                app.logger.warning("reconciled interrupted job runs", extra={"count": interrupted})
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("interrupted job recovery failed")
+        try:
+            from euvieouvi.sync.job_worker import wake_job_worker
+
+            wake_job_worker(app)
+        except Exception:
+            app.logger.exception("durable job worker startup failed")
+        try:
+            recovered_tasks = recover_async_tasks()
+            if recovered_tasks:
+                app.logger.warning("recovered interrupted asynchronous tasks")
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("asynchronous task recovery failed")
+        try:
+            _record_operational_sample()
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("initial operational sample failed")
     while not stop.wait(_POLL_SECONDS):
         with app.app_context():
             try:
@@ -54,6 +71,15 @@ def _scheduler_loop(app: Flask, stop: threading.Event) -> None:
             except SQLAlchemyError:
                 db.session.rollback()
                 app.logger.exception("scheduled jobs check failed")
+            except Exception:
+                db.session.rollback()
+                app.logger.exception("scheduled job dispatch failed")
+            try:
+                from euvieouvi.sync.job_worker import wake_job_worker
+
+                wake_job_worker(app)
+            except Exception:
+                app.logger.exception("durable job worker wake-up failed")
             try:
                 from euvieouvi.sync.async_tasks import get_async_task_executor
 
@@ -61,6 +87,9 @@ def _scheduler_loop(app: Flask, stop: threading.Event) -> None:
             except SQLAlchemyError:
                 db.session.rollback()
                 app.logger.exception("asynchronous task queue check failed")
+            except Exception:
+                db.session.rollback()
+                app.logger.exception("asynchronous task queue dispatch failed")
             try:
                 _backup_if_due(app)
             except SQLAlchemyError:
@@ -68,6 +97,20 @@ def _scheduler_loop(app: Flask, stop: threading.Event) -> None:
                 app.logger.exception("scheduled backup check failed")
             except Exception:
                 app.logger.exception("scheduled backup failed")
+            try:
+                _record_operational_sample()
+            except SQLAlchemyError:
+                db.session.rollback()
+                app.logger.exception("operational sample failed")
+            except Exception:
+                db.session.rollback()
+                app.logger.exception("unexpected operational sample failure")
+
+
+def _record_operational_sample() -> bool:
+    from euvieouvi.observability import record_operational_sample
+
+    return record_operational_sample()
 
 
 def _run_jobs_if_due(app: Flask, *, now: datetime | None = None) -> bool:
@@ -100,20 +143,41 @@ def _run_jobs_if_due(app: Flask, *, now: datetime | None = None) -> bool:
         last_key = setting_key(job.id, "last_date")
         if values.get(last_key) == local_date:
             continue
+        already_active = db.session.scalar(
+            select(JobRun.id).where(
+                JobRun.job_id == job.id,
+                JobRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]),
+            )
+        )
+        if already_active is not None:
+            _mark_job_schedule_handled(last_key, local_date)
+            continue
         try:
             started = submit_job(app, job.id, trigger=SyncTrigger.SCHEDULED)
         except (SyncAlreadyRunningError, SyncSourceUnavailableError):
             continue
         if not started:
+            raced_active = db.session.scalar(
+                select(JobRun.id).where(
+                    JobRun.job_id == job.id,
+                    JobRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]),
+                )
+            )
+            if raced_active is not None:
+                _mark_job_schedule_handled(last_key, local_date)
             continue
-        setting = db.session.get(Setting, last_key)
-        if setting is None:
-            db.session.add(Setting(key=last_key, value=local_date))
-        else:
-            setting.value = local_date
-        db.session.commit()
+        _mark_job_schedule_handled(last_key, local_date)
         queued = True
     return queued
+
+
+def _mark_job_schedule_handled(key: str, local_date: str) -> None:
+    setting = db.session.get(Setting, key)
+    if setting is None:
+        db.session.add(Setting(key=key, value=local_date))
+    else:
+        setting.value = local_date
+    db.session.commit()
 
 
 def _backup_if_due(app: Flask, *, now: datetime | None = None) -> bool:

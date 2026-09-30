@@ -72,6 +72,25 @@ def test_mark_watched_uses_scrobble_endpoint() -> None:
     make_connector(httpx.MockTransport(route)).mark_watched("101")
 
 
+def test_targeted_item_lookup_uses_plex_library_identity() -> None:
+    def route(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/library/metadata/101"
+        return httpx.Response(
+            200,
+            content=(
+                b'<MediaContainer size="1">'
+                b'<Video ratingKey="101" librarySectionID="5" type="movie" title="Arrival" />'
+                b"</MediaContainer>"
+            ),
+            request=request,
+        )
+
+    item = make_connector(httpx.MockTransport(route)).get_media_item("101")
+
+    assert item.external_id == "101"
+    assert item.library_external_id == "5"
+
+
 def test_connection_and_library_discovery_map_neutral_values() -> None:
     def route(request: httpx.Request) -> httpx.Response:
         name = "connection.xml" if request.url.path == "/" else "libraries.xml"
@@ -125,7 +144,23 @@ def test_movie_page_maps_ids_state_and_defensive_pagination() -> None:
 
 
 def test_episode_json_maps_hierarchy_and_optional_fields() -> None:
+    requests: list[str] = []
+
     def route(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/library/metadata/7000":
+            assert request.url.params["includeGuids"] == "1"
+            return httpx.Response(
+                200,
+                content=(
+                    b'<MediaContainer size="1"><Directory ratingKey="7000" '
+                    b'librarySectionID="2" type="show" title="Futurama" year="1999" '
+                    b'thumb="/show/thumb">'
+                    b'<Guid id="imdb://tt0149460"/><Guid id="tvdb://73871"/>'
+                    b"</Directory></MediaContainer>"
+                ),
+                request=request,
+            )
         assert request.url.params["type"] == "4"
         return httpx.Response(
             200,
@@ -142,8 +177,61 @@ def test_episode_json_maps_hierarchy_and_optional_fields() -> None:
     episode = page.items[0]
     assert episode.show_external_id == "7000"
     assert episode.show_title == "Futurama"
+    assert episode.show_metadata is not None
+    assert episode.show_metadata.year == 1999
+    assert episode.show_metadata.thumb_path == "/show/thumb"
     assert (episode.season_number, episode.episode_number) == (1, 1)
+    assert [(value.provider, value.external_id) for value in episode.show_identifiers] == [
+        ("imdb", "tt0149460"),
+        ("tvdb", "73871"),
+    ]
+    assert requests == ["/library/sections/2/all", "/library/metadata/7000"]
     assert page.has_more is False
+
+
+def test_episode_pages_cache_and_batch_parent_show_identifier_lookups() -> None:
+    parent_requests = 0
+
+    def route(request: httpx.Request) -> httpx.Response:
+        nonlocal parent_requests
+        if request.url.path.startswith("/library/metadata/"):
+            parent_requests += 1
+            assert request.url.path == "/library/metadata/7000,7001"
+            return httpx.Response(
+                200,
+                content=(
+                    b'<MediaContainer size="2">'
+                    b'<Directory ratingKey="7000" librarySectionID="2" type="show" '
+                    b'title="First"><Guid id="tvdb://1"/></Directory>'
+                    b'<Directory ratingKey="7001" librarySectionID="2" type="show" '
+                    b'title="Second"><Guid id="tvdb://2"/></Directory>'
+                    b"</MediaContainer>"
+                ),
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            content=(
+                b'<MediaContainer size="2" totalSize="2" offset="0">'
+                b'<Video ratingKey="9000" type="episode" title="One" '
+                b'grandparentRatingKey="7000" grandparentTitle="First" '
+                b'parentRatingKey="8000" parentIndex="1" index="1"/>'
+                b'<Video ratingKey="9001" type="episode" title="Two" '
+                b'grandparentRatingKey="7001" grandparentTitle="Second" '
+                b'parentRatingKey="8001" parentIndex="1" index="1"/>'
+                b"</MediaContainer>"
+            ),
+            request=request,
+        )
+
+    connector = make_connector(httpx.MockTransport(route))
+    reference = ExternalLibraryRef("2", ExternalLibraryType.SHOW)
+    first = connector.get_media_page(reference, ExternalMediaKind.EPISODE, PageRequest(size=200))
+    second = connector.get_media_page(reference, ExternalMediaKind.EPISODE, PageRequest(size=200))
+
+    assert [item.show_identifiers[0].external_id for item in first.items] == ["1", "2"]
+    assert [item.show_identifiers[0].external_id for item in second.items] == ["1", "2"]
+    assert parent_requests == 1
 
 
 def test_track_page_maps_artist_album_and_track_hierarchy() -> None:
@@ -311,6 +399,30 @@ def test_empty_page_and_incorrect_total_do_not_control_termination_alone() -> No
     assert first.has_more is True
     assert last.items == ()
     assert last.has_more is False
+
+
+def test_invalid_media_is_reported_without_breaking_raw_pagination() -> None:
+    content = (
+        b'<MediaContainer offset="0" totalSize="3">'
+        b'<Video ratingKey="bad" type="movie" title="Broken" year="-1" />'
+        b'<Video ratingKey="1" type="movie" title="Valid" />'
+        b"</MediaContainer>"
+    )
+
+    def route(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=content, request=request)
+
+    page = make_connector(httpx.MockTransport(route)).get_media_page(
+        ExternalLibraryRef("1", ExternalLibraryType.MOVIE),
+        ExternalMediaKind.MOVIE,
+        PageRequest(size=2),
+    )
+
+    assert [item.external_id for item in page.items] == ["1"]
+    assert page.next_start == 2
+    assert len(page.issues) == 1
+    assert page.issues[0].external_id == "bad"
+    assert "Broken" in page.issues[0].message
 
 
 def test_repeated_or_wrong_offset_page_is_rejected() -> None:

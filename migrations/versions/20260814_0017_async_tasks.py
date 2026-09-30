@@ -31,9 +31,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("dedup_key", name="uq_async_tasks_dedup"),
     )
-    op.create_index(
-        "ix_async_tasks_due", "async_tasks", ["status", "next_attempt_at", "id"]
-    )
+    op.create_index("ix_async_tasks_due", "async_tasks", ["status", "next_attempt_at", "id"])
     op.execute("UPDATE settings SET value = 'false' WHERE key = 'watch_sync.pending'")
 
 

@@ -6,7 +6,12 @@ from typing import Any
 from flask import Blueprint, Flask, current_app
 
 from euvieouvi.database.schema import database_status
+from euvieouvi.database.sqlite_runtime import (
+    sqlite_runtime_is_safe,
+    sqlite_runtime_version,
+)
 from euvieouvi.instance import instance_path_is_ready
+from euvieouvi.observability import operational_snapshot
 
 health_blueprint = Blueprint("health", __name__)
 
@@ -30,9 +35,17 @@ def ready() -> tuple[dict[str, Any], int]:
             "persistence": "ready" if persistence_ready else "unavailable",
             "database": "ready" if database_ready else "unavailable",
             "schema": "current" if schema_ready else "outdated",
+            "sqlite_runtime": sqlite_runtime_version(),
+            "sqlite_runtime_safe": sqlite_runtime_is_safe(),
         },
         200 if is_ready else 503,
     )
+
+
+@health_blueprint.get("/health/metrics")
+def metrics() -> dict[str, Any]:
+    """Expose non-secret operational queue and connector telemetry."""
+    return operational_snapshot()
 
 
 def register_health_routes(app: Flask) -> None:

@@ -9,6 +9,7 @@ from euvieouvi.database.enums import SyncStatus
 from euvieouvi.database.models import SyncRun
 from euvieouvi.database.unit_of_work import UnitOfWork
 from euvieouvi.extensions import db
+from euvieouvi.sync.catalog_projection import ensure_catalog_projection
 
 
 def reconcile_orphaned_runs() -> int:
@@ -44,10 +45,24 @@ def reconcile_orphaned_runs() -> int:
 
 
 def main() -> None:
-    app = create_app()
+    app = create_app({"DISABLE_BACKGROUND_SERVICES": True})
     with app.app_context():
         count = reconcile_orphaned_runs()
+        from euvieouvi.sync.job_worker import recover_job_runs
+
+        recovered_jobs = recover_job_runs(force=True)
+        projection = ensure_catalog_projection(db.session())
+        if projection is not None:
+            db.session.commit()
     print(f"euvieouvi reconciled orphaned sync runs: {count}", flush=True)
+    print(f"euvieouvi recovered durable job runs: {recovered_jobs}", flush=True)
+    if projection is not None:
+        print(
+            f"euvieouvi updated catalog projection ({projection.mode}): "
+            f"{projection.entries} entries, {projection.members} members, "
+            f"{projection.duplicate_groups} duplicate groups",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":
