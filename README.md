@@ -22,13 +22,20 @@ history and records for media that later disappears from a server.
 - Plex and Jellyfin webhooks, recent-event retention, and currently playing media.
 - Durable asynchronous webhook updates with idempotency, automatic retries, restart recovery,
   periodic/page-activity draining, and a manual queue job.
-- Independent manual/daily jobs with persistent progress, results, and rotated logs. Available
-  Plex/Jellyfin artwork is proxied on demand without exposing tokens; the image job preserves only
-  artwork for catalog items no longer available on either server.
+- Independent manual/daily jobs use a database-backed queue with leases, heartbeats, bounded
+  retries, persistent cancellation, restart recovery through synchronization checkpoints, live
+  progress, results, and rotated logs. Available
+  Plex/Jellyfin artwork is proxied on demand without exposing tokens. Episodes and tracks inherit
+  available series/season or album/artist artwork without duplicating files. If server artwork is absent
+  or returns 404, the image job uses exact TMDB/IMDb/TheTVDB/MusicBrainz identifiers to recover and
+  cache a safe TMDB or Cover Art Archive fallback; it never guesses by title.
 - Optional TMDB, MusicBrainz, and Cover Art Archive enrichment using exact identifiers.
 - Local artwork cache and historical retention for unavailable media.
-- Light and dark themes, responsive server-rendered UI, and REST API.
+- Persistent English/Brazilian Portuguese selection (English by default), light/dark themes,
+  responsive server-rendered UI, and REST API.
 - Scheduled/manual SQLite backups, restore, download, and retention controls.
+- Docker ships SQLite 3.53.4 with the upstream WAL-reset correction; production startup rejects
+  older affected runtimes. Operational samples and alerts are retained for 30 days.
 - Offline import of a complete Trakt history export.
 
 ## Architecture
@@ -56,26 +63,24 @@ security boundaries, and documentation map.
 - Docker Engine and Docker Compose v2 for the recommended deployment; or
 - Python 3.12+, Git, and a virtual environment for development.
 
-Plex requires a server URL and token. Jellyfin requires a server URL, API key, and the ID or
-name of the user whose playback state is synchronized.
+Plex requires a server URL and authorization through Plex's hosted sign-in page; euvieouvi never
+receives the Plex password. Jellyfin uses its Quick Connect device flow; approve the displayed code
+from an already signed-in Jellyfin client. euvieouvi receives a user access token, never the account
+password. Existing administrative API-key configurations remain usable until reconnected.
 
 ## Quick start with Docker Compose
 
+Copy the Compose sample and start the service; no `.env` file or application secret is required:
+
 ```bash
-cp .env.example .env
 cp compose.yaml.sample compose.yaml
-```
-
-Set a long random `EUVIEOUVI_SECRET_KEY` in `.env`, then start the service:
-
-```bash
 docker compose up -d --build
 docker compose ps
 docker compose logs -f euvieouvi
 ```
 
-Open <http://localhost:8000>, configure Plex and/or Jellyfin, discover libraries, enable the
-desired libraries, and start a synchronization.
+Open <http://localhost:8000/setup>, save the operational settings, configure Plex and/or Jellyfin,
+discover libraries, enable the desired libraries, and start a synchronization.
 
 The named `euvieouvi_data` volume survives container recreation. The entrypoint validates the
 configuration, applies database migrations, and reconciles interrupted sync runs before
@@ -85,6 +90,8 @@ Operational endpoints:
 
 - `GET /health/live` — process liveness, without dependency details.
 - `GET /health/ready` — database connectivity and migration readiness.
+- `GET /health/metrics` — non-secret queue, worker, connector, storage, alert, and 24-hour
+  historical telemetry.
 - `/api/v1` — REST API described by [openapi.yaml](openapi.yaml).
 
 For upgrades, backups, restore, reverse-proxy guidance, and troubleshooting, read the
@@ -92,22 +99,14 @@ For upgrades, backups, restore, reverse-proxy guidance, and troubleshooting, rea
 
 ## Configuration
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `EUVIEOUVI_ENV` | `production` | `development`, `production`, or `testing`. |
-| `EUVIEOUVI_SECRET_KEY` | none | Required Flask/session secret. Use a long random value. |
-| `EUVIEOUVI_HOST` | `0.0.0.0` | Bind address. |
-| `EUVIEOUVI_PORT` | `8000` | Application port, 1–65535. |
-| `EUVIEOUVI_INSTANCE_PATH` | `./instance` (`/data` in Docker) | Database, image cache, job logs, and backup directory. |
-| `EUVIEOUVI_DATABASE_URI` | SQLite in the instance path | SQLite URI; other databases are unsupported. |
-| `EUVIEOUVI_LOG_LEVEL` | `INFO` | `CRITICAL`, `ERROR`, `WARNING`, `INFO`, or `DEBUG`. |
-| `EUVIEOUVI_TIMEZONE` | `America/Sao_Paulo` | Valid IANA timezone used by schedules and display. |
-| `EUVIEOUVI_GUNICORN_THREADS` | `4` | Gunicorn threads, 1–32. |
-| `EUVIEOUVI_SQLITE_BUSY_TIMEOUT_MS` | `5000` | SQLite busy timeout, 1–60000 ms. |
+Log level, time zone, HTTP thread count, and SQLite busy timeout are stored in SQLite and edited at
+`/setup`. Connector settings, schedules, retention, metadata, and appearance are also stored
+through the web interface. The Docker-internal port (`8000`) and `/data` mount remain in Compose
+because both must exist before SQLite can be opened.
 
-Connector credentials, schedules, webhook tokens, retention rules, and metadata settings are
-stored through the web interface. Secrets are write-only in the API and defensively redacted
-from logs.
+Connector credentials, metadata tokens, and webhook tokens are encrypted at rest. The application
+creates `/data/.euvieouvi-master.key` with mode `0600`; preserve this file securely with database
+backups. Secrets remain write-only in the API and are defensively redacted from logs.
 
 ## Development
 
@@ -117,7 +116,6 @@ python3 -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 export EUVIEOUVI_ENV=development
-export EUVIEOUVI_SECRET_KEY=local-development-only
 flask --app euvieouvi:create_app run
 ```
 
@@ -125,7 +123,6 @@ Windows PowerShell:
 
 ```powershell
 $env:EUVIEOUVI_ENV = "development"
-$env:EUVIEOUVI_SECRET_KEY = "local-development-only"
 flask --app euvieouvi:create_app run
 ```
 
@@ -152,7 +149,9 @@ The Webhooks settings page generates secret URLs for each configured connector.
   notifications. A stop with `PlayedToCompletion=true` creates a completion.
 
 Completions received before the item is cataloged are retained and reconciled after the next
-sync. The page keeps the configured number of recent completed webhook events.
+sync. Progress updates arriving while an older update is being processed are retained as the
+next durable queue item rather than overwritten. The page keeps the configured number of recent
+completed webhook events.
 
 ## API
 

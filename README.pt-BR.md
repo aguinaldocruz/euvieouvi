@@ -19,11 +19,22 @@ mídias que posteriormente deixam de existir no servidor.
 - Histórico concluído com servidor de origem e forma de aquisição (`webhook` ou
   `sincronização`).
 - Webhooks Plex/Jellyfin, retenção de eventos recentes e mídia em reprodução.
-- Jobs manuais/diários independentes com progresso, resultado e logs rotativos persistentes.
+- Fila durável para atualizações instantâneas, com idempotência, tentativas automáticas,
+  recuperação após reinício, drenagem periódica/por atividade e job manual.
+- Jobs manuais/diários independentes usam fila no banco, lease, heartbeat, tentativas limitadas,
+  cancelamento persistente, recuperação por checkpoints após reinício, progresso ao vivo,
+  resultado e logs rotativos.
+- Capas existentes no Plex/Jellyfin são servidas por proxy sob demanda sem expor tokens. Episódios e
+  faixas herdam capas disponíveis da série/temporada ou álbum/artista sem duplicar arquivos. Quando a
+  imagem não existe ou retorna 404, o job usa IDs exatos TMDB/IMDb/TheTVDB/MusicBrainz para buscar e
+  armazenar um fallback seguro do TMDB ou Cover Art Archive; nunca tenta adivinhar pelo título.
 - Enriquecimento opcional via TMDB, MusicBrainz e Cover Art Archive por IDs exatos.
 - Cache local de imagens e preservação histórica de mídias indisponíveis.
-- Temas claro/escuro, interface responsiva renderizada no servidor e API REST.
+- Idioma inglês/português brasileiro persistente (inglês por padrão), temas claro/escuro,
+  interface responsiva renderizada no servidor e API REST.
 - Backup SQLite manual/agendado, restauração, download e retenção.
+- O Docker inclui SQLite 3.53.4 com a correção upstream do reset de WAL; o startup em produção
+  rejeita runtimes antigos afetados. Amostras e alertas operacionais são mantidos por 30 dias.
 - Importação offline do histórico completo exportado pelo Trakt.
 
 ## Arquitetura
@@ -49,26 +60,24 @@ dados, API, limites de segurança e índice completo.
 - Docker Engine e Docker Compose v2 para implantação recomendada; ou
 - Python 3.12+, Git e ambiente virtual para desenvolvimento.
 
-O Plex exige URL e token. O Jellyfin exige URL, API key e ID ou nome do usuário cujo estado de
-reprodução será sincronizado.
+O Plex exige URL e autorização pela página hospedada de login do Plex; o euvieouvi nunca recebe a
+senha Plex. O Jellyfin usa o fluxo de dispositivo Quick Connect: aprove o código exibido em um
+cliente Jellyfin já autenticado. O euvieouvi recebe um token do usuário, nunca a senha da conta.
+Configurações antigas com API key administrativa continuam funcionando até serem reconectadas.
 
 ## Início rápido com Docker Compose
 
+Copie o exemplo Compose e inicie; nenhum `.env` ou segredo da aplicação é necessário:
+
 ```bash
-cp .env.example .env
 cp compose.yaml.sample compose.yaml
-```
-
-Defina um `EUVIEOUVI_SECRET_KEY` longo e aleatório em `.env` e inicie:
-
-```bash
 docker compose up -d --build
 docker compose ps
 docker compose logs -f euvieouvi
 ```
 
-Abra <http://localhost:8000>, configure Plex e/ou Jellyfin, descubra as bibliotecas, habilite as
-desejadas e inicie uma sincronização.
+Abra <http://localhost:8000/setup>, salve os parâmetros operacionais, configure Plex e/ou
+Jellyfin, descubra as bibliotecas, habilite as desejadas e inicie uma sincronização.
 
 O volume nomeado `euvieouvi_data` sobrevive à recriação do contêiner. O entrypoint valida a
 configuração, aplica migrações e reconcilia sincronizações interrompidas antes do Gunicorn.
@@ -77,6 +86,8 @@ Endpoints operacionais:
 
 - `GET /health/live` — vida do processo, sem detalhes de dependências.
 - `GET /health/ready` — conectividade do banco e estado das migrações.
+- `GET /health/metrics` — telemetria sem segredos de filas, worker, conectores, armazenamento,
+  alertas e histórico de 24 horas.
 - `/api/v1` — API REST descrita por [openapi.yaml](openapi.yaml).
 
 Para atualização, backup, restauração, proxy reverso e diagnóstico, consulte o
@@ -84,21 +95,14 @@ Para atualização, backup, restauração, proxy reverso e diagnóstico, consult
 
 ## Configuração
 
-| Variável | Padrão | Descrição |
-| --- | --- | --- |
-| `EUVIEOUVI_ENV` | `production` | `development`, `production` ou `testing`. |
-| `EUVIEOUVI_SECRET_KEY` | nenhum | Segredo obrigatório de sessão/Flask; use valor longo e aleatório. |
-| `EUVIEOUVI_HOST` | `0.0.0.0` | Endereço de escuta. |
-| `EUVIEOUVI_PORT` | `8000` | Porta, 1–65535. |
-| `EUVIEOUVI_INSTANCE_PATH` | `./instance` (`/data` no Docker) | Diretório do banco, imagens, logs de jobs e backups. |
-| `EUVIEOUVI_DATABASE_URI` | SQLite no diretório instance | URI SQLite; outros bancos não são suportados. |
-| `EUVIEOUVI_LOG_LEVEL` | `INFO` | `CRITICAL`, `ERROR`, `WARNING`, `INFO` ou `DEBUG`. |
-| `EUVIEOUVI_TIMEZONE` | `America/Sao_Paulo` | Fuso IANA usado na exibição e agendamentos. |
-| `EUVIEOUVI_GUNICORN_THREADS` | `4` | Threads do Gunicorn, 1–32. |
-| `EUVIEOUVI_SQLITE_BUSY_TIMEOUT_MS` | `5000` | Timeout SQLite, 1–60000 ms. |
+Nível de log, fuso horário, quantidade de threads HTTP e timeout do SQLite ficam no banco e são
+editados em `/setup`. Conectores, agendamentos, retenções, metadados e aparência também são
+configurados pela interface. A porta interna Docker (`8000`) e o volume `/data` permanecem no
+Compose porque precisam existir antes da abertura do SQLite.
 
-Credenciais, agendamentos, tokens de webhook, retenções e metadados são configurados pela
-interface. Segredos são somente escrita na API e removidos defensivamente dos logs.
+Credenciais dos conectores e tokens de metadados/webhook são criptografados em repouso. A
+aplicação cria `/data/.euvieouvi-master.key` com modo `0600`; preserve esse arquivo com os backups
+do banco. Segredos continuam somente escrita na API e removidos defensivamente dos logs.
 
 ## Desenvolvimento
 
@@ -108,7 +112,6 @@ python3 -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 export EUVIEOUVI_ENV=development
-export EUVIEOUVI_SECRET_KEY=apenas-desenvolvimento-local
 flask --app euvieouvi:create_app run
 ```
 
@@ -116,7 +119,6 @@ Windows PowerShell:
 
 ```powershell
 $env:EUVIEOUVI_ENV = "development"
-$env:EUVIEOUVI_SECRET_KEY = "apenas-desenvolvimento-local"
 flask --app euvieouvi:create_app run
 ```
 
@@ -142,7 +144,9 @@ A página de Webhooks gera URLs secretas para cada conector.
   parada com `PlayedToCompletion=true` cria uma conclusão.
 
 Conclusões recebidas antes de a mídia existir no catálogo são preservadas e reconciliadas na
-próxima sincronização. A página mantém a quantidade configurada de conclusões recentes.
+próxima sincronização. Progresso recebido enquanto uma atualização anterior está sendo processada
+é preservado como próximo item da fila durável, sem sobrescrita. A página mantém a quantidade
+configurada de conclusões recentes.
 
 ## API
 

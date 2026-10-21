@@ -25,8 +25,10 @@ A aplicação possui cinco áreas principais:
    checkpoint e reconciliados. Um bloqueio global permite uma sincronização ativa.
 4. **Persistência:** models e repositories armazenam mídia canônica, referências por fonte,
    imagens, eventos concluídos, estado agregado, auditoria de sync e configurações.
-5. **Serviços de fundo:** executores locais cuidam de sync/enriquecimento; o scheduler cuida de
-   sincronizações e backups diários.
+5. **Serviços de fundo:** um worker apoiado pelo banco reivindica jobs independentes com lease
+   renovável e delega o trabalho limitado aos executores locais. A fila durável de atualizações
+   instantâneas é separada; o scheduler enfileira jobs diários no máximo uma vez por dia e
+   persiste amostras limitadas da saúde operacional.
 
 A identidade prefere IDs exatos de provedores. O fallback exato por título/ano é restrito a
 filmes com uma única correspondência entre fontes. As referências continuam separadas, permitindo
@@ -35,6 +37,23 @@ que uma mídia exiba disponibilidade no Plex e Jellyfin.
 Eventos assistidos representam ocorrências concluídas conhecidas. Estados representam o agregado
 mais recente informado pelo servidor. Eventos de webhook registram entrega/reprodução atual e são
 reconciliados ao histórico quando surge uma referência correspondente.
+
+Jobs mantêm progresso, resultado, logs rotativos e uma execução global ativa. Leases vencidos são
+reenfileirados com backoff limitado; a intenção de cancelamento é confirmada antes de ser enviada
+ao executor. A ordem preferida é catálogo Plex, assistidos Plex → Jellyfin, assistidos Jellyfin →
+Plex e, por último, catálogo Jellyfin. A
+reconciliação de assistidos usa checkpoints incrementais com baselines completas periódicas;
+mudanças de identidade/configuração de servidor invalidam esses checkpoints.
+
+O runtime Docker fixa SQLite 3.53.4 e a produção recusa runtimes antigos afetados pela condição de
+corrida no reset do WAL. O histórico operacional fica retido por 30 dias e é exposto como resumo
+de 24 horas, sem credenciais nem payloads de tarefas.
+
+Parâmetros operacionais ficam no SQLite e são editados em `/setup`. Credenciais persistidas de
+conectores e provedores usam criptografia autenticada. O Docker cria a chave mestra em `/data`; a
+porta interna fixa e o volume de dados permanecem como infraestrutura de bootstrap porque são
+necessários antes da abertura do banco. A autorização da conta Plex usa o fluxo PIN hospedado pelo
+Plex e nunca armazena a senha Plex.
 
 ## Registros históricos de arquitetura
 

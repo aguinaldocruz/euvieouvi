@@ -25,8 +25,10 @@ The application has five major runtime areas:
    and reconciled. A global lock permits one active synchronization.
 4. **Persistence:** SQLAlchemy models and repositories store canonical media, per-source
    references, images, completed events, aggregate watch state, sync audit data, and settings.
-5. **Background services:** local executors handle sync/enrichment; the scheduler handles daily
-   source syncs and backups.
+5. **Background services:** a database-backed worker claims independent jobs with a renewable
+   lease and delegates their bounded work to local executors. The durable instant-update queue is
+   separate; the scheduler enqueues enabled daily jobs at most once per local day and persists
+   bounded operational health samples.
 
 Media identity prefers exact provider identifiers. Exact title/year fallback is restricted to
 movies when one unique match exists across sources. Source references remain separate, allowing
@@ -35,6 +37,23 @@ one catalog item to show both Plex and Jellyfin availability.
 Watch events represent known completed occurrences. Watch states represent the latest aggregate
 reported by a server. Webhook events record recent delivery/current playback and are reconciled
 into watch history when a matching source reference becomes available.
+
+Jobs keep persistent progress, results, rotated execution logs, and one globally active execution.
+Expired leases are requeued with bounded backoff; cancellation intent is committed before being
+forwarded to the executor. The preferred media pipeline order is Plex catalog, Plex → Jellyfin
+watched state, Jellyfin → Plex watched state, then Jellyfin catalog.
+The watched-state reconciler uses incremental checkpoints plus periodic full baselines; source
+identity/configuration changes invalidate those checkpoints.
+
+The Docker runtime pins SQLite 3.53.4 and production refuses older runtimes affected by the
+WAL-reset race. Operational health history is retained for 30 days and exposed as a 24-hour
+summary without credentials or task payloads.
+
+Operational settings are stored in SQLite and edited at `/setup`. Persisted connector and provider
+credentials use authenticated encryption. Docker creates the master key in `/data`; the fixed
+internal port and data mount remain bootstrap infrastructure because they are needed before the
+database can be opened. Plex account authorization uses Plex's hosted PIN flow and never stores a
+Plex password.
 
 ## Historical architecture records
 
